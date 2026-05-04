@@ -1,4 +1,8 @@
-# Aegis dev policy. Three sections: filesystem, network, functions.
+# Aegis dev policy. The format is portable across agentic systems —
+# see docs/AGENT_POLICY_SPEC.md. The Aegis runtime enforces the
+# filesystem, network, environment, subprocess, and functions sections
+# directly; database/deployment sections (if present) are read by host
+# integrations that handle those surfaces.
 #
 # Path patterns are gitignore-style: relative patterns match anywhere
 # under the policy root, absolute patterns match literal absolute paths,
@@ -7,7 +11,9 @@
 # Top-level: which capabilities prompt the human before firing.
 # (Must come before any [section] to be parsed at the root.)
 confirm_per_call = [
-    "fs_write",
+    "fs.write",
+    "fs.delete",
+    "subprocess.exec",
 ]
 
 [filesystem]
@@ -46,15 +52,49 @@ deny_ips = [
     "169.254.169.254",  # cloud metadata service
 ]
 
+[environment]
+# Read named env vars only. Default deny.
+allow_vars = [
+    "USER",
+    "HOME",
+    "PATH",
+    "GITHUB_REPOSITORY",
+]
+deny_vars = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+]
+
+[subprocess]
+# Per-command allowlist. Matches argv[0] basename. Empty = no commands.
+allow_commands = [
+    "git",
+    "echo",
+]
+deny_commands = [
+    "rm",
+    "dd",
+    "mkfs",
+    "shred",
+    "curl",
+    "wget",
+    "ssh",
+    "nc",
+    "sudo",
+]
+
 [functions]
-# Capabilities (and any non-capability builtins called by the script
-# could be listed here too — currently only capability calls are checked
-# by the verifier).
+# Capabilities the script may call. Names are the dotted form
+# (`fs.read`, `net.http_get`, etc.); the verifier rejects pre-execution
+# if a script references a capability not in this list.
 allow = [
-    "fs_read",
-    "fs_write",
-    "net_http_get",
+    "fs.read",
+    "fs.write",
+    "fs.delete",
+    "net.http_get",
+    "subprocess.exec",
+    "env.read",
 ]
-deny = [
-    "subprocess_exec",  # belt-and-suspenders even though it's not in allow
-]
+deny = []

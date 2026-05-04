@@ -33,14 +33,50 @@ pub mod verifier;
 pub use audit::{AuditEvent, AuditSink, JsonlAuditSink, NullAuditSink};
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
 
-/// All known capability names. Slice 1 ships these four. Each maps to a
-/// Starlark builtin of the same name (snake_case).
-pub const CAPABILITIES: &[&str] = &[
-    "fs_read",
-    "fs_write",
-    "subprocess_exec",
-    "net_http_get",
+/// A capability the runtime knows how to enforce.
+///
+/// `name` is the dotted form policy files and audit events use
+/// (`fs.read`). `raw` is the underscored name of the Starlark global
+/// the host actually registers (`_aegis_fs_read`); a small prelude
+/// binds the dotted access onto these via Starlark `struct()` values.
+#[derive(Copy, Clone, Debug)]
+pub struct Capability {
+    pub name: &'static str,
+    pub raw: &'static str,
+}
+
+pub const CAPABILITIES: &[Capability] = &[
+    Capability { name: "fs.read", raw: "_aegis_fs_read" },
+    Capability { name: "fs.write", raw: "_aegis_fs_write" },
+    Capability { name: "fs.delete", raw: "_aegis_fs_delete" },
+    Capability { name: "net.http_get", raw: "_aegis_net_http_get" },
+    Capability { name: "net.http_post", raw: "_aegis_net_http_post" },
+    Capability { name: "subprocess.exec", raw: "_aegis_subprocess_exec" },
+    Capability { name: "env.read", raw: "_aegis_env_read" },
 ];
+
+/// Starlark prelude evaluated before the user script. Binds the dotted
+/// namespaces (`fs.read`, `net.http_get`, etc.) onto the underscored
+/// builtins the host registers as globals. Two-stage eval (prelude AST,
+/// then user AST) keeps user-source line numbers correct in error
+/// traces.
+const PRELUDE: &str = "\
+fs = struct(\n\
+    read = _aegis_fs_read,\n\
+    write = _aegis_fs_write,\n\
+    delete = _aegis_fs_delete,\n\
+)\n\
+net = struct(\n\
+    http_get = _aegis_net_http_get,\n\
+    http_post = _aegis_net_http_post,\n\
+)\n\
+subprocess = struct(\n\
+    exec = _aegis_subprocess_exec,\n\
+)\n\
+env = struct(\n\
+    read = _aegis_env_read,\n\
+)\n\
+";
 
 #[derive(Debug, Error)]
 pub enum AegisError {
@@ -120,6 +156,8 @@ impl Runner {
         verifier::verify(source, &self.policy)
             .map_err(|e| AegisError::Verifier(e.to_string()))?;
 
+        let prelude_ast = AstModule::parse("__aegis_prelude__", PRELUDE.to_string(), &Dialect::Standard)
+            .map_err(|e| AegisError::Other(format!("prelude parse failed: {e}")))?;
         let ast = AstModule::parse(script_name, source.to_string(), &Dialect::Standard)
             .map_err(|e| AegisError::Starlark(e.to_string()))?;
 
@@ -150,9 +188,13 @@ impl Runner {
             let mut eval = Evaluator::new(&module);
             eval.set_print_handler(&print_handler);
             eval.extra = Some(&ctx);
-            eval.eval_module(ast, &globals)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            eval.eval_module(prelude_ast, &globals)
+                .map_err(|e| format!("aegis prelude failed: {e}"))
+                .and_then(|_| {
+                    eval.eval_module(ast, &globals)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
         };
         let captured = ctx.captured.borrow_mut().take();
         let printed = ctx.printed.into_inner();
@@ -248,21 +290,28 @@ fn ctx_from_eval<'a, 'v>(eval: &'a Evaluator<'v, '_, '_>) -> anyhow::Result<&'a 
         .ok_or_else(|| anyhow::anyhow!("aegis: wrong context type in evaluator extra slot"))
 }
 
+// ---------------------------------------------------------------------
+// Capability builtins.
+//
+// All effecting builtins live under underscored Starlark names (e.g.
+// `_aegis_fs_read`). The Aegis prelude binds these to the dotted
+// namespaces user code actually writes (`fs.read`, `net.http_get`, ...).
+// Audit events and policy checks always speak the dotted form.
+// ---------------------------------------------------------------------
+
 #[starlark_module]
 fn register_builtins(builder: &mut GlobalsBuilder) {
-    /// Read a UTF-8 file. Path is resolved against the policy root.
-    /// Capability: `fs_read`.
-    fn fs_read<'v>(path: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
+    fn _aegis_fs_read<'v>(path: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.next_step();
         match ctx.policy.check_fs_read(Path::new(path)) {
             Ok(resolved) => {
-                ctx.require_confirm("fs_read", format!("read {}", resolved.display()))?;
+                ctx.require_confirm("fs.read", format!("read {}", resolved.display()))?;
                 let result = std::fs::read_to_string(&resolved);
                 ctx.emit(AuditEvent::fs(
                     &ctx.task_id,
                     step,
-                    "fs_read",
+                    "fs.read",
                     &resolved,
                     result.is_ok(),
                     result.as_ref().err().map(|e| e.to_string()),
@@ -274,7 +323,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.emit(AuditEvent::denied(
                     &ctx.task_id,
                     step,
-                    "fs_read",
+                    "fs.read",
                     &format!("path={path}"),
                     &msg,
                 ));
@@ -284,8 +333,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    /// Write a UTF-8 file (truncating). Capability: `fs_write`.
-    fn fs_write<'v>(
+    fn _aegis_fs_write<'v>(
         path: &str,
         content: &str,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -295,7 +343,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         match ctx.policy.check_fs_write(Path::new(path)) {
             Ok(resolved) => {
                 ctx.require_confirm(
-                    "fs_write",
+                    "fs.write",
                     format!("write {} ({} bytes)", resolved.display(), content.len()),
                 )?;
                 if let Some(parent) = resolved.parent() {
@@ -305,7 +353,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.emit(AuditEvent::fs(
                     &ctx.task_id,
                     step,
-                    "fs_write",
+                    "fs.write",
                     &resolved,
                     result.is_ok(),
                     result.as_ref().err().map(|e| e.to_string()),
@@ -318,7 +366,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.emit(AuditEvent::denied(
                     &ctx.task_id,
                     step,
-                    "fs_write",
+                    "fs.write",
                     &format!("path={path}"),
                     &msg,
                 ));
@@ -328,9 +376,43 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    /// Run a subprocess. argv must be a list of strings; no shell, no
-    /// /bin/sh expansion. Capability: `subprocess_exec`.
-    fn subprocess_exec<'v>(
+    fn _aegis_fs_delete<'v>(
+        path: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.next_step();
+        match ctx.policy.check_fs_delete(Path::new(path)) {
+            Ok(resolved) => {
+                ctx.require_confirm("fs.delete", format!("delete {}", resolved.display()))?;
+                let result = std::fs::remove_file(&resolved);
+                ctx.emit(AuditEvent::fs(
+                    &ctx.task_id,
+                    step,
+                    "fs.delete",
+                    &resolved,
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                result?;
+                Ok(NoneType)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "fs.delete",
+                    &format!("path={path}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    fn _aegis_subprocess_exec<'v>(
         argv: UnpackList<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
@@ -338,12 +420,22 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         let step = ctx.next_step();
         let argv = argv.items;
         if argv.is_empty() {
-            return Err(anyhow::anyhow!("subprocess_exec: argv must not be empty"));
+            return Err(anyhow::anyhow!("subprocess.exec: argv must not be empty"));
         }
-        // Slice 1 enforcement is "is the capability allowed at all". Per-command
-        // allowlist (e.g. only `git`, only `npm`) is policy work for Slice 2.
+        if let Err(e) = ctx.policy.check_subprocess_command(&argv[0]) {
+            let msg = e.to_string();
+            ctx.emit(AuditEvent::denied(
+                &ctx.task_id,
+                step,
+                "subprocess.exec",
+                &format!("argv={:?}", argv),
+                &msg,
+            ));
+            ctx.capture(CapturedKind::Policy, &msg);
+            return Err(e.into());
+        }
         let cmd_summary = argv.join(" ");
-        ctx.require_confirm("subprocess_exec", format!("exec: {}", cmd_summary))?;
+        ctx.require_confirm("subprocess.exec", format!("exec: {}", cmd_summary))?;
         let output = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .output();
@@ -362,7 +454,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 if !ok {
                     let err = String::from_utf8_lossy(&out.stderr).to_string();
                     return Err(anyhow::anyhow!(
-                        "subprocess_exec: non-zero exit ({:?}): {}",
+                        "subprocess.exec: non-zero exit ({:?}): {}",
                         out.status.code(),
                         err.trim()
                     ));
@@ -383,8 +475,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    /// HTTP GET. Capability: `net_http_get`.
-    fn net_http_get<'v>(
+    fn _aegis_net_http_get<'v>(
         url: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
@@ -392,7 +483,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         let step = ctx.next_step();
         match ctx.policy.check_http_get(url) {
             Ok(parsed) => {
-                ctx.require_confirm("net_http_get", format!("GET {}", parsed))?;
+                ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = ureq::get(parsed.as_str()).call()?;
                     Ok(resp.into_string()?)
@@ -400,7 +491,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.emit(AuditEvent::http(
                     &ctx.task_id,
                     step,
-                    "net_http_get",
+                    "net.http_get",
                     parsed.as_str(),
                     result.is_ok(),
                     result.as_ref().err().map(|e| e.to_string()),
@@ -412,8 +503,78 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.emit(AuditEvent::denied(
                     &ctx.task_id,
                     step,
-                    "net_http_get",
+                    "net.http_get",
                     &format!("url={url}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    fn _aegis_net_http_post<'v>(
+        url: &str,
+        body: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.next_step();
+        match ctx.policy.check_http_post(url) {
+            Ok(parsed) => {
+                ctx.require_confirm(
+                    "net.http_post",
+                    format!("POST {} ({} bytes)", parsed, body.len()),
+                )?;
+                let result: Result<String, anyhow::Error> = (|| {
+                    let resp = ureq::post(parsed.as_str()).send_string(body)?;
+                    Ok(resp.into_string()?)
+                })();
+                ctx.emit(AuditEvent::http(
+                    &ctx.task_id,
+                    step,
+                    "net.http_post",
+                    parsed.as_str(),
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                result
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "net.http_post",
+                    &format!("url={url}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    fn _aegis_env_read<'v>(
+        name: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.next_step();
+        match ctx.policy.check_env_read(name) {
+            Ok(()) => {
+                ctx.require_confirm("env.read", format!("read env var {name}"))?;
+                let value = std::env::var(name).unwrap_or_default();
+                ctx.emit(AuditEvent::env(&ctx.task_id, step, name, true, None));
+                Ok(value)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "env.read",
+                    &format!("name={name}"),
                     &msg,
                 ));
                 ctx.capture(CapturedKind::Policy, &msg);
@@ -449,11 +610,11 @@ mod tests {
 read_allow = ["/tmp/**", "/var/tmp/**"]
 
 [functions]
-allow = ["fs_read"]
+allow = ["fs.read"]
 "#;
         let runner = runner_for(toml, tmp);
         let path_lit = f.to_string_lossy().replace('\\', "/");
-        let src = format!(r#"x = fs_read("{path_lit}")
+        let src = format!(r#"x = fs.read("{path_lit}")
 print(x)"#);
         let outcome = runner.run("t1", &src, "test.star").unwrap();
         assert_eq!(outcome.printed, vec!["hello aegis".to_string()]);
@@ -467,27 +628,66 @@ write_allow = ["/tmp/**"]
 deny = ["~/.aws/**"]
 
 [functions]
-allow = ["fs_write"]
+allow = ["fs.write"]
 "#;
         let runner = runner_for(toml, PathBuf::from("/work"));
-        let src = r#"fs_write("/etc/passwd", "x")"#;
+        let src = r#"fs.write("/etc/passwd", "x")"#;
         let err = runner.run("t1", src, "test.star").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("policy") || msg.contains("denied") || msg.contains("not in"),
-            "expected policy violation, got: {msg}");
+        assert!(
+            matches!(err, AegisError::Policy(_)),
+            "expected policy violation, got: {err:?}"
+        );
     }
 
     #[test]
     fn function_not_in_allowlist_rejected_pre_execution() {
         let toml = r#"
 [functions]
-allow = ["fs_read"]
+allow = ["fs.read"]
 "#;
         let runner = runner_for(toml, PathBuf::from("/tmp"));
-        // Script calls subprocess_exec, which is not in the allowlist.
-        let src = r#"subprocess_exec(["echo", "hi"])"#;
+        // subprocess.exec is not in the allowlist.
+        let src = r#"subprocess.exec(["echo", "hi"])"#;
         let err = runner.run("t1", src, "test.star").unwrap_err();
         assert!(matches!(err, AegisError::Verifier(_)),
             "expected pre-execution verifier rejection, got: {err:?}");
+    }
+
+    #[test]
+    fn subprocess_command_allowlist_blocks_unknown_command() {
+        let toml = r#"
+[subprocess]
+allow_commands = ["git"]
+
+[functions]
+allow = ["subprocess.exec"]
+"#;
+        let runner = runner_for(toml, PathBuf::from("/tmp"));
+        let src = r#"subprocess.exec(["rm", "-rf", "/tmp"])"#;
+        let err = runner.run("t1", src, "test.star").unwrap_err();
+        assert!(matches!(err, AegisError::Policy(_)),
+            "expected policy violation for unknown command, got: {err:?}");
+    }
+
+    #[test]
+    fn env_read_allowlist() {
+        let toml = r#"
+[environment]
+allow_vars = ["PATH"]
+deny_vars = ["AWS_SECRET_ACCESS_KEY"]
+
+[functions]
+allow = ["env.read"]
+"#;
+        let runner = runner_for(toml, PathBuf::from("/tmp"));
+        let src = r#"
+p = env.read("PATH")
+print("path-prefix:", p[:1])
+"#;
+        runner.run("t1", src, "test.star").unwrap();
+        // denied var
+        let denied_src = r#"env.read("AWS_SECRET_ACCESS_KEY")"#;
+        let err = runner.run("t1", denied_src, "test.star").unwrap_err();
+        assert!(matches!(err, AegisError::Policy(_)));
     }
 }

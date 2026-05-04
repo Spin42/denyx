@@ -33,8 +33,8 @@ pub fn verify(source: &str, policy: &Policy) -> Result<(), VerifierRejection> {
 fn scan_capabilities(source: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for cap in CAPABILITIES {
-        if contains_word(source, cap) {
-            out.insert((*cap).to_string());
+        if contains_word(source, cap.name) || contains_word(source, cap.raw) {
+            out.insert(cap.name.to_string());
         }
     }
     out
@@ -61,8 +61,12 @@ fn contains_word(haystack: &str, word: &str) -> bool {
     false
 }
 
+/// "Capability identifier" boundary: alphanumeric, underscore, or dot.
+/// Treating `.` as part of the token prevents false matches like
+/// `obj.fs.read` matching `fs.read` — the leading `.` is now part of
+/// the identifier context, so the boundary check fails.
 fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
 /// Strip Starlark `# line comments`, `"..."`, `'...'`, `"""..."""`,
@@ -120,10 +124,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn word_boundary() {
-        assert!(contains_word("fs_read(\"x\")", "fs_read"));
-        assert!(!contains_word("my_fs_read(\"x\")", "fs_read"));
-        assert!(!contains_word("fs_read_safe(\"x\")", "fs_read"));
+    fn word_boundary_underscored() {
+        assert!(contains_word("_aegis_fs_read(\"x\")", "_aegis_fs_read"));
+        assert!(!contains_word(
+            "my_aegis_fs_read(\"x\")",
+            "_aegis_fs_read"
+        ));
+        assert!(!contains_word(
+            "_aegis_fs_read_safe(\"x\")",
+            "_aegis_fs_read"
+        ));
+    }
+
+    #[test]
+    fn word_boundary_dotted() {
+        assert!(contains_word("fs.read(\"x\")", "fs.read"));
+        // Leading attribute access (.fs.read) is NOT a top-level fs.read call.
+        assert!(!contains_word("obj.fs.read(\"x\")", "fs.read"));
+        // Trailing attribute access (fs.readme) is NOT fs.read.
+        assert!(!contains_word("fs.readme(\"x\")", "fs.read"));
     }
 
     #[test]

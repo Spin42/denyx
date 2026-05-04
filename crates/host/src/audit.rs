@@ -92,7 +92,7 @@ impl AuditEvent {
             ts: now_iso(),
             task_id: task_id.into(),
             step,
-            capability: "subprocess_exec".into(),
+            capability: "subprocess.exec".into(),
             status: if ok {
                 AuditStatus::Allowed
             } else {
@@ -101,6 +101,30 @@ impl AuditEvent {
             detail: serde_json::json!({
                 "argv": argv,
                 "exit": exit,
+                "error": err,
+            }),
+        }
+    }
+
+    pub fn env(
+        task_id: &str,
+        step: u32,
+        var_name: &str,
+        ok: bool,
+        err: Option<String>,
+    ) -> Self {
+        Self {
+            ts: now_iso(),
+            task_id: task_id.into(),
+            step,
+            capability: "env.read".into(),
+            status: if ok {
+                AuditStatus::Allowed
+            } else {
+                AuditStatus::Errored
+            },
+            detail: serde_json::json!({
+                "name": var_name,
                 "error": err,
             }),
         }

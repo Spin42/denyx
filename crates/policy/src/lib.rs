@@ -30,6 +30,10 @@ pub enum PolicyError {
     },
     #[error("policy denies call to function {name:?}: {reason}")]
     FunctionDenied { name: String, reason: String },
+    #[error("policy denies env var {name:?}: {reason}")]
+    EnvDenied { name: String, reason: String },
+    #[error("policy denies subprocess command {command:?}: {reason}")]
+    CommandDenied { command: String, reason: String },
     #[error("policy file is invalid: {0}")]
     Invalid(String),
 }
@@ -43,6 +47,10 @@ pub struct PolicyFile {
     pub filesystem: FilesystemPolicy,
     #[serde(default)]
     pub network: NetworkPolicy,
+    #[serde(default)]
+    pub environment: EnvironmentPolicy,
+    #[serde(default)]
+    pub subprocess: SubprocessPolicy,
     #[serde(default)]
     pub functions: FunctionPolicy,
     #[serde(default)]
@@ -83,6 +91,29 @@ pub struct FunctionPolicy {
     pub deny: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvironmentPolicy {
+    /// Exact env var names the script may read. Default-deny.
+    #[serde(default)]
+    pub allow_vars: Vec<String>,
+    /// Names that are never readable, even if present in `allow_vars`.
+    /// Belt-and-suspenders against typos that leak credentials.
+    #[serde(default)]
+    pub deny_vars: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SubprocessPolicy {
+    /// Commands the script may exec, matched against the basename of
+    /// argv[0]. Empty means "no commands at all", even if the
+    /// `subprocess.exec` capability is otherwise allowed.
+    #[serde(default)]
+    pub allow_commands: Vec<String>,
+    /// Commands that are never permitted; deny wins over allow.
+    #[serde(default)]
+    pub deny_commands: Vec<String>,
+}
+
 impl PolicyFile {
     pub fn from_toml_str(s: &str) -> Result<Self> {
         toml::from_str(s).context("parse policy TOML")
@@ -103,6 +134,10 @@ pub struct Policy {
     net_post_hosts: HostMatcher,
     net_deny_hosts: HostMatcher,
     net_deny_ips: Vec<String>,
+    env_allow: Vec<String>,
+    env_deny: Vec<String>,
+    subprocess_allow: Vec<String>,
+    subprocess_deny: Vec<String>,
     fn_allow: Vec<String>,
     fn_deny: Vec<String>,
     confirm_per_call: Vec<String>,
@@ -136,6 +171,10 @@ impl Policy {
         let net_post_hosts = HostMatcher::build(&file.network.http_post_allow)?;
         let net_deny_hosts = HostMatcher::build(&file.network.deny_hosts)?;
         let net_deny_ips = file.network.deny_ips.clone();
+        let env_allow = file.environment.allow_vars.clone();
+        let env_deny = file.environment.deny_vars.clone();
+        let subprocess_allow = file.subprocess.allow_commands.clone();
+        let subprocess_deny = file.subprocess.deny_commands.clone();
         let fn_allow = file.functions.allow.clone();
         let fn_deny = file.functions.deny.clone();
         let confirm_per_call = file.confirm_per_call.clone();
@@ -150,6 +189,10 @@ impl Policy {
             net_post_hosts,
             net_deny_hosts,
             net_deny_ips,
+            env_allow,
+            env_deny,
+            subprocess_allow,
+            subprocess_deny,
             fn_allow,
             fn_deny,
             confirm_per_call,
@@ -261,6 +304,54 @@ impl Policy {
             });
         }
         Ok(parsed)
+    }
+
+    pub fn check_env_read(&self, name: &str) -> Result<(), PolicyError> {
+        if self.env_deny.iter().any(|n| n == name) {
+            return Err(PolicyError::EnvDenied {
+                name: name.to_string(),
+                reason: "matches [environment].deny_vars".into(),
+            });
+        }
+        if !self.env_allow.iter().any(|n| n == name) {
+            return Err(PolicyError::EnvDenied {
+                name: name.to_string(),
+                reason: "not in [environment].allow_vars".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Match argv[0] against the subprocess command policy. Both lists
+    /// match against the *basename* of argv[0] (so "/usr/bin/git" and
+    /// "git" both match "git"). Deny wins. Empty allowlist means "no
+    /// commands at all".
+    pub fn check_subprocess_command(&self, argv0: &str) -> Result<(), PolicyError> {
+        let basename = std::path::Path::new(argv0)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(argv0);
+        if self
+            .subprocess_deny
+            .iter()
+            .any(|c| c == basename || c == argv0)
+        {
+            return Err(PolicyError::CommandDenied {
+                command: argv0.to_string(),
+                reason: "matches [subprocess].deny_commands".into(),
+            });
+        }
+        if self
+            .subprocess_allow
+            .iter()
+            .any(|c| c == basename || c == argv0)
+        {
+            return Ok(());
+        }
+        Err(PolicyError::CommandDenied {
+            command: argv0.to_string(),
+            reason: "not in [subprocess].allow_commands".into(),
+        })
     }
 
     /// Snapshot of the underlying file for audit log provenance.
@@ -482,5 +573,59 @@ deny = []
         assert!(p.check_http_get("https://registry.npmjs.org/foo").is_ok());
         assert!(p.check_http_get("https://evil.example.com/").is_err());
         assert!(p.check_http_get("https://169.254.169.254/").is_err());
+    }
+
+    fn full_policy() -> Policy {
+        let toml = r#"
+[environment]
+allow_vars = ["PATH", "USER"]
+deny_vars = ["AWS_SECRET_ACCESS_KEY"]
+
+[subprocess]
+allow_commands = ["git", "/usr/local/bin/npm"]
+deny_commands = ["rm", "dd", "shred"]
+
+[functions]
+allow = ["env.read", "subprocess.exec"]
+"#;
+        let file = PolicyFile::from_toml_str(toml).unwrap();
+        Policy::from_file(file, PathBuf::from("/work")).unwrap()
+    }
+
+    #[test]
+    fn env_allow_and_deny() {
+        let p = full_policy();
+        assert!(p.check_env_read("PATH").is_ok());
+        assert!(p.check_env_read("USER").is_ok());
+        assert!(p.check_env_read("HOME").is_err()); // not in allow_vars
+        assert!(p.check_env_read("AWS_SECRET_ACCESS_KEY").is_err()); // explicit deny
+    }
+
+    #[test]
+    fn subprocess_command_allow_basename() {
+        let p = full_policy();
+        // bare command name in allow
+        assert!(p.check_subprocess_command("git").is_ok());
+        // /usr/bin/git matches because basename match
+        assert!(p.check_subprocess_command("/usr/bin/git").is_ok());
+        // explicit absolute path in allow
+        assert!(p.check_subprocess_command("/usr/local/bin/npm").is_ok());
+        // basename of /usr/bin/npm is "npm" which is NOT in allow (only "/usr/local/bin/npm" is)
+        assert!(p.check_subprocess_command("/usr/bin/npm").is_err());
+    }
+
+    #[test]
+    fn subprocess_command_deny_wins() {
+        let p = full_policy();
+        assert!(p.check_subprocess_command("rm").is_err());
+        assert!(p.check_subprocess_command("/bin/rm").is_err()); // basename
+        assert!(p.check_subprocess_command("dd").is_err());
+    }
+
+    #[test]
+    fn subprocess_unknown_command_denied() {
+        let p = full_policy();
+        assert!(p.check_subprocess_command("curl").is_err());
+        assert!(p.check_subprocess_command("ssh").is_err());
     }
 }
