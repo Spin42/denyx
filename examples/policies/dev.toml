@@ -1,0 +1,60 @@
+# Aegis dev policy. Three sections: filesystem, network, functions.
+#
+# Path patterns are gitignore-style: relative patterns match anywhere
+# under the policy root, absolute patterns match literal absolute paths,
+# `~/...` expands to $HOME.
+
+# Top-level: which capabilities prompt the human before firing.
+# (Must come before any [section] to be parsed at the root.)
+confirm_per_call = [
+    "fs_write",
+]
+
+[filesystem]
+read_allow = [
+    "/tmp/aegis_demo/**",
+    "examples/**",
+    "/etc/hostname",
+]
+write_allow = [
+    "/tmp/aegis_demo/**",
+]
+delete_allow = [
+    "/tmp/aegis_demo/**",
+]
+# Deny wins over allow. Belt-and-suspenders against symlink/typo bugs.
+deny = [
+    "~/.aws/**",
+    "~/.ssh/**",
+    "~/.config/**",
+    ".env",
+    "**/secrets/**",
+    "/etc/passwd",
+    "/etc/shadow",
+]
+
+[network]
+http_get_allow = [
+    "api.github.com",
+    "*.npmjs.org",
+]
+http_post_allow = []
+deny_hosts = [
+    "evil-exfil.example.com",
+]
+deny_ips = [
+    "169.254.169.254",  # cloud metadata service
+]
+
+[functions]
+# Capabilities (and any non-capability builtins called by the script
+# could be listed here too — currently only capability calls are checked
+# by the verifier).
+allow = [
+    "fs_read",
+    "fs_write",
+    "net_http_get",
+]
+deny = [
+    "subprocess_exec",  # belt-and-suspenders even though it's not in allow
+]
