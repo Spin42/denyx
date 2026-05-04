@@ -201,6 +201,7 @@ class Result:
     verify_passed: bool
     verify_reason: str
     error: str = ""
+    retries_used: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -957,40 +958,141 @@ def build_system_prompt(task: Task, ollama_host: str, k: int = 4) -> str:
     )
 
 
-def evaluate_one(client: McpClient, model: str, ollama_host: str, task: Task, show_script: bool) -> Result:
+def is_retryable_error(output_text: str) -> bool:
+    """Decide whether an error message represents a fixable code-level
+    issue (parse error, verifier rejection, eval crash) vs an intended
+    policy denial that the model SHOULD NOT try to circumvent.
+
+    Policy violations and confirm denials are part of the expected
+    outcome on `expect=denied` tasks; retrying them would either
+    succeed in a different way (bad — defeats the test) or just
+    repeat the same denial (waste).
+    """
+    head = output_text.lstrip()
+    if head.startswith("policy violation"):
+        return False
+    if "confirm hook denied" in head:
+        return False
+    # Everything else (starlark error, verifier rejected, runtime
+    # crashes) is a code-level issue the model can plausibly fix.
+    return True
+
+
+def call_ollama_chat(
+    model: str, host: str, messages: list[dict[str, str]], timeout: float = 240
+) -> str:
+    """Like call_ollama but takes a raw messages list, so we can carry
+    a system+user+assistant+user history across a retry."""
+    req = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.0, "num_ctx": 8192},
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"{host}/api/chat",
+        data=req,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as resp:
+        body = json.loads(resp.read())
+    return body["message"]["content"]
+
+
+def build_retry_message(error_text: str, task_description: str) -> str:
+    """Tight, prescriptive retry prompt. Surfaces the exact runtime
+    error and reminds the model of the most-frequent fixes."""
+    # Truncate very long Starlark traces so the model focuses on the
+    # diagnostic, not the noise.
+    snippet = error_text.strip()
+    if len(snippet) > 600:
+        snippet = snippet[:597] + "..."
+    return (
+        "Your previous Starlark program produced this error from the "
+        "Aegis runtime:\n\n"
+        f"{snippet}\n\n"
+        "Common fixes:\n"
+        "  - `for` / `if` at column 0 → wrap them inside a `def helper(): ...` and call the def.\n"
+        "  - `import json` (or any import) → DELETE the line; json is pre-loaded.\n"
+        "  - f-strings `f\"x={y}\"` → use `\"x=\" + str(y)` or `\"x={}\".format(y)`.\n"
+        "  - `|` between calls (shell-pipe syntax) → use SEPARATE statements; assign one call's result to a variable, pass it to the next.\n"
+        "  - `try`/`except` → DELETE; let errors propagate.\n"
+        "  - `+=` on dict values → use `d[k] = d[k] + 1` instead.\n\n"
+        "Rewrite the WHOLE program. Output ONLY the corrected Starlark "
+        "code, starting at column 0. No commentary, no markdown fences.\n\n"
+        f"Original task: {task_description}"
+    )
+
+
+def evaluate_one(
+    client: McpClient,
+    model: str,
+    ollama_host: str,
+    task: Task,
+    show_script: bool,
+    max_retries: int = 1,
+) -> Result:
     if task.setup:
         task.setup()
     t0 = time.time()
+    retries_used = 0
+
     try:
         prompt = build_system_prompt(task, ollama_host)
-        raw = call_ollama(model, ollama_host, prompt, task.description)
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": task.description},
+        ]
+        raw = call_ollama_chat(model, ollama_host, messages)
     except Exception as e:
         return Result(
-            task=task,
-            script="",
-            mcp_response={},
-            is_error=True,
-            output_text="",
+            task=task, script="", mcp_response={}, is_error=True, output_text="",
             duration_ms=int((time.time() - t0) * 1000),
-            verify_passed=False,
-            verify_reason="ollama call failed",
-            error=str(e),
+            verify_passed=False, verify_reason="ollama call failed", error=str(e),
         )
 
     script = strip_fences(raw)
+    resp = client.aegis_run(script, task_id=task.name)
+    result_obj = resp.get("result", {})
+    is_error = bool(result_obj.get("isError", False))
+    content = result_obj.get("content", [{}])
+    output_text = content[0].get("text", "") if content else ""
+
+    # Retry loop: if the error is a code-level issue (parse error,
+    # verifier rejection, eval crash) feed the diagnostic back and
+    # let the model fix it. Skip retries for intended policy denials.
+    while retries_used < max_retries and is_error and is_retryable_error(output_text):
+        retries_used += 1
+        retry_msg = build_retry_message(output_text, task.description)
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({"role": "user", "content": retry_msg})
+        try:
+            raw = call_ollama_chat(model, ollama_host, messages)
+        except Exception as e:
+            return Result(
+                task=task, script=script, mcp_response=resp, is_error=True,
+                output_text=output_text,
+                duration_ms=int((time.time() - t0) * 1000),
+                verify_passed=False, verify_reason=f"retry ollama call failed: {e}",
+                retries_used=retries_used,
+            )
+        script = strip_fences(raw)
+        resp = client.aegis_run(script, task_id=f"{task.name}-r{retries_used}")
+        result_obj = resp.get("result", {})
+        is_error = bool(result_obj.get("isError", False))
+        content = result_obj.get("content", [{}])
+        output_text = content[0].get("text", "") if content else ""
+
+    duration_ms = int((time.time() - t0) * 1000)
+
     if show_script:
         print("   --- script ---")
         for line in script.splitlines():
             print(f"   | {line}")
         print("   --------------")
-
-    resp = client.aegis_run(script, task_id=task.name)
-    duration_ms = int((time.time() - t0) * 1000)
-
-    result = resp.get("result", {})
-    is_error = bool(result.get("isError", False))
-    content = result.get("content", [{}])
-    output_text = content[0].get("text", "") if content else ""
 
     if task.verify is not None:
         try:
@@ -1011,6 +1113,7 @@ def evaluate_one(client: McpClient, model: str, ollama_host: str, task: Task, sh
         duration_ms=duration_ms,
         verify_passed=verify_passed,
         verify_reason=verify_reason,
+        retries_used=retries_used,
     )
 
 
@@ -1055,7 +1158,8 @@ def main() -> int:
             results.append(res)
             outcome = "ERR" if res.is_error else "OK "
             mark = "✓" if res.verify_passed else "✗"
-            print(f"   {mark} mcp={outcome} ({res.duration_ms} ms)  {res.verify_reason}")
+            retry_tag = f" retries={res.retries_used}" if res.retries_used > 0 else ""
+            print(f"   {mark} mcp={outcome} ({res.duration_ms} ms{retry_tag})  {res.verify_reason}")
             if res.error:
                 print(f"     error: {res.error}")
             elif res.output_text:
@@ -1080,7 +1184,9 @@ def main() -> int:
         passed = sum(1 for r in rs if r.verify_passed)
         print(f"#   [{cat}] {passed}/{len(rs)}")
     passed = sum(1 for r in results if r.verify_passed)
-    print(f"# total: {passed}/{len(results)}")
+    retried = sum(1 for r in results if r.retries_used > 0)
+    saved_by_retry = sum(1 for r in results if r.retries_used > 0 and r.verify_passed)
+    print(f"# total: {passed}/{len(results)}  ({retried} retried, {saved_by_retry} rescued by retry)")
     if passed != len(results):
         print("# failures:")
         for r in results:
