@@ -1,0 +1,162 @@
+# FastAPI — production read-only diagnostic policy.
+#
+# Use case: agent helps diagnose a production incident. It can read
+# logs, query the read replica, fetch deployment status, and call
+# read-only k8s/cloud APIs. It cannot mutate anything, anywhere.
+#
+# This is the "agent as on-call assistant" stance. Selecting this
+# policy is the operator's deliberate signal that the agent is touching
+# prod-adjacent state and the answer is "look but don't touch".
+
+version = "1"
+name = "fastapi_prod_readonly"
+description = "Diagnose prod incidents; cannot mutate anything."
+
+# Even though nothing destructive is allowed below, confirm-per-call
+# is set on the few categories where a mistake would be costly.
+confirm_per_call = [
+    "subprocess.exec",
+    "database.read",                # confirm because data is sensitive
+    "deployment.exec",
+]
+
+[filesystem]
+# Read-only on the agent's working tree (likely a checkout of the
+# service repo for code reference) and on the host's /var/log.
+read_allow = [
+    "src/**", "app/**",
+    "**/*.md",
+    "/var/log/myapp/**",
+]
+write_allow = []
+delete_allow = []
+deny = [
+    "**/.env*",
+    "**/secrets/**",
+    "~/.aws/**", "~/.ssh/**",
+    "/etc/**",
+]
+
+[network]
+http_get_allow = [
+    "api.github.com",               # source/issue lookup
+    "datadoghq.com",                # observability
+    "*.datadoghq.com",
+    "sentry.io",
+    "*.sentry.io",
+    "api.example.com",              # the prod API itself, GET only
+]
+http_post_allow = []                # NO mutating HTTP, period.
+http_put_allow = []
+http_patch_allow = []
+http_delete_allow = []
+deny_hosts = []
+deny_ips = [
+    "169.254.169.254",
+]
+
+[environment]
+allow_vars = [
+    "USER", "PATH",
+    "DATADOG_API_KEY",              # observability creds OK to read
+    "SENTRY_DSN",
+    "FASTAPI_ENV",
+]
+deny_vars = [
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "DATABASE_URL", "DATABASE_PASSWORD",
+    "STRIPE_SECRET_KEY", "SENDGRID_API_KEY",
+    "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+]
+
+[subprocess]
+# Read-only diagnostic commands only. The agent can shell out to gather
+# logs and inspect state, but never run a writeful tool.
+allow_commands = [
+    "git",                          # log/diff/blame — push gated below
+    "cat", "head", "tail", "less", "grep", "wc", "find",
+    "ls", "ps", "df", "du",
+    # Read-only k8s
+    "kubectl",
+]
+deny_commands = [
+    "rm", "dd", "mkfs", "shred", "mv", "cp",
+    "sudo", "doas", "su",
+    "curl", "wget", "nc",
+    "ssh", "scp",
+    "psql", "mysql", "redis-cli",
+    "helm", "terraform", "aws", "gcloud", "flyctl",
+]
+
+[subprocess.deny_args]
+git = ["push", "commit", "merge", "rebase", "reset --hard", "clean"]
+kubectl = [
+    "delete", "apply", "create", "patch", "edit", "scale",
+    "rollout undo", "rollout pause", "rollout resume", "rollout restart",
+    "exec", "cp", "drain", "cordon", "uncordon", "taint",
+]
+
+[database]
+deny_connections = [
+    "prod_primary", "prod_admin", "prod_writer",
+]
+# Even a read-only connection should never see these — they imply
+# someone got the wrong handle.
+deny_operations = [
+    "DROP", "TRUNCATE", "ALTER", "CREATE", "GRANT", "REVOKE",
+    "INSERT", "UPDATE", "DELETE", "MERGE",
+]
+
+[[database.connections]]
+name = "prod_replica"
+read = true
+write = false
+schemas_allow = ["public", "analytics"]
+# These tables hold PII / billing data. Even on a replica with
+# read-only credentials, the agent shouldn't enumerate them.
+tables_deny = [
+    "users",
+    "user_emails",
+    "user_phones",
+    "auth.tokens", "auth.sessions",
+    "billing.*",
+    "payments.*",
+]
+
+[deployment]
+deny_targets = [
+    "prod_us_primary",              # active region — observe only via replica
+    "disaster_recovery",
+]
+tools = ["kubectl"]                 # NOT terraform/aws — those mutate
+
+[[deployment.targets]]
+name = "prod_eu"
+allow_actions = ["get", "describe", "logs", "top"]
+deny_actions = [
+    "delete", "scale", "apply", "patch", "edit", "create",
+    "exec", "cp", "drain",
+    "rollout",                      # all rollout subcommands mutate
+]
+note = "Read-only diagnostic access. Pages on-call if anything is wrong; do not auto-remediate."
+
+[[deployment.targets]]
+name = "prod_us_replica"
+allow_actions = ["get", "describe", "logs", "top"]
+deny_actions = ["*"]
+note = "Same — observation only."
+
+[functions]
+allow = [
+    "fs.read",
+    "net.http_get",
+    "subprocess.exec",
+    "env.read",
+    "database.read",
+    "deployment.exec",
+]
+deny = [
+    "fs.write", "fs.delete",
+    "net.http_post", "net.http_put", "net.http_patch", "net.http_delete",
+    "database.write",
+]

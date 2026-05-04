@@ -1,0 +1,177 @@
+# FastAPI — local development policy.
+#
+# Use case: agent helps build/refactor a FastAPI service running on the
+# developer's laptop. Project layout assumed:
+#
+#   app/                 — application code
+#   app/api/             — FastAPI routers
+#   app/models/          — Pydantic + ORM models
+#   tests/               — pytest suite
+#   migrations/          — Alembic migrations
+#   .env                 — local secrets (NEVER readable)
+#   pyproject.toml       — project metadata
+#   .venv/               — virtualenv
+#
+# The agent can edit code under app/ and tests/, run pytest, run
+# uvicorn, hit the local DB, and call api.github.com to look up
+# library docs. It can NOT read .env, NOT touch ~/.aws / ~/.ssh, and
+# NOT install system packages outside the venv.
+
+version = "1"
+name = "fastapi_dev"
+description = "Local FastAPI development; read project tree, write under app/ and tests/, dev DB read+write."
+
+confirm_per_call = [
+    "fs.delete",
+    "subprocess.exec",
+    "database.write",
+]
+
+[filesystem]
+read_allow = [
+    "app/**",
+    "tests/**",
+    "migrations/**",
+    "alembic.ini",
+    "pyproject.toml",
+    "uv.lock",
+    "poetry.lock",
+    "README.md",
+    "/tmp/agent_work/**",
+]
+write_allow = [
+    "app/**",
+    "tests/**",
+    "migrations/versions/**",
+    "/tmp/agent_work/**",
+]
+delete_allow = [
+    "/tmp/agent_work/**",
+]
+deny = [
+    # Local secrets in any form
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/secrets/**",
+    "**/secrets.*",
+    # Project-level lock files: agent shouldn't bump deps without explicit ask
+    "pyproject.toml",          # readable above; this overrides for write
+    "uv.lock",
+    "poetry.lock",
+    # User credentials
+    "~/.aws/**", "~/.ssh/**", "~/.config/gh/**",
+    "~/.netrc",
+    "~/.docker/config.json",
+    # System paths
+    "/etc/**",
+]
+
+[network]
+http_get_allow = [
+    "api.github.com",
+    "*.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "fastapi.tiangolo.com",
+    "docs.pydantic.dev",
+    "docs.sqlalchemy.org",
+]
+http_post_allow = []                # no write APIs from local dev
+http_put_allow = []
+http_patch_allow = []
+http_delete_allow = []
+deny_hosts = []
+deny_ips = [
+    "169.254.169.254",              # cloud metadata
+]
+
+[environment]
+allow_vars = [
+    "USER", "HOME", "PATH",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "FASTAPI_ENV",                  # app might key off this
+    "DATABASE_URL_DEV",             # explicit dev URL only
+]
+deny_vars = [
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "GITHUB_TOKEN", "GH_TOKEN",
+    "DATABASE_URL",                 # ambiguous — could point at prod
+    "DATABASE_PASSWORD",
+    "STRIPE_SECRET_KEY",
+    "SENDGRID_API_KEY",
+]
+
+[subprocess]
+allow_commands = [
+    # Python tooling, scoped to the venv via PATH
+    "python", "python3",
+    "pip",
+    "uv",
+    "poetry",
+    "pytest",
+    "uvicorn",
+    "alembic",
+    "ruff", "black", "mypy",
+    # Git for branch/commit; push/force gated below
+    "git",
+    # Read-only local utilities
+    "cat", "ls", "head", "tail", "wc", "echo", "grep", "find",
+]
+deny_commands = [
+    "rm", "dd", "mkfs", "shred",
+    "curl", "wget", "nc",            # network goes through net.* capabilities
+    "ssh", "scp", "rsync",
+    "sudo", "doas", "su",
+    "docker", "podman",              # explicit ask required for containers
+    "kubectl", "helm",
+    "aws", "gcloud", "az", "flyctl",
+    "psql", "mysql", "redis-cli",    # DB access through database.* capability
+]
+
+[subprocess.deny_args]
+git = ["push --force", "push -f", "reset --hard", "clean -fd", "clean -fdx"]
+pip = ["install --user", "install --break-system-packages"]
+uv = ["pip install --system"]
+poetry = ["publish"]
+
+[database]
+deny_connections = ["prod", "prod_*", "production_*"]
+deny_operations = ["DROP", "TRUNCATE", "ALTER USER", "CREATE USER", "GRANT", "REVOKE"]
+
+[[database.connections]]
+name = "localdev"
+read = true
+write = true
+schemas_allow = ["public", "app"]
+tables_deny = []
+
+[[database.connections]]
+name = "test"
+read = true
+write = true
+schemas_allow = ["public"]
+tables_deny = []
+
+[deployment]
+# Local dev should not be touching deployment infra. Empty targets +
+# explicit deny_targets makes the intent unambiguous.
+deny_targets = ["staging", "prod", "production", "*"]
+tools = []
+
+[functions]
+allow = [
+    "fs.read", "fs.write",
+    "net.http_get",
+    "subprocess.exec",
+    "env.read",
+    "database.read", "database.write",
+]
+deny = [
+    "fs.delete",                    # not in allow either; doubled for clarity
+    "net.http_post",
+    "deployment.exec",
+]
