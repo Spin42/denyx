@@ -34,6 +34,12 @@ pub enum PolicyError {
     EnvDenied { name: String, reason: String },
     #[error("policy denies subprocess command {command:?}: {reason}")]
     CommandDenied { command: String, reason: String },
+    #[error("policy denies subprocess command {command:?} with forbidden argument pattern {pattern:?}: {reason}")]
+    ArgsDenied {
+        command: String,
+        pattern: String,
+        reason: String,
+    },
     #[error("policy file is invalid: {0}")]
     Invalid(String),
 }
@@ -245,6 +251,7 @@ pub struct Policy {
     env_deny: Vec<String>,
     subprocess_allow: Vec<String>,
     subprocess_deny: Vec<String>,
+    subprocess_deny_args: std::collections::BTreeMap<String, Vec<String>>,
     fn_allow: Vec<String>,
     fn_deny: Vec<String>,
     confirm_per_call: Vec<String>,
@@ -282,6 +289,7 @@ impl Policy {
         let env_deny = file.environment.deny_vars.clone();
         let subprocess_allow = file.subprocess.allow_commands.clone();
         let subprocess_deny = file.subprocess.deny_commands.clone();
+        let subprocess_deny_args = file.subprocess.deny_args.clone();
         let fn_allow = file.functions.allow.clone();
         let fn_deny = file.functions.deny.clone();
         let confirm_per_call = file.confirm_per_call.clone();
@@ -300,6 +308,7 @@ impl Policy {
             env_deny,
             subprocess_allow,
             subprocess_deny,
+            subprocess_deny_args,
             fn_allow,
             fn_deny,
             confirm_per_call,
@@ -459,6 +468,46 @@ impl Policy {
             command: argv0.to_string(),
             reason: "not in [subprocess].allow_commands".into(),
         })
+    }
+
+    /// Apply [subprocess.deny_args] to a fully-resolved argv. Looks up
+    /// the entry by basename of argv[0] (and falls back to the literal
+    /// argv[0] for absolute-path keys). Each forbidden pattern is
+    /// substring-matched against the space-joined argv[1..]. First
+    /// match wins.
+    ///
+    /// The substring discipline is deliberate: simple, predictable,
+    /// auditable. It has known false-positive cases (the pattern `add`
+    /// matches `bundle config add` even though the intent was to block
+    /// `bundle add`). Mitigation: write more specific patterns
+    /// (`"add "` with a trailing space, or `"add gem-name"`).
+    pub fn check_subprocess_args(&self, argv: &[String]) -> Result<(), PolicyError> {
+        if argv.is_empty() {
+            return Ok(());
+        }
+        let argv0 = &argv[0];
+        let basename = std::path::Path::new(argv0)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(argv0);
+        let patterns = self
+            .subprocess_deny_args
+            .get(basename)
+            .or_else(|| self.subprocess_deny_args.get(argv0));
+        let Some(patterns) = patterns else {
+            return Ok(());
+        };
+        let joined = argv[1..].join(" ");
+        for pattern in patterns {
+            if joined.contains(pattern) {
+                return Err(PolicyError::ArgsDenied {
+                    command: argv0.clone(),
+                    pattern: pattern.clone(),
+                    reason: format!("argument matches [subprocess.deny_args].{}", basename),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Snapshot of the underlying file for audit log provenance.
@@ -734,6 +783,88 @@ allow = ["env.read", "subprocess.exec"]
         let p = full_policy();
         assert!(p.check_subprocess_command("curl").is_err());
         assert!(p.check_subprocess_command("ssh").is_err());
+    }
+
+    fn deny_args_policy() -> Policy {
+        let toml = r#"
+[subprocess]
+allow_commands = ["git", "rails", "bundle"]
+
+[subprocess.deny_args]
+git = ["push --force", "push -f", "reset --hard"]
+rails = ["db:drop", "db:reset"]
+bundle = ["add", "publish"]
+
+[functions]
+allow = ["subprocess.exec"]
+"#;
+        let file = PolicyFile::from_toml_str(toml).unwrap();
+        Policy::from_file(file, PathBuf::from("/work")).unwrap()
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn deny_args_blocks_multitoken_pattern() {
+        let p = deny_args_policy();
+        // git push --force origin main → blocked by "push --force"
+        let r = p.check_subprocess_args(&argv(&["git", "push", "--force", "origin", "main"]));
+        assert!(r.is_err());
+        let err = r.unwrap_err().to_string();
+        assert!(err.contains("push --force"), "{err}");
+    }
+
+    #[test]
+    fn deny_args_basename_match() {
+        let p = deny_args_policy();
+        // /usr/bin/git push -f → still matches via basename
+        let r = p.check_subprocess_args(&argv(&["/usr/bin/git", "push", "-f"]));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn deny_args_allows_safe_invocation() {
+        let p = deny_args_policy();
+        assert!(p
+            .check_subprocess_args(&argv(&["git", "push", "origin", "main"]))
+            .is_ok());
+        assert!(p
+            .check_subprocess_args(&argv(&["git", "log", "--oneline"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn deny_args_single_token_pattern() {
+        let p = deny_args_policy();
+        // bundle add gem-name → blocked by "add"
+        assert!(p
+            .check_subprocess_args(&argv(&["bundle", "add", "rails"]))
+            .is_err());
+        // rails db:drop → blocked
+        assert!(p
+            .check_subprocess_args(&argv(&["rails", "db:drop"]))
+            .is_err());
+        // rails server → no entry matches
+        assert!(p
+            .check_subprocess_args(&argv(&["rails", "server"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn deny_args_command_with_no_entry_is_allowed() {
+        let p = deny_args_policy();
+        // npm not in deny_args map at all
+        assert!(p
+            .check_subprocess_args(&argv(&["npm", "publish"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn deny_args_empty_argv_is_noop() {
+        let p = deny_args_policy();
+        assert!(p.check_subprocess_args(&[]).is_ok());
     }
 
     #[test]

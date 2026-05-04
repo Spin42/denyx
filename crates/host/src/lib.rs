@@ -434,6 +434,18 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
             ctx.capture(CapturedKind::Policy, &msg);
             return Err(e.into());
         }
+        if let Err(e) = ctx.policy.check_subprocess_args(&argv) {
+            let msg = e.to_string();
+            ctx.emit(AuditEvent::denied(
+                &ctx.task_id,
+                step,
+                "subprocess.exec",
+                &format!("argv={:?}", argv),
+                &msg,
+            ));
+            ctx.capture(CapturedKind::Policy, &msg);
+            return Err(e.into());
+        }
         let cmd_summary = argv.join(" ");
         ctx.require_confirm("subprocess.exec", format!("exec: {}", cmd_summary))?;
         let output = std::process::Command::new(&argv[0])
@@ -651,6 +663,30 @@ allow = ["fs.read"]
         let err = runner.run("t1", src, "test.star").unwrap_err();
         assert!(matches!(err, AegisError::Verifier(_)),
             "expected pre-execution verifier rejection, got: {err:?}");
+    }
+
+    #[test]
+    fn subprocess_deny_args_blocks_force_push() {
+        let toml = r#"
+[subprocess]
+allow_commands = ["git"]
+
+[subprocess.deny_args]
+git = ["push --force"]
+
+[functions]
+allow = ["subprocess.exec"]
+"#;
+        let runner = runner_for(toml, PathBuf::from("/tmp"));
+        let src = r#"subprocess.exec(["git", "push", "--force", "origin", "main"])"#;
+        let err = runner.run("t1", src, "test.star").unwrap_err();
+        assert!(matches!(err, AegisError::Policy(_)),
+            "expected policy violation for forbidden args, got: {err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("push --force"),
+            "expected the matched pattern in the error, got: {msg}"
+        );
     }
 
     #[test]

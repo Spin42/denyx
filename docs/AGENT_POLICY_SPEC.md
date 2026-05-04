@@ -287,8 +287,13 @@ allowed.
   matches literally too — useful for distinguishing
   `/usr/local/bin/npm` from any old `npm`.
 - After the command passes, `subprocess.deny_args` is consulted
-  (basename → list of forbidden substrings against the joined argv).
-  Implementers MAY skip the arg-level check in v1.
+  (basename → list of forbidden substrings against the joined argv[1..]).
+  First match wins. Substring discipline is deliberate: simple,
+  predictable, auditable. Known false-positive case: a pattern like
+  `add` matches both `bundle add` *and* `bundle config add` even though
+  only the first was intended; mitigation is to write more specific
+  patterns (`"add "` with trailing space, or include the gem name).
+  Implementers MAY skip the arg-level check in v1; Aegis implements it.
 
 ### Database matching
 
@@ -457,18 +462,43 @@ Aegis (this repository) is one runtime that implements this spec:
 - Embeds Starlark via `starlark-rust 0.13` and exposes the canonical
   capability set as Starlark builtins (`fs.read`, `net.http_get`,
   `subprocess.exec`, etc.) under a curated namespace.
-- Enforces `[filesystem]`, `[network]`, `[environment]`,
-  `[subprocess]`, and `[functions]` directly. `[database]` and
-  `[deployment]` are parsed and surfaced via the policy API but
-  not yet enforced inside the Starlark runtime — those become
-  meaningful when an Aegis-aware database/deploy tool consumes the
-  policy alongside Aegis.
 - Three integration surfaces: standalone CLI (`aegis run --policy
   ... <script>`), embeddable Rust crate (`aegis-host`), and an
   MCP server (planned for Slice 3). All three reuse the same
   `host::Runner` enforcement core.
 
-Other implementations are welcome and encouraged. The spec is
+### Enforcement coverage in Aegis today
+
+Reading a policy file with Aegis does not mean every section is
+actively gating the agent — Aegis enforces the surfaces it has
+builtins for, and exposes the rest via the policy API for other
+tools to consume. The honest picture:
+
+| Section / field                  | Aegis enforcement |
+|----------------------------------|-------------------|
+| `[filesystem]` (read/write/delete allow + deny) | ✅ enforced |
+| `[network]` http_get, http_post  | ✅ enforced |
+| `[network]` http_put / patch / delete | ⚠️ schema only (no built-in yet) |
+| `[network]` deny_hosts (glob)    | ✅ enforced |
+| `[network]` deny_ips (literal)   | ✅ enforced (CIDR not yet) |
+| `[environment]` allow_vars / deny_vars | ✅ enforced |
+| `[subprocess].allow_commands` / `deny_commands` | ✅ enforced |
+| `[subprocess.deny_args]`         | ✅ enforced (substring on joined argv[1..]) |
+| `[functions].allow` / `deny`     | ✅ enforced (verifier + runtime) |
+| `confirm_per_call`               | ✅ enforced |
+| `[database]`                     | ❌ not enforced — schema only. Aegis has no `database.*` builtins; in practice the database policy lines in a real-world file (e.g. `rails_dev.toml`) become load-bearing only via `[subprocess].deny_commands` listing `psql`/`mysql`/`redis-cli`. |
+| `[deployment]`                   | ❌ not enforced — schema only. `deny_targets` is descriptive; the actual block on an agent deploying to prod comes from `[subprocess].deny_commands` listing `kubectl`/`terraform`/`aws`/`flyctl`. |
+
+The two unenforced sections are by design: a portable spec lives
+above any one runtime. A database tool that wraps SQL queries
+should consume `[database]`; a deployment wrapper should consume
+`[deployment]`. Aegis specifically says no on those because the
+honest cost of doing them well (a real SQL parser, real driver
+integration; real kubectl-context handling) is much larger than
+the policy-parsing cost. Other implementations are welcome and
+encouraged to enforce the sections Aegis doesn't.
+
+Other implementations are welcome more broadly. The spec is
 intentionally implementation-neutral; Aegis serves as a reference
 that proves the model is enforceable, not as the only correct way to
 enforce it.

@@ -85,6 +85,16 @@ deny_commands = [
     "sudo",
 ]
 
+# Per-command argument denylist (basename → forbidden patterns,
+# substring match against the joined argv[1..]).
+[subprocess.deny_args]
+git = [
+    "push --force",
+    "push -f",
+    "reset --hard",
+    "clean -fd",
+]
+
 [functions]
 # Capabilities the script may call. Names are the dotted form
 # (`fs.read`, `net.http_get`, etc.); the verifier rejects pre-execution
