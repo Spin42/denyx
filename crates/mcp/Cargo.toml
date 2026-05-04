@@ -1,0 +1,19 @@
+[package]
+name = "aegis-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Aegis MCP server: exposes the policy-gated Starlark host over stdio JSON-RPC."
+
+[[bin]]
+name = "aegis-mcp"
+path = "src/main.rs"
+
+[dependencies]
+aegis-policy.workspace = true
+aegis-host.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

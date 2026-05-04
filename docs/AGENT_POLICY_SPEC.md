@@ -507,9 +507,17 @@ Aegis (this repository) is one runtime that implements this spec:
   capability set as Starlark builtins (`fs.read`, `net.http_get`,
   `subprocess.exec`, etc.) under a curated namespace.
 - Three integration surfaces: standalone CLI (`aegis run --policy
-  ... <script>`), embeddable Rust crate (`aegis-host`), and an
-  MCP server (planned for Slice 3). All three reuse the same
-  `host::Runner` enforcement core.
+  ... <script>`), embeddable Rust crate (`aegis-host`), and an MCP
+  server (`aegis-mcp --policy ... <stdio>`). All three reuse the
+  same `host::Runner` enforcement core.
+- The MCP server speaks newline-delimited JSON-RPC 2.0 on stdio and
+  exposes eight tools: a primary `aegis_run(script)` for full
+  Starlark programs, plus per-capability sugar (`aegis_fs_read`,
+  `aegis_fs_write`, `aegis_fs_delete`, `aegis_subprocess_exec`,
+  `aegis_net_http_get`, `aegis_net_http_post`, `aegis_env_read`).
+  Hosts that prefer one MCP call per discrete action use the sugar;
+  hosts whose agents naturally compose multi-step Starlark prefer
+  `aegis_run`. Both surfaces share the same enforcement code path.
 
 ### Enforcement coverage in Aegis today
 

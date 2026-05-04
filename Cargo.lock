@@ -40,6 +40,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-mcp"
+version = "0.1.0"
+dependencies = [
+ "aegis-host",
+ "aegis-policy",
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aegis-policy"
 version = "0.1.0"
 dependencies = [
