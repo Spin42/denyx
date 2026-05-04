@@ -19,6 +19,7 @@ The rest of this document covers:
 - [Why a portable spec](#why-a-portable-spec)
 - [Core principles](#core-principles)
 - [The TOML schema](#the-toml-schema)
+- [Inheritance and presets](#inheritance-and-presets)
 - [Enforcement semantics](#enforcement-semantics)
 - [Implementer's guide](#implementers-guide-non-aegis-systems)
 - [Reference policies](#reference-policies)
@@ -101,12 +102,13 @@ five; deviations should be documented as compatibility notes.
 ```toml
 # ----- Top-level metadata (optional but recommended) -----
 version = "1"                           # spec major version
+inherits = "secure-defaults"            # opt into a built-in preset
 name = "fastapi_prod_readonly"          # short human label
 description = "Diagnose prod; cannot mutate anything"
 
 # Capabilities that prompt the human before firing. Empty by default;
 # any capability listed here triggers a synchronous confirm hook.
-confirm_per_call = ["fs.delete", "subprocess.exec", "database.write"]
+confirm_per_call = ["fs.delete", "subprocess.exec"]
 
 # ----- Filesystem -----
 [filesystem]
@@ -116,108 +118,51 @@ confirm_per_call = ["fs.delete", "subprocess.exec", "database.write"]
 read_allow   = ["src/**", "tests/**", "/tmp/agent_work/**"]
 write_allow  = ["src/**", "/tmp/agent_work/**"]
 delete_allow = ["/tmp/agent_work/**"]
-deny = [
-    "~/.aws/**", "~/.ssh/**", "~/.config/**",
-    ".env", ".env.*",
-    "**/secrets/**", "**/secrets.*",
-    "/etc/passwd", "/etc/shadow",
-]
+# Project-specific denies on top of the inherited preset's universal
+# denies (~/.aws, ~/.ssh, **/.env, **/secrets/**, etc.).
+deny = ["**/Gemfile.lock"]
 
 # ----- Network -----
 [network]
-http_get_allow    = ["api.github.com", "*.npmjs.org"]
-http_post_allow   = []
-http_put_allow    = []
-http_patch_allow  = []
-http_delete_allow = []
+http_get_allow = ["api.github.com", "*.npmjs.org"]
 deny_hosts = ["evil-exfil.example.com"]
-deny_ips = [
-    "169.254.169.254",   # cloud metadata service (IMDSv1/2)
-    "10.0.0.0/8",        # internal CIDRs (when implementer supports CIDR)
-]
+# `secure-defaults` already lists 169.254.169.254. Add project-specific
+# IPs/CIDRs here.
+deny_ips = []
 
 # ----- Environment -----
 [environment]
 # Read named env vars only. Default-deny: a script can NOT enumerate.
+# secure-defaults already denies AWS_*, OPENAI_API_KEY, GITHUB_TOKEN,
+# etc.; add only project-specific keys.
 allow_vars = ["USER", "HOME", "PATH", "GITHUB_REPOSITORY"]
-deny_vars  = [
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-    "DATABASE_URL", "DATABASE_PASSWORD",
-]
 
 # ----- Subprocess -----
 [subprocess]
 # argv[0] basename match. Empty allow_commands = no subprocess at all.
+# secure-defaults' deny_commands already covers rm/sudo/ssh/curl/
+# kubectl/etc. — list only project-specific allows here.
 allow_commands = ["git", "npm", "pytest", "ruff", "black"]
-deny_commands = [
-    "rm", "dd", "mkfs", "shred",
-    "curl", "wget", "ssh", "scp", "nc",
-    "sudo", "doas", "su",
-]
+
 # Per-command argument denylist (basename → forbidden patterns,
-# substring-match against joined argv).
+# substring-match against joined argv[1..]).
 [subprocess.deny_args]
 git = ["push --force", "reset --hard", "clean -fd"]
 npm = ["publish"]
-rails = ["db:drop", "db:reset"]
-
-# ----- Database -----
-[database]
-# Globally-denied connection names (raw production handles, etc.)
-deny_connections = ["prod_primary", "prod_admin"]
-# SQL keywords forbidden everywhere, regardless of connection.
-deny_operations = ["DROP", "TRUNCATE", "ALTER", "CREATE USER", "GRANT"]
-
-[[database.connections]]
-name = "localdev"
-read = true
-write = true
-schemas_allow = ["public", "app"]
-tables_deny = []
-
-[[database.connections]]
-name = "prod_replica"
-read = true
-write = false
-schemas_allow = ["public", "analytics"]
-tables_deny = ["users", "auth.*", "billing.*"]
-
-# ----- Deployment / infra -----
-[deployment]
-deny_targets = ["disaster_recovery"]
-tools = ["kubectl", "terraform", "aws", "flyctl"]
-
-[[deployment.targets]]
-name = "dev"
-allow_actions = ["*"]
-
-[[deployment.targets]]
-name = "staging"
-allow_actions = ["get", "describe", "logs", "rollout"]
-deny_actions = ["delete", "scale"]
-
-[[deployment.targets]]
-name = "prod"
-allow_actions = ["get", "describe", "logs"]
-deny_actions = ["*"]                        # belt-and-suspenders
-note = "Read-only diagnostic access only"
 
 # ----- Capability allowlist -----
 [functions]
 # Which capabilities the script may reference at all. Names are dotted
-# (`fs.read`, `database.write`, etc.); pre-execution check rejects any
-# script that mentions a capability not in this list.
+# (`fs.read`, `subprocess.exec`, etc.); pre-execution check rejects any
+# script that mentions a capability not in this list. Default-deny
+# means absence is sufficient — a `[functions].deny` section is
+# rarely needed, and is reserved for explicit override of an
+# inherited allow.
 allow = [
     "fs.read", "fs.write",
     "net.http_get",
     "subprocess.exec",
     "env.read",
-    "database.read",
-]
-deny = [
-    "fs.delete",          # explicitly off in this environment
-    "database.write",     # belt-and-suspenders even though it's not in allow
 ]
 ```
 
@@ -237,13 +182,47 @@ The canonical capability names are:
 | `net.http_delete`  | HTTP DELETE (reserved)                               |
 | `env.read`         | Read named environment variable                      |
 | `subprocess.exec`  | Spawn a child process                                |
-| `database.read`    | Issue a read-only SQL query                          |
-| `database.write`   | Issue a mutating SQL statement                       |
-| `deployment.exec`  | Invoke a deployment tool (kubectl, terraform, etc.)  |
 
 Implementations may extend with their own capabilities (e.g.
 `git.commit`, `git.push`, `pkg.install`) but should namespace them and
 document the additions.
+
+## Inheritance and presets
+
+To keep policy files focused on what's project-specific, the spec
+supports a single field, `inherits = "<preset-name>"`, that pulls in a
+known-good baseline.
+
+Merge semantics: the preset is loaded as the base, the user file's
+fields are merged on top.
+
+- **List fields** (allow lists, deny lists) **concatenate with dedup**.
+  The user can extend the preset; they cannot remove preset entries.
+  This is intentional — presets exist precisely so a user can't
+  accidentally weaken them.
+- **Map fields** (`subprocess.deny_args`) merge by key; for shared
+  keys, the value lists concatenate.
+- **Scalar fields** (`name`, `description`, `version`): user-file
+  value wins if present, otherwise the preset's.
+- **`inherits`** does not chain. Presets are not allowed to declare
+  their own `inherits`.
+
+A v1-conformant implementation MUST ship at least the
+`secure-defaults` preset, covering universally-bad actions on any
+project: well-known credential paths, secret env var names,
+destructive shell commands, the cloud metadata IP. The Aegis
+runtime's preset is reproduced in
+`crates/policy/src/presets.rs`.
+
+Implementations MAY ship additional presets (`web-dev-defaults`,
+`prod-readonly`, etc.). The conventions are:
+
+- Preset names are kebab-case.
+- Lookup is in-binary, not filesystem-resolved (presets are part of
+  the trust boundary; anything resolvable by path or URL could be
+  tampered with).
+- An unknown preset name is a hard error at policy load — never a
+  silent fallback to "no preset".
 
 ## Enforcement semantics
 
@@ -295,27 +274,6 @@ allowed.
   patterns (`"add "` with trailing space, or include the gem name).
   Implementers MAY skip the arg-level check in v1; Aegis implements it.
 
-### Database matching
-
-- A SQL statement is rejected if its leading keyword (case-insensitive,
-  trimmed) appears in `deny_operations`.
-- Connection name must be in some `[[database.connections]]` entry and
-  not in `deny_connections`.
-- The matching connection's `read`/`write` flag must be true for the
-  operation kind. Reads = `SELECT`, `EXPLAIN`, `SHOW`, `WITH` (when
-  the wrapped statement is a read). Writes = everything else.
-- If `schemas_allow` is non-empty, the table being touched must
-  resolve to one of those schemas.
-- `tables_deny` is checked last (deny wins).
-
-### Deployment matching
-
-- Target name must appear in some `[[deployment.targets]]` entry and
-  not in `deny_targets`.
-- Action verb must be in `allow_actions` and not in `deny_actions`.
-- Verbs are conventional and tool-specific; the spec doesn't
-  prescribe an exhaustive list.
-
 ### Confirm-per-call
 
 When a capability fires that's listed in `confirm_per_call`, the
@@ -355,7 +313,7 @@ Detail fields by capability:
 - `net.*`: `{ "url": "<full>", "error": "<msg>" | null }`
 - `subprocess.exec`: `{ "argv": [...], "exit": 0, "error": null }`
 - `env.read`: `{ "name": "PATH", "error": null }`
-- denied: `{ "target": "<what>", "reason": "<why>" }`
+- `denied`: `{ "target": "<what>", "reason": "<why>" }`
 
 JSON Lines is the recommended on-disk format. Tamper-evident options
 (signed lines, Merkle chaining) are out of scope for v1 of the spec
@@ -417,18 +375,18 @@ real-world starting points that this spec is intended to support
 out of the box:
 
 - `fastapi_dev.toml` — local FastAPI development. Read project tree,
-  write only under `app/` and `tests/`, deny `.env*` and
-  `**/secrets/**`, allow `pytest`, `uvicorn`, `ruff`, `black`,
-  `git`, `pip` (in venv).
+  write only under `app/` and `tests/`, deny `.env*` (via the
+  inherited preset) and lockfile writes, allow `pytest`, `uvicorn`,
+  `ruff`, `black`, `git`, `pip` (in venv), and friends.
 - `fastapi_prod_readonly.toml` — production diagnosis only.
-  Read-only filesystem, no writes anywhere, no subprocess, only
-  HTTP GET, prod database read on a replica connection only.
+  Read-only filesystem, no writes anywhere, only HTTP GET, only a
+  read-only diagnostic shell (`cat`/`grep`/`ps`/...).
 - `rails_dev.toml` — Rails project. Reads project tree but DENIES
-  `config/secrets.yml`, `config/master.key`, `config/credentials/*`.
+  `config/secrets.yml`, `config/master.key`, `config/credentials/**`.
   Writes allowed under `app/`, `spec/`, `db/migrate/` but DENIED on
   `Gemfile.lock` and `Gemfile`. Allows `rails`, `rake`, `bundle`,
   `rspec`, but denies `rails db:drop`, `rails db:reset`, and
-  `bundle add` via subprocess.deny_args.
+  `bundle add` via `[subprocess.deny_args]`.
 
 Cargo'ed copies of all three live alongside this spec. They're
 useful as both running-Aegis demos and as portable templates for any
@@ -469,10 +427,8 @@ Aegis (this repository) is one runtime that implements this spec:
 
 ### Enforcement coverage in Aegis today
 
-Reading a policy file with Aegis does not mean every section is
-actively gating the agent — Aegis enforces the surfaces it has
-builtins for, and exposes the rest via the policy API for other
-tools to consume. The honest picture:
+Every section of the v1 schema is actively enforced by the runtime.
+The honest picture:
 
 | Section / field                  | Aegis enforcement |
 |----------------------------------|-------------------|
@@ -486,19 +442,15 @@ tools to consume. The honest picture:
 | `[subprocess.deny_args]`         | ✅ enforced (substring on joined argv[1..]) |
 | `[functions].allow` / `deny`     | ✅ enforced (verifier + runtime) |
 | `confirm_per_call`               | ✅ enforced |
-| `[database]`                     | ❌ not enforced — schema only. Aegis has no `database.*` builtins; in practice the database policy lines in a real-world file (e.g. `rails_dev.toml`) become load-bearing only via `[subprocess].deny_commands` listing `psql`/`mysql`/`redis-cli`. |
-| `[deployment]`                   | ❌ not enforced — schema only. `deny_targets` is descriptive; the actual block on an agent deploying to prod comes from `[subprocess].deny_commands` listing `kubectl`/`terraform`/`aws`/`flyctl`. |
+| `inherits` (presets)             | ✅ resolved at load |
 
-The two unenforced sections are by design: a portable spec lives
-above any one runtime. A database tool that wraps SQL queries
-should consume `[database]`; a deployment wrapper should consume
-`[deployment]`. Aegis specifically says no on those because the
-honest cost of doing them well (a real SQL parser, real driver
-integration; real kubectl-context handling) is much larger than
-the policy-parsing cost. Other implementations are welcome and
-encouraged to enforce the sections Aegis doesn't.
+If your project needs database-level access control or a
+deployment-tool gate, those concerns live above this spec — wrap
+your DB driver or your `kubectl` runner with a policy of its own,
+or rely on `[subprocess].allow_commands` and
+`[subprocess.deny_args]` to keep the agent away from the relevant
+binaries.
 
-Other implementations are welcome more broadly. The spec is
-intentionally implementation-neutral; Aegis serves as a reference
-that proves the model is enforceable, not as the only correct way to
-enforce it.
+Other implementations are welcome. The spec is intentionally
+implementation-neutral; Aegis serves as a reference that proves the
+model is enforceable, not as the only correct way to enforce it.

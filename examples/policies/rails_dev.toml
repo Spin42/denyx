@@ -1,235 +1,94 @@
 # Ruby on Rails — local development policy.
 #
-# Use case: agent helps build/refactor a Rails app on the developer's
-# laptop. Project layout assumed:
-#
-#   app/                       — application code (controllers, models, views, jobs)
-#   spec/                      — RSpec test suite
-#   db/migrate/                — Rails migrations
-#   config/                    — app configuration
-#   config/secrets.yml         — secrets (NEVER readable)
-#   config/master.key          — Rails master key (NEVER readable)
-#   config/credentials.yml.enc — encrypted credentials (NEVER readable raw)
-#   config/credentials/*.key   — environment-specific master keys
-#   Gemfile                    — dep manifest (only edit on explicit ask)
-#   Gemfile.lock               — resolved deps (NEVER write — bundler manages this)
-#
-# The agent can edit code under app/, write specs under spec/, add
-# migrations under db/migrate/, run rspec/rails/rake/bundle, and hit
-# localhost services. It can NOT read secrets/master.key/credentials,
-# can NOT modify Gemfile.lock, can NOT run rails db:drop or db:reset,
-# and can NOT run `bundle add` (manual gem additions go through the
-# developer).
+# Inherits secure-defaults; declares the Rails-specific protections on
+# top: secrets/master.key/credentials never readable, Gemfile.lock
+# never writable, rails db:drop / bundle add / rails runner never
+# runnable.
 
-version = "1"
+inherits = "secure-defaults"
 name = "rails_dev"
-description = "Local Rails development; protects secrets, lockfile, and destructive db tasks."
-
-confirm_per_call = [
-    "fs.delete",
-    "subprocess.exec",
-    "database.write",
-]
+description = "Local Rails dev; protects secrets, lockfile, and destructive db tasks."
 
 [filesystem]
 read_allow = [
-    "app/**",
-    "spec/**",
-    "test/**",
-    "db/migrate/**",
-    "db/seeds.rb",
-    "db/schema.rb",
-    "config/application.rb",
+    "app/**", "spec/**", "test/**",
+    "db/migrate/**", "db/seeds.rb", "db/schema.rb",
+    "config/application.rb", "config/routes.rb",
     "config/environments/development.rb",
     "config/environments/test.rb",
-    "config/routes.rb",
     "config/initializers/**",
-    "config/locales/**",
-    "config/database.yml",          # readable; structure is non-secret
-    "config/cable.yml",
-    "config/storage.yml",
+    "config/database.yml", "config/cable.yml", "config/storage.yml",
     "config/puma.rb",
-    "lib/**",
-    "Gemfile",
-    "Rakefile",
-    "README.md",
+    "lib/**", "Gemfile", "Rakefile", "README.md",
     "/tmp/agent_work/**",
 ]
 write_allow = [
-    "app/**",
-    "spec/**",
-    "test/**",
-    "db/migrate/**",
-    "db/seeds.rb",
+    "app/**", "spec/**", "test/**",
+    "db/migrate/**", "db/seeds.rb",
     "lib/tasks/**",
-    "config/routes.rb",
-    "config/initializers/**",       # OK to add initializers
+    "config/routes.rb", "config/initializers/**",
     "/tmp/agent_work/**",
 ]
-delete_allow = [
-    "/tmp/agent_work/**",
-]
+delete_allow = ["/tmp/agent_work/**"]
+# Rails-specific denies. Secrets in every form Rails uses, plus the
+# bundler-managed lockfile and the Gemfile itself (manual gem additions
+# go through the dev). The preset already covers ~/.aws, ~/.ssh,
+# **/.env, **/secrets/**, etc.
 deny = [
-    # ---- Secrets, in every form Rails uses ----
-    "config/secrets.yml",
-    "config/secrets.yml.enc",
+    "config/secrets.yml", "config/secrets.yml.enc",
     "config/master.key",
     "config/credentials.yml.enc",
-    "config/credentials/**",        # config/credentials/production.key etc.
-    "**/secrets.yml",
-    "**/secrets.yml.enc",
-    "**/master.key",
-    "**/credentials.yml.enc",
+    "config/credentials/**",
+    "**/secrets.yml*", "**/master.key", "**/credentials.yml.enc",
     "**/credentials/*.key",
-    "**/credentials/*.yml.enc",
-    # ---- Dependency lockfile and manifest ----
-    # Gemfile.lock is bundler-managed; agent additions desync the
-    # tree and break CI. Force the dev to run `bundle install`
-    # themselves after a manual Gemfile edit.
-    "Gemfile.lock",
-    # Gemfile is readable above (so the agent knows what's installed)
-    # but NOT writable — gem additions go through the developer.
-    "Gemfile",
-    # ---- Production env files & dotenvs ----
     "config/environments/production.rb",
     "config/environments/staging.rb",
-    ".env", ".env.*", "**/.env", "**/.env.*",
-    # ---- User-level credentials ----
-    "~/.aws/**", "~/.ssh/**", "~/.config/gh/**",
-    "~/.netrc",
-    "~/.rubygems/**",
-    "~/.bundle/config",
-    "~/.gem/credentials",
-    # ---- System paths ----
-    "/etc/**",
+    "Gemfile.lock",
+    "Gemfile",
 ]
 
 [network]
 http_get_allow = [
     "api.github.com",
-    "rubygems.org",
-    "*.rubygems.org",
-    "guides.rubyonrails.org",
-    "api.rubyonrails.org",
-    "rubydoc.info",
-]
-http_post_allow = []
-http_put_allow = []
-http_patch_allow = []
-http_delete_allow = []
-deny_hosts = []
-deny_ips = [
-    "169.254.169.254",
+    "rubygems.org", "*.rubygems.org",
+    "guides.rubyonrails.org", "api.rubyonrails.org", "rubydoc.info",
 ]
 
 [environment]
-allow_vars = [
-    "USER", "HOME", "PATH",
-    "RAILS_ENV",
-    "RACK_ENV",
-    "BUNDLE_GEMFILE",
-    "RUBY_VERSION",
-    "DATABASE_URL_DEV",
-]
+allow_vars = ["USER", "HOME", "PATH", "RAILS_ENV", "RACK_ENV", "BUNDLE_GEMFILE", "RUBY_VERSION"]
 deny_vars = [
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-    "GITHUB_TOKEN",
-    "RAILS_MASTER_KEY",             # the very thing config/master.key holds
+    "RAILS_MASTER_KEY",
     "SECRET_KEY_BASE",
-    "DATABASE_URL", "DATABASE_PASSWORD",
     "DEVISE_SECRET_KEY",
-    "STRIPE_SECRET_KEY",
-    "SENDGRID_API_KEY",
-    "TWILIO_AUTH_TOKEN",
 ]
 
 [subprocess]
 allow_commands = [
-    # Ruby toolchain
-    "ruby",
-    "rails",
-    "rake",
-    "bundle",
-    "bundler",
-    "rspec",
-    "rubocop",
-    "standardrb",
-    "brakeman",
-    "erb",
-    # Git for branch/commit; push/force gated below
+    "ruby", "rails", "rake", "bundle", "bundler",
+    "rspec", "rubocop", "standardrb", "brakeman",
     "git",
-    # Read-only locals
     "cat", "ls", "head", "tail", "wc", "echo", "grep", "find",
 ]
-deny_commands = [
-    "rm", "dd", "mkfs", "shred",
-    "curl", "wget", "nc",
-    "ssh", "scp",
-    "sudo", "doas", "su",
-    "docker", "podman",
-    "kubectl", "helm",
-    "aws", "gcloud", "az", "flyctl", "heroku",
-    "psql", "mysql", "sqlite3", "redis-cli",
-    "gem",                          # gem install bypasses bundler — force `bundle add`,
-                                    # which is itself denied below
-]
 
-# This is where the Rails-specific safety lives. The dev should run
-# destructive db tasks themselves; the agent should never invoke them.
 [subprocess.deny_args]
-git = ["push --force", "push -f", "reset --hard", "clean -fd", "clean -fdx"]
+git = ["push --force", "push -f", "reset --hard", "clean -fd"]
 rails = [
-    "db:drop",
-    "db:reset",
-    "db:migrate:redo",              # destructive in dev too; explicit ask
-    "credentials:edit",             # opens secrets in $EDITOR
-    "secrets:edit",
-    "runner",                       # arbitrary code in app context
+    "db:drop", "db:reset", "db:migrate:redo",
+    "credentials:edit", "secrets:edit",
+    "runner",
     "console --sandbox=false",
-    "destroy",                      # rails destroy controller User etc.
+    "destroy",
     "assets:clobber",
 ]
-rake = [
-    "db:drop",
-    "db:reset",
-    "db:migrate:reset",
-]
+rake = ["db:drop", "db:reset", "db:migrate:reset"]
 bundle = [
-    "add",                          # gem additions go through the developer
+    "add",
     "remove",
-    "update",                       # major version bumps shouldn't be silent
+    "update",
     "install --redownload",
     "exec rails db:drop",
     "exec rake db:drop",
 ]
-
-[database]
-deny_connections = ["prod", "production", "prod_*", "production_*"]
-deny_operations = [
-    "DROP", "TRUNCATE", "ALTER USER", "CREATE USER",
-    "GRANT", "REVOKE",
-]
-
-[[database.connections]]
-name = "rails_development"
-read = true
-write = true
-schemas_allow = ["public"]
-tables_deny = ["schema_migrations", "ar_internal_metadata"]
-
-[[database.connections]]
-name = "rails_test"
-read = true
-write = true
-schemas_allow = ["public"]
-tables_deny = ["schema_migrations", "ar_internal_metadata"]
-
-[deployment]
-# Rails dev policy doesn't authorize any deploy targets. If the dev
-# wants the agent to deploy, that's a different policy.
-deny_targets = ["staging", "production", "*"]
-tools = []
 
 [functions]
 allow = [
@@ -237,10 +96,4 @@ allow = [
     "net.http_get",
     "subprocess.exec",
     "env.read",
-    "database.read", "database.write",
-]
-deny = [
-    "fs.delete",
-    "net.http_post",
-    "deployment.exec",
 ]

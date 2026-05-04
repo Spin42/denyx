@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+pub mod presets;
+
 #[derive(Debug, Error)]
 pub enum PolicyError {
     #[error("policy denies {action} on path {path:?}: {reason}")]
@@ -55,6 +57,14 @@ pub struct PolicyFile {
     #[serde(default)]
     pub version: Option<String>,
 
+    /// Inherit from a named built-in preset. The preset is loaded as
+    /// the base and this file's fields are merged on top: list fields
+    /// (allow/deny lists) concat with dedup; map fields (deny_args)
+    /// key-merge with per-key concat; scalars are "this file wins".
+    /// Currently supported: `"secure-defaults"`.
+    #[serde(default)]
+    pub inherits: Option<String>,
+
     /// Free-form metadata for humans / CI. Not interpreted.
     #[serde(default)]
     pub name: Option<String>,
@@ -69,16 +79,6 @@ pub struct PolicyFile {
     pub environment: EnvironmentPolicy,
     #[serde(default)]
     pub subprocess: SubprocessPolicy,
-    /// Schema for declaring database access. The Aegis runtime does not
-    /// enforce this section directly (no db.* builtins yet); it's part
-    /// of the portable policy schema so other agentic systems and
-    /// future Aegis versions can read it.
-    #[serde(default)]
-    pub database: DatabasePolicy,
-    /// Schema for declaring deployment / infrastructure access. Same
-    /// portability story as `database`.
-    #[serde(default)]
-    pub deployment: DeploymentPolicy,
     #[serde(default)]
     pub functions: FunctionPolicy,
     #[serde(default)]
@@ -157,79 +157,130 @@ pub struct SubprocessPolicy {
     pub deny_args: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DatabasePolicy {
-    /// Allowed connections. Connection name is opaque to the policy
-    /// engine — the host integration maps a name to a real DSN.
-    #[serde(default)]
-    pub connections: Vec<DatabaseConnection>,
-    /// Connections the agent must never reference (production primary,
-    /// admin handles, etc.). Deny wins over `connections`.
-    #[serde(default)]
-    pub deny_connections: Vec<String>,
-    /// SQL operations the agent must never run on any connection,
-    /// regardless of read/write flags. Operations are matched
-    /// case-insensitively against the leading keyword of a query.
-    /// Examples: `"DROP"`, `"TRUNCATE"`, `"ALTER"`, `"CREATE USER"`.
-    #[serde(default)]
-    pub deny_operations: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DatabaseConnection {
-    pub name: String,
-    #[serde(default)]
-    pub read: bool,
-    #[serde(default)]
-    pub write: bool,
-    /// Schemas the agent may touch on this connection. Empty = no
-    /// restriction (subject to deny_tables).
-    #[serde(default)]
-    pub schemas_allow: Vec<String>,
-    /// Tables the agent must not touch even on a writable connection.
-    /// Globs are permitted ("auth.*", "billing.*").
-    #[serde(default)]
-    pub tables_deny: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DeploymentPolicy {
-    /// Per-target action allowlist. Targets are symbolic names
-    /// (`"dev"`, `"staging"`, `"prod_eu"`); the host integration maps
-    /// those onto kubectl contexts, AWS profiles, terraform workspaces,
-    /// etc.
-    #[serde(default)]
-    pub targets: Vec<DeploymentTarget>,
-    /// Targets the agent must never address.
-    #[serde(default)]
-    pub deny_targets: Vec<String>,
-    /// Tools the policy speaks to (kubectl, terraform, aws, gcloud,
-    /// flyctl). Acts as a hint to host integrations — the actual
-    /// enforcement of which tool is invoked usually flows through
-    /// [subprocess].allow_commands.
-    #[serde(default)]
-    pub tools: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DeploymentTarget {
-    pub name: String,
-    /// Action verbs allowed on this target. Conventional verbs:
-    /// "get", "describe", "logs", "status", "apply", "rollout",
-    /// "scale", "delete", "exec". Globs permitted ("*").
-    #[serde(default)]
-    pub allow_actions: Vec<String>,
-    /// Verbs forbidden on this target; deny wins over allow.
-    #[serde(default)]
-    pub deny_actions: Vec<String>,
-    /// Free-form note for humans (why this target has these rules).
-    #[serde(default)]
-    pub note: Option<String>,
-}
 
 impl PolicyFile {
     pub fn from_toml_str(s: &str) -> Result<Self> {
         toml::from_str(s).context("parse policy TOML")
+    }
+
+    /// Resolve `inherits` by loading the named preset, parsing it, and
+    /// merging this file on top. If `inherits` is `None`, returns self
+    /// unchanged. Errors if the preset name is unknown.
+    pub fn resolve_inheritance(self) -> Result<Self> {
+        let Some(name) = self.inherits.clone() else {
+            return Ok(self);
+        };
+        let preset_src = presets::lookup(&name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown policy preset: {name:?}; known presets: {:?}",
+                presets::names()
+            )
+        })?;
+        let base = PolicyFile::from_toml_str(preset_src)
+            .with_context(|| format!("parse built-in preset {name:?}"))?;
+        Ok(merge_policy_files(base, self))
+    }
+}
+
+/// Concatenate two list fields with dedup. Order preserved (base first,
+/// then user file's new entries).
+fn concat_dedup(mut base: Vec<String>, over: Vec<String>) -> Vec<String> {
+    for v in over {
+        if !base.contains(&v) {
+            base.push(v);
+        }
+    }
+    base
+}
+
+fn merge_deny_args(
+    mut base: std::collections::BTreeMap<String, Vec<String>>,
+    over: std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    for (k, v) in over {
+        let entry = base.entry(k).or_default();
+        for item in v {
+            if !entry.contains(&item) {
+                entry.push(item);
+            }
+        }
+    }
+    base
+}
+
+fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
+    PolicyFile {
+        version: over.version.or(base.version),
+        // `inherits` does not chain; user file's value (or absence)
+        // wins outright.
+        inherits: over.inherits,
+        name: over.name.or(base.name),
+        description: over.description.or(base.description),
+        filesystem: FilesystemPolicy {
+            read_allow: concat_dedup(
+                base.filesystem.read_allow,
+                over.filesystem.read_allow,
+            ),
+            write_allow: concat_dedup(
+                base.filesystem.write_allow,
+                over.filesystem.write_allow,
+            ),
+            delete_allow: concat_dedup(
+                base.filesystem.delete_allow,
+                over.filesystem.delete_allow,
+            ),
+            deny: concat_dedup(base.filesystem.deny, over.filesystem.deny),
+        },
+        network: NetworkPolicy {
+            http_get_allow: concat_dedup(
+                base.network.http_get_allow,
+                over.network.http_get_allow,
+            ),
+            http_post_allow: concat_dedup(
+                base.network.http_post_allow,
+                over.network.http_post_allow,
+            ),
+            http_put_allow: concat_dedup(
+                base.network.http_put_allow,
+                over.network.http_put_allow,
+            ),
+            http_patch_allow: concat_dedup(
+                base.network.http_patch_allow,
+                over.network.http_patch_allow,
+            ),
+            http_delete_allow: concat_dedup(
+                base.network.http_delete_allow,
+                over.network.http_delete_allow,
+            ),
+            deny_hosts: concat_dedup(base.network.deny_hosts, over.network.deny_hosts),
+            deny_ips: concat_dedup(base.network.deny_ips, over.network.deny_ips),
+        },
+        environment: EnvironmentPolicy {
+            allow_vars: concat_dedup(
+                base.environment.allow_vars,
+                over.environment.allow_vars,
+            ),
+            deny_vars: concat_dedup(
+                base.environment.deny_vars,
+                over.environment.deny_vars,
+            ),
+        },
+        subprocess: SubprocessPolicy {
+            allow_commands: concat_dedup(
+                base.subprocess.allow_commands,
+                over.subprocess.allow_commands,
+            ),
+            deny_commands: concat_dedup(
+                base.subprocess.deny_commands,
+                over.subprocess.deny_commands,
+            ),
+            deny_args: merge_deny_args(base.subprocess.deny_args, over.subprocess.deny_args),
+        },
+        functions: FunctionPolicy {
+            allow: concat_dedup(base.functions.allow, over.functions.allow),
+            deny: concat_dedup(base.functions.deny, over.functions.deny),
+        },
+        confirm_per_call: concat_dedup(base.confirm_per_call, over.confirm_per_call),
     }
 }
 
@@ -271,7 +322,7 @@ impl Policy {
     pub fn load_with_root(path: &Path, root: PathBuf) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("read policy file {path:?}"))?;
-        let file: PolicyFile = PolicyFile::from_toml_str(&raw)?;
+        let file = PolicyFile::from_toml_str(&raw)?.resolve_inheritance()?;
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         Self::from_file(file, root)
     }
@@ -868,43 +919,96 @@ allow = ["subprocess.exec"]
     }
 
     #[test]
-    fn database_and_deployment_sections_deserialize() {
-        let toml = r#"
-version = "1"
-name = "fastapi_prod_readonly"
+    fn inherits_secure_defaults_pulls_in_baseline_denies() {
+        // Minimal user file with no boilerplate.
+        let user = r#"
+inherits = "secure-defaults"
 
-[database]
-deny_connections = ["prod_primary"]
-deny_operations = ["DROP", "TRUNCATE", "ALTER"]
+[filesystem]
+read_allow = ["src/**"]
+write_allow = ["src/**"]
 
-[[database.connections]]
-name = "prod_replica"
-read = true
-write = false
-schemas_allow = ["public", "analytics"]
-tables_deny = ["users", "auth.*", "billing.*"]
-
-[deployment]
-deny_targets = ["prod_us_primary"]
-tools = ["kubectl", "aws"]
-
-[[deployment.targets]]
-name = "prod_eu"
-allow_actions = ["get", "describe", "logs"]
-deny_actions = ["delete", "scale", "apply"]
-note = "Read-only diagnostic access only"
+[functions]
+allow = ["fs.read", "fs.write"]
 "#;
-        let file = PolicyFile::from_toml_str(toml).unwrap();
-        assert_eq!(file.version.as_deref(), Some("1"));
-        assert_eq!(file.database.connections.len(), 1);
-        assert_eq!(file.database.connections[0].name, "prod_replica");
-        assert!(file.database.connections[0].read);
-        assert!(!file.database.connections[0].write);
-        assert_eq!(file.deployment.targets.len(), 1);
-        assert_eq!(file.deployment.targets[0].name, "prod_eu");
-        assert_eq!(
-            file.deployment.targets[0].allow_actions,
-            vec!["get".to_string(), "describe".to_string(), "logs".to_string()]
-        );
+        let file = PolicyFile::from_toml_str(user)
+            .unwrap()
+            .resolve_inheritance()
+            .unwrap();
+        let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+
+        // Inherited fs deny list catches credentials.
+        let home = home_dir().unwrap_or_else(|| PathBuf::from("/home/x"));
+        let creds = home.join(".aws/credentials");
+        assert!(p.check_fs_read(&creds).is_err());
+
+        // Inherited deny_vars catches OPENAI_API_KEY.
+        assert!(p.check_env_read("OPENAI_API_KEY").is_err());
+
+        // Inherited deny_commands catches rm/sudo/kubectl.
+        assert!(p.check_subprocess_command("rm").is_err());
+        assert!(p.check_subprocess_command("kubectl").is_err());
+
+        // The user's own allow_list still applies.
+        assert!(p.check_fs_read(Path::new("/work/src/main.rs")).is_ok());
     }
+
+    #[test]
+    fn user_extends_preset_deny_lists() {
+        let user = r#"
+inherits = "secure-defaults"
+
+[filesystem]
+read_allow = ["src/**"]
+deny = ["**/Gemfile.lock"]    # extra deny on top of preset's
+
+[functions]
+allow = ["fs.read"]
+"#;
+        let file = PolicyFile::from_toml_str(user)
+            .unwrap()
+            .resolve_inheritance()
+            .unwrap();
+
+        // User's deny entry survived.
+        assert!(file.filesystem.deny.iter().any(|p| p == "**/Gemfile.lock"));
+        // Preset's deny entries also survived.
+        assert!(file.filesystem.deny.iter().any(|p| p == "~/.aws/**"));
+        assert!(file.filesystem.deny.iter().any(|p| p == ".env"));
+    }
+
+    #[test]
+    fn unknown_preset_errors_clearly() {
+        let user = r#"inherits = "does-not-exist""#;
+        let res = PolicyFile::from_toml_str(user)
+            .unwrap()
+            .resolve_inheritance();
+        assert!(res.is_err());
+        let msg = res.unwrap_err().to_string();
+        assert!(msg.contains("does-not-exist"));
+    }
+
+    #[test]
+    fn deny_args_merge_concatenates_per_command() {
+        // Preset has no deny_args; user provides some. Then a derived
+        // file (synthesized in test) merges in additional patterns.
+        let base_toml = r#"
+[subprocess.deny_args]
+git = ["push --force"]
+"#;
+        let over_toml = r#"
+[subprocess.deny_args]
+git = ["reset --hard"]
+rails = ["db:drop"]
+"#;
+        let base = PolicyFile::from_toml_str(base_toml).unwrap();
+        let over = PolicyFile::from_toml_str(over_toml).unwrap();
+        let merged = merge_policy_files(base, over);
+        let git_args = merged.subprocess.deny_args.get("git").unwrap();
+        assert!(git_args.contains(&"push --force".to_string()));
+        assert!(git_args.contains(&"reset --hard".to_string()));
+        let rails_args = merged.subprocess.deny_args.get("rails").unwrap();
+        assert!(rails_args.contains(&"db:drop".to_string()));
+    }
+
 }
