@@ -6,10 +6,12 @@
 //! (host/IP allowlist + denylist), and functions (Starlark builtin
 //! allowlist).
 
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -297,7 +299,10 @@ pub struct Policy {
     net_get_hosts: HostMatcher,
     net_post_hosts: HostMatcher,
     net_deny_hosts: HostMatcher,
-    net_deny_ips: Vec<String>,
+    /// Parsed deny_ips entries, each held as an `IpNet`. Literal IPs
+    /// (`169.254.169.254`) are stored as host networks (`/32` or
+    /// `/128`); CIDR ranges (`10.0.0.0/8`) are stored as-is.
+    net_deny_ips: Vec<IpNet>,
     env_allow: Vec<String>,
     env_deny: Vec<String>,
     subprocess_allow: Vec<String>,
@@ -335,7 +340,15 @@ impl Policy {
         let net_get_hosts = HostMatcher::build(&file.network.http_get_allow)?;
         let net_post_hosts = HostMatcher::build(&file.network.http_post_allow)?;
         let net_deny_hosts = HostMatcher::build(&file.network.deny_hosts)?;
-        let net_deny_ips = file.network.deny_ips.clone();
+        let net_deny_ips = file
+            .network
+            .deny_ips
+            .iter()
+            .map(|s| {
+                parse_ip_or_cidr(s)
+                    .with_context(|| format!("invalid [network].deny_ips entry {s:?}"))
+            })
+            .collect::<Result<Vec<IpNet>>>()?;
         let env_allow = file.environment.allow_vars.clone();
         let env_deny = file.environment.deny_vars.clone();
         let subprocess_allow = file.subprocess.allow_commands.clone();
@@ -445,12 +458,10 @@ impl Policy {
                 reason: "URL has no host".into(),
             })?
             .to_string();
-        if self.net_deny_ips.iter().any(|ip| ip == &host) {
-            return Err(PolicyError::HostDenied {
-                action: verb.as_str(),
-                host,
-                reason: "matches [network].deny_ips".into(),
-            });
+        // If the host is itself an IP literal, run it through the
+        // CIDR-aware deny check immediately (no DNS step needed).
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            self.check_resolved_ip(verb.as_str(), &host, ip)?;
         }
         if self.net_deny_hosts.is_match(&host) {
             return Err(PolicyError::HostDenied {
@@ -471,6 +482,30 @@ impl Policy {
             });
         }
         Ok(parsed)
+    }
+
+    /// Pure CIDR-aware check of an already-resolved IP against
+    /// `[network].deny_ips`. Pass any IP returned by DNS resolution
+    /// for a request's hostname through this call before initiating
+    /// the network IO. The `host_label` is used in the error and audit
+    /// fields so denials carry the original hostname (e.g.
+    /// `evil.example.com → 192.168.1.1 in deny_ips`).
+    pub fn check_resolved_ip(
+        &self,
+        action: &'static str,
+        host_label: &str,
+        ip: IpAddr,
+    ) -> Result<(), PolicyError> {
+        for net in &self.net_deny_ips {
+            if net.contains(&ip) {
+                return Err(PolicyError::HostDenied {
+                    action,
+                    host: format!("{host_label} ({ip})"),
+                    reason: format!("resolved IP {ip} matches [network].deny_ips entry {net}"),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn check_env_read(&self, name: &str) -> Result<(), PolicyError> {
@@ -670,6 +705,23 @@ fn translate_pattern(root: &Path, raw: &str) -> String {
     format!("{}/{}", root.display(), raw)
 }
 
+/// Parse an entry from `[network].deny_ips` into an `IpNet`. Accepts
+/// both literal IPs (`"169.254.169.254"`, `"::1"`) — coerced to a host
+/// network with the appropriate prefix length — and CIDR ranges
+/// (`"10.0.0.0/8"`, `"fc00::/7"`).
+fn parse_ip_or_cidr(s: &str) -> Result<IpNet> {
+    if let Ok(net) = s.parse::<IpNet>() {
+        return Ok(net);
+    }
+    let ip: IpAddr = s
+        .parse()
+        .with_context(|| format!("not a valid IP or CIDR: {s:?}"))?;
+    Ok(match ip {
+        IpAddr::V4(v4) => IpNet::V4(ipnet::Ipv4Net::new(v4, 32).expect("valid /32")),
+        IpAddr::V6(v6) => IpNet::V6(ipnet::Ipv6Net::new(v6, 128).expect("valid /128")),
+    })
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -780,6 +832,73 @@ deny = []
         assert!(p.check_http_get("https://registry.npmjs.org/foo").is_ok());
         assert!(p.check_http_get("https://evil.example.com/").is_err());
         assert!(p.check_http_get("https://169.254.169.254/").is_err());
+    }
+
+    fn cidr_policy() -> Policy {
+        let toml = r#"
+[network]
+http_get_allow = ["api.github.com"]
+deny_ips = [
+    "169.254.0.0/16",
+    "10.0.0.0/8",
+    "127.0.0.1",      # literal — should be coerced to /32
+    "::1",            # literal IPv6
+]
+
+[functions]
+allow = ["net.http_get"]
+"#;
+        let file = PolicyFile::from_toml_str(toml).unwrap();
+        Policy::from_file(file, PathBuf::from("/work")).unwrap()
+    }
+
+    #[test]
+    fn cidr_blocks_link_local_range() {
+        let p = cidr_policy();
+        // any IP in 169.254.0.0/16
+        assert!(p
+            .check_http_get("https://169.254.169.254/latest/meta-data/")
+            .is_err());
+        assert!(p.check_http_get("https://169.254.0.1/").is_err());
+        assert!(p.check_http_get("https://169.254.255.255/").is_err());
+        // Outside the /16
+        assert!(p.check_http_get("https://169.255.0.1/").is_err()); // outside CIDR but not allowed → host-allow check rejects
+    }
+
+    #[test]
+    fn cidr_blocks_rfc1918_range() {
+        let p = cidr_policy();
+        for ip in ["10.0.0.1", "10.0.0.255", "10.255.255.255"] {
+            let url = format!("https://{ip}/admin");
+            let err = p.check_http_get(&url).unwrap_err().to_string();
+            assert!(err.contains("deny_ips"), "expected CIDR rejection for {ip}, got: {err}");
+        }
+    }
+
+    #[test]
+    fn literal_ip_in_deny_ips_works() {
+        let p = cidr_policy();
+        assert!(p.check_http_get("https://127.0.0.1/").is_err());
+        assert!(p.check_http_get("https://[::1]/").is_err());
+    }
+
+    #[test]
+    fn check_resolved_ip_pure() {
+        let p = cidr_policy();
+        // hostname-style label, IP from a hypothetical DNS resolution
+        let internal: IpAddr = "192.168.1.1".parse().unwrap();
+        // not in any deny_ips entry → allowed
+        assert!(p
+            .check_resolved_ip("http_get", "internal.example.com", internal)
+            .is_ok());
+
+        let metadata: IpAddr = "169.254.169.254".parse().unwrap();
+        let err = p
+            .check_resolved_ip("http_get", "metadata.example.com", metadata)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("169.254.0.0/16"), "{err}");
+        assert!(err.contains("metadata.example.com"), "{err}");
     }
 
     fn full_policy() -> Policy {

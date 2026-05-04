@@ -12,6 +12,7 @@
 //!    re-checks the policy at call time and emits an audit event.
 
 use std::cell::RefCell;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -290,6 +291,39 @@ fn ctx_from_eval<'a, 'v>(eval: &'a Evaluator<'v, '_, '_>) -> anyhow::Result<&'a 
         .ok_or_else(|| anyhow::anyhow!("aegis: wrong context type in evaluator extra slot"))
 }
 
+/// Resolve a hostname (not an IP literal) to its A/AAAA records via the
+/// system resolver. Returns an empty vec on resolution failure — the
+/// caller proceeds and the actual HTTP attempt will surface the error.
+/// This is fail-open by design: a temporary DNS hiccup shouldn't block
+/// a legitimate request, and an attacker who could force a resolution
+/// failure could equally serve a public-IP A record at check time and
+/// rebind later (a known limit; full defense requires resolved-IP
+/// pinning passed into the HTTP client).
+fn resolve_host_to_ips(host: &str) -> Vec<IpAddr> {
+    (host, 0u16)
+        .to_socket_addrs()
+        .ok()
+        .map(|iter| iter.map(|sa| sa.ip()).collect())
+        .unwrap_or_default()
+}
+
+/// Run each resolved IP for `host` through `policy.check_resolved_ip`
+/// and return the first denial. No-op when `host` is itself an IP
+/// literal (the policy's URL-level check already covered it).
+fn dns_check(
+    ctx: &HostCtx,
+    action: &'static str,
+    host: &str,
+) -> Result<(), aegis_policy::PolicyError> {
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    for ip in resolve_host_to_ips(host) {
+        ctx.policy.check_resolved_ip(action, host, ip)?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------
 // Capability builtins.
 //
@@ -495,6 +529,20 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         let step = ctx.next_step();
         match ctx.policy.check_http_get(url) {
             Ok(parsed) => {
+                if let Some(host) = parsed.host_str() {
+                    if let Err(e) = dns_check(ctx, "http_get", host) {
+                        let msg = e.to_string();
+                        ctx.emit(AuditEvent::denied(
+                            &ctx.task_id,
+                            step,
+                            "net.http_get",
+                            &format!("url={url}"),
+                            &msg,
+                        ));
+                        ctx.capture(CapturedKind::Policy, &msg);
+                        return Err(e.into());
+                    }
+                }
                 ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = ureq::get(parsed.as_str()).call()?;
@@ -534,6 +582,20 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         let step = ctx.next_step();
         match ctx.policy.check_http_post(url) {
             Ok(parsed) => {
+                if let Some(host) = parsed.host_str() {
+                    if let Err(e) = dns_check(ctx, "http_post", host) {
+                        let msg = e.to_string();
+                        ctx.emit(AuditEvent::denied(
+                            &ctx.task_id,
+                            step,
+                            "net.http_post",
+                            &format!("url={url}"),
+                            &msg,
+                        ));
+                        ctx.capture(CapturedKind::Policy, &msg);
+                        return Err(e.into());
+                    }
+                }
                 ctx.require_confirm(
                     "net.http_post",
                     format!("POST {} ({} bytes)", parsed, body.len()),
@@ -703,6 +765,34 @@ allow = ["subprocess.exec"]
         let err = runner.run("t1", src, "test.star").unwrap_err();
         assert!(matches!(err, AegisError::Policy(_)),
             "expected policy violation for unknown command, got: {err:?}");
+    }
+
+    #[test]
+    fn dns_resolves_hostname_through_deny_cidr() {
+        // `localhost` reliably resolves to 127.0.0.1 / ::1 on every
+        // POSIX system. Combined with the loopback CIDR, this lets
+        // us exercise the full DNS-then-policy path without a real
+        // network round-trip.
+        let toml = r#"
+[network]
+http_get_allow = ["localhost"]
+deny_ips = ["127.0.0.0/8", "::1/128"]
+
+[functions]
+allow = ["net.http_get"]
+"#;
+        let runner = runner_for(toml, PathBuf::from("/tmp"));
+        let src = r#"net.http_get("http://localhost:1/")"#;
+        let err = runner.run("t1", src, "test.star").unwrap_err();
+        assert!(matches!(err, AegisError::Policy(_)),
+            "expected policy violation from DNS-resolved deny, got: {err:?}");
+        let msg = err.to_string();
+        // Either the v4 or v6 loopback IP should appear in the
+        // diagnostic depending on which the resolver returned first.
+        assert!(
+            msg.contains("127.") || msg.contains("::1"),
+            "expected resolved-IP diagnostic, got: {msg}"
+        );
     }
 
     #[test]

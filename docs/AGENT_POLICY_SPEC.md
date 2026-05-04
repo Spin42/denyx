@@ -252,12 +252,27 @@ allowed.
 ### Host matching (network)
 
 - Hosts are matched by glob (`*.npmjs.org` matches `registry.npmjs.org`).
-- IP literals are matched as-is. Implementers SHOULD support CIDR
-  ranges for `deny_ips` (e.g. `10.0.0.0/8`); compatibility note
-  required if not.
-- A request to a URL `https://h:p/path` is allowed if the host `h`
-  is not in `deny_hosts`/`deny_ips` and IS in the verb-specific allow
-  list.
+- `deny_ips` entries may be **literal IPs** (`"169.254.169.254"`) or
+  **CIDR ranges** (`"10.0.0.0/8"`, `"::1/128"`, `"fc00::/7"`). Both
+  v4 and v6 supported. Literal IPs are coerced to host networks
+  internally (`/32` or `/128`) so all matching goes through one
+  CIDR-containment code path.
+- A request to a URL `https://h:p/path` runs through three checks
+  in order:
+  1. If `h` is an IP literal, it is checked against `deny_ips`.
+     Match → reject.
+  2. `h` is checked against `deny_hosts` (glob). Match → reject.
+  3. `h` is checked against the verb-specific allow list.
+     Miss → reject.
+- Implementations SHOULD additionally **DNS-resolve hostnames**
+  before initiating the request and run each resolved A/AAAA
+  through the `deny_ips` check. This catches the case where a
+  hostname (which passed the host glob check) resolves to an
+  internal IP. Aegis fails open on resolution errors (a temporary
+  DNS hiccup shouldn't block legitimate traffic) and matches at
+  the IP layer; full defense against DNS rebinding requires
+  resolved-IP pinning passed into the HTTP client, which is beyond
+  v1.
 
 ### Subprocess matching
 
@@ -436,7 +451,7 @@ The honest picture:
 | `[network]` http_get, http_post  | ✅ enforced |
 | `[network]` http_put / patch / delete | ⚠️ schema only (no built-in yet) |
 | `[network]` deny_hosts (glob)    | ✅ enforced |
-| `[network]` deny_ips (literal)   | ✅ enforced (CIDR not yet) |
+| `[network]` deny_ips (literal + CIDR) | ✅ enforced; DNS-resolves hostnames and checks each A/AAAA |
 | `[environment]` allow_vars / deny_vars | ✅ enforced |
 | `[subprocess].allow_commands` / `deny_commands` | ✅ enforced |
 | `[subprocess.deny_args]`         | ✅ enforced (substring on joined argv[1..]) |

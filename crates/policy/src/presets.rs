@@ -53,8 +53,20 @@ deny = [
 ]
 
 [network]
+# CIDR-aware. Blocks SSRF-style targets at the IP level: cloud
+# metadata services, RFC 1918 internal ranges, loopback. Hostnames
+# in HTTP requests are DNS-resolved at call time and each resolved
+# IP is checked against this list, so a hostname that resolves to
+# 192.168.1.1 is rejected the same way a literal 192.168.1.1 URL is.
 deny_ips = [
-    "169.254.169.254",   # cloud metadata service (IMDSv1/2)
+    "169.254.0.0/16",   # link-local + cloud metadata (IMDSv1/2 lives at 169.254.169.254)
+    "10.0.0.0/8",       # RFC 1918 private
+    "172.16.0.0/12",    # RFC 1918 private
+    "192.168.0.0/16",   # RFC 1918 private
+    "127.0.0.0/8",      # IPv4 loopback
+    "::1/128",          # IPv6 loopback
+    "fc00::/7",         # IPv6 unique local
+    "fe80::/10",        # IPv6 link-local
 ]
 
 [environment]
