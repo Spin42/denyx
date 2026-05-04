@@ -52,6 +52,9 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability { name: "fs.delete", raw: "_aegis_fs_delete" },
     Capability { name: "net.http_get", raw: "_aegis_net_http_get" },
     Capability { name: "net.http_post", raw: "_aegis_net_http_post" },
+    Capability { name: "net.http_put", raw: "_aegis_net_http_put" },
+    Capability { name: "net.http_patch", raw: "_aegis_net_http_patch" },
+    Capability { name: "net.http_delete", raw: "_aegis_net_http_delete" },
     Capability { name: "subprocess.exec", raw: "_aegis_subprocess_exec" },
     Capability { name: "env.read", raw: "_aegis_env_read" },
 ];
@@ -70,6 +73,9 @@ fs = struct(\n\
 net = struct(\n\
     http_get = _aegis_net_http_get,\n\
     http_post = _aegis_net_http_post,\n\
+    http_put = _aegis_net_http_put,\n\
+    http_patch = _aegis_net_http_patch,\n\
+    http_delete = _aegis_net_http_delete,\n\
 )\n\
 subprocess = struct(\n\
     exec = _aegis_subprocess_exec,\n\
@@ -620,6 +626,170 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                     &ctx.task_id,
                     step,
                     "net.http_post",
+                    &format!("url={url}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    fn _aegis_net_http_put<'v>(
+        url: &str,
+        body: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.next_step();
+        match ctx.policy.check_http_put(url) {
+            Ok(parsed) => {
+                if let Some(host) = parsed.host_str() {
+                    if let Err(e) = dns_check(ctx, "http_put", host) {
+                        let msg = e.to_string();
+                        ctx.emit(AuditEvent::denied(
+                            &ctx.task_id,
+                            step,
+                            "net.http_put",
+                            &format!("url={url}"),
+                            &msg,
+                        ));
+                        ctx.capture(CapturedKind::Policy, &msg);
+                        return Err(e.into());
+                    }
+                }
+                ctx.require_confirm(
+                    "net.http_put",
+                    format!("PUT {} ({} bytes)", parsed, body.len()),
+                )?;
+                let result: Result<String, anyhow::Error> = (|| {
+                    let resp = ureq::put(parsed.as_str()).send_string(body)?;
+                    Ok(resp.into_string()?)
+                })();
+                ctx.emit(AuditEvent::http(
+                    &ctx.task_id,
+                    step,
+                    "net.http_put",
+                    parsed.as_str(),
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                result
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "net.http_put",
+                    &format!("url={url}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    fn _aegis_net_http_patch<'v>(
+        url: &str,
+        body: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.next_step();
+        match ctx.policy.check_http_patch(url) {
+            Ok(parsed) => {
+                if let Some(host) = parsed.host_str() {
+                    if let Err(e) = dns_check(ctx, "http_patch", host) {
+                        let msg = e.to_string();
+                        ctx.emit(AuditEvent::denied(
+                            &ctx.task_id,
+                            step,
+                            "net.http_patch",
+                            &format!("url={url}"),
+                            &msg,
+                        ));
+                        ctx.capture(CapturedKind::Policy, &msg);
+                        return Err(e.into());
+                    }
+                }
+                ctx.require_confirm(
+                    "net.http_patch",
+                    format!("PATCH {} ({} bytes)", parsed, body.len()),
+                )?;
+                let result: Result<String, anyhow::Error> = (|| {
+                    let resp = ureq::patch(parsed.as_str()).send_string(body)?;
+                    Ok(resp.into_string()?)
+                })();
+                ctx.emit(AuditEvent::http(
+                    &ctx.task_id,
+                    step,
+                    "net.http_patch",
+                    parsed.as_str(),
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                result
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "net.http_patch",
+                    &format!("url={url}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    fn _aegis_net_http_delete<'v>(
+        url: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.next_step();
+        match ctx.policy.check_http_delete(url) {
+            Ok(parsed) => {
+                if let Some(host) = parsed.host_str() {
+                    if let Err(e) = dns_check(ctx, "http_delete", host) {
+                        let msg = e.to_string();
+                        ctx.emit(AuditEvent::denied(
+                            &ctx.task_id,
+                            step,
+                            "net.http_delete",
+                            &format!("url={url}"),
+                            &msg,
+                        ));
+                        ctx.capture(CapturedKind::Policy, &msg);
+                        return Err(e.into());
+                    }
+                }
+                ctx.require_confirm("net.http_delete", format!("DELETE {}", parsed))?;
+                let result: Result<String, anyhow::Error> = (|| {
+                    let resp = ureq::delete(parsed.as_str()).call()?;
+                    Ok(resp.into_string()?)
+                })();
+                ctx.emit(AuditEvent::http(
+                    &ctx.task_id,
+                    step,
+                    "net.http_delete",
+                    parsed.as_str(),
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                result
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "net.http_delete",
                     &format!("url={url}"),
                     &msg,
                 ));

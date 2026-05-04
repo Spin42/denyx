@@ -312,6 +312,9 @@ pub struct Policy {
     fs_deny: PathMatcher,
     net_get_hosts: HostMatcher,
     net_post_hosts: HostMatcher,
+    net_put_hosts: HostMatcher,
+    net_patch_hosts: HostMatcher,
+    net_delete_hosts: HostMatcher,
     net_deny_hosts: HostMatcher,
     /// Parsed deny_ips entries, each held as an `IpNet`. Literal IPs
     /// (`169.254.169.254`) are stored as host networks (`/32` or
@@ -353,6 +356,9 @@ impl Policy {
         let fs_deny = PathMatcher::build(&root, &file.filesystem.deny)?;
         let net_get_hosts = HostMatcher::build(&file.network.http_get_allow)?;
         let net_post_hosts = HostMatcher::build(&file.network.http_post_allow)?;
+        let net_put_hosts = HostMatcher::build(&file.network.http_put_allow)?;
+        let net_patch_hosts = HostMatcher::build(&file.network.http_patch_allow)?;
+        let net_delete_hosts = HostMatcher::build(&file.network.http_delete_allow)?;
         let net_deny_hosts = HostMatcher::build(&file.network.deny_hosts)?;
         let net_deny_ips = file
             .network
@@ -380,6 +386,9 @@ impl Policy {
             fs_deny,
             net_get_hosts,
             net_post_hosts,
+            net_put_hosts,
+            net_patch_hosts,
+            net_delete_hosts,
             net_deny_hosts,
             net_deny_ips,
             env_allow,
@@ -457,6 +466,15 @@ impl Policy {
     pub fn check_http_post(&self, url: &str) -> Result<Url, PolicyError> {
         self.check_http(url, HttpVerb::Post)
     }
+    pub fn check_http_put(&self, url: &str) -> Result<Url, PolicyError> {
+        self.check_http(url, HttpVerb::Put)
+    }
+    pub fn check_http_patch(&self, url: &str) -> Result<Url, PolicyError> {
+        self.check_http(url, HttpVerb::Patch)
+    }
+    pub fn check_http_delete(&self, url: &str) -> Result<Url, PolicyError> {
+        self.check_http(url, HttpVerb::Delete)
+    }
 
     fn check_http(&self, url: &str, verb: HttpVerb) -> Result<Url, PolicyError> {
         let parsed = Url::parse(url).map_err(|e| PolicyError::HostDenied {
@@ -487,6 +505,9 @@ impl Policy {
         let allow = match verb {
             HttpVerb::Get => &self.net_get_hosts,
             HttpVerb::Post => &self.net_post_hosts,
+            HttpVerb::Put => &self.net_put_hosts,
+            HttpVerb::Patch => &self.net_patch_hosts,
+            HttpVerb::Delete => &self.net_delete_hosts,
         };
         if !allow.is_match(&host) {
             return Err(PolicyError::HostDenied {
@@ -636,12 +657,18 @@ impl FsAction {
 enum HttpVerb {
     Get,
     Post,
+    Put,
+    Patch,
+    Delete,
 }
 impl HttpVerb {
     fn as_str(self) -> &'static str {
         match self {
             HttpVerb::Get => "http_get",
             HttpVerb::Post => "http_post",
+            HttpVerb::Put => "http_put",
+            HttpVerb::Patch => "http_patch",
+            HttpVerb::Delete => "http_delete",
         }
     }
 }
@@ -846,6 +873,34 @@ deny = []
         assert!(p.check_http_get("https://registry.npmjs.org/foo").is_ok());
         assert!(p.check_http_get("https://evil.example.com/").is_err());
         assert!(p.check_http_get("https://169.254.169.254/").is_err());
+    }
+
+    #[test]
+    fn http_verb_allow_lists_independent() {
+        let toml = r#"
+[network]
+http_get_allow    = ["api.github.com"]
+http_post_allow   = ["api.example.com"]
+http_put_allow    = ["api.example.com"]
+http_patch_allow  = ["api.example.com"]
+http_delete_allow = ["api.example.com"]
+
+[functions]
+allow = ["net.http_get", "net.http_post", "net.http_put", "net.http_patch", "net.http_delete"]
+"#;
+        let file = PolicyFile::from_toml_str(toml).unwrap();
+        let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+        // GET only on api.github.com
+        assert!(p.check_http_get("https://api.github.com/zen").is_ok());
+        assert!(p.check_http_get("https://api.example.com/").is_err());
+        // POST/PUT/PATCH/DELETE only on api.example.com
+        assert!(p.check_http_post("https://api.example.com/x").is_ok());
+        assert!(p.check_http_post("https://api.github.com/x").is_err());
+        assert!(p.check_http_put("https://api.example.com/x").is_ok());
+        assert!(p.check_http_patch("https://api.example.com/x").is_ok());
+        assert!(p.check_http_delete("https://api.example.com/x").is_ok());
+        // Cross-verb leaks are blocked
+        assert!(p.check_http_put("https://api.github.com/x").is_err());
     }
 
     fn cidr_policy() -> Policy {

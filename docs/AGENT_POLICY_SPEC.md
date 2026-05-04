@@ -177,9 +177,9 @@ The canonical capability names are:
 | `fs.delete`        | Remove a file                                        |
 | `net.http_get`     | HTTP GET                                             |
 | `net.http_post`    | HTTP POST                                            |
-| `net.http_put`     | HTTP PUT (reserved)                                  |
-| `net.http_patch`   | HTTP PATCH (reserved)                                |
-| `net.http_delete`  | HTTP DELETE (reserved)                               |
+| `net.http_put`     | HTTP PUT                                             |
+| `net.http_patch`   | HTTP PATCH                                           |
+| `net.http_delete`  | HTTP DELETE                                          |
 | `env.read`         | Read named environment variable                      |
 | `subprocess.exec`  | Spawn a child process                                |
 
@@ -493,7 +493,7 @@ The honest picture:
 |----------------------------------|-------------------|
 | `[filesystem]` (read/write/delete allow + deny) | ✅ enforced |
 | `[network]` http_get, http_post  | ✅ enforced |
-| `[network]` http_put / patch / delete | ⚠️ schema only (no built-in yet) |
+| `[network]` http_put / patch / delete | ✅ enforced |
 | `[network]` deny_hosts (glob)    | ✅ enforced |
 | `[network]` deny_ips (literal + CIDR) | ✅ enforced; DNS-resolves hostnames and checks each A/AAAA |
 | `[environment]` allow_vars / deny_vars | ✅ enforced |
