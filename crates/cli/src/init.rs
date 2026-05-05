@@ -151,6 +151,14 @@ allow_commands = [
     "git",
     "make",
 ]
+# `secure-defaults` denies the python interpreter wholesale because
+# `python -c "..."` runs arbitrary code that bypasses the argv path
+# gate (and thus Aegis's filesystem policy). The Python language
+# template needs python to function, so we negate the deny — and
+# accept the privilege grant. The deny_args below blocks the
+# inline-execution flags so the agent can't trivially exfiltrate
+# files via constructed paths in -c strings.
+deny_commands = ["!python", "!python3"]
 
 [subprocess.deny_args]
 # Block git operations that rewrite or destroy history. The preset does
@@ -169,6 +177,16 @@ git = [
     "update-ref -d",
     "reflog expire",
 ]
+# Block inline-execution flags. `python -c "<code>"` and
+# `python -e "<code>"` run arbitrary Python with full filesystem and
+# network access (whatever the OS allows the user). The argv path
+# gate sees the inline string but cannot reason about what the
+# Python code inside it will open. Blocking the flags forces the
+# agent to use real .py files, which DO go through fs.read/write
+# gates.
+python  = ["-c", "-e"]
+python3 = ["-c", "-e"]
+pip     = ["install --target", "install --prefix"]   # don't write outside venv
 
 # Capabilities are auto-derived from the populated resource sections
 # above: read_allow ⇒ fs.read, write_allow ⇒ fs.write, allow_commands
@@ -269,6 +287,14 @@ allow_commands = [
     "git",
     "make",
 ]
+# `secure-defaults` denies node + node-family interpreters because
+# `node -e "<code>"` and `node -p "<expr>"` run arbitrary JS that
+# bypasses the argv path gate. The Node template needs `node`, so
+# we negate — and the deny_args below blocks the inline-execution
+# flags. `npm`/`npx`/`tsx`/`ts-node` ultimately run node too, but
+# they're project-bound (script names, package.json) and not
+# generic exec surfaces.
+deny_commands = ["!node"]
 
 [subprocess.deny_args]
 git = [
@@ -291,6 +317,10 @@ git = [
 npm = ["publish"]
 pnpm = ["publish"]
 yarn = ["publish"]
+# Block inline-execution flags. `node -e "<js>"` and `node -p "<expr>"`
+# run arbitrary JavaScript with full filesystem and network access;
+# the argv path gate cannot reason about the JS inside the string.
+node = ["-e", "-p", "--eval", "--print"]
 
 # Capabilities are auto-derived from the populated resource sections
 # above. Populate [network].http_get_allow to enable net.http_get.

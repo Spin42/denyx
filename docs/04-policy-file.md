@@ -250,6 +250,91 @@ false-positive cases (the pattern `add` would match `bundle config add`
 even though intent was `bundle add`); use more specific patterns
 (`"add "` with trailing space, or `"add gem-name"`) when needed.
 
+#### Subprocess is a privilege boundary
+
+Listing a binary in `allow_commands` is a *privilege grant*, not just
+a permission. The runtime gates argv at three levels:
+
+1. **`check_subprocess_command`** — argv[0] must be in `allow_commands`
+   and not in `deny_commands`.
+2. **`check_subprocess_args`** — joined argv[1..] is checked against
+   `[subprocess.deny_args]` per-command patterns.
+3. **`check_subprocess_argv_paths`** — every argv element that *looks
+   like a path* (absolute, tilde, contains `/`, or names an existing
+   file at the policy root) is checked against the same `[filesystem]`
+   rules the script itself would face. `subprocess.exec(["cat",
+   "/etc/passwd"])` is rejected.
+
+What these gates **cannot** see: paths constructed inside a string
+argument to a shell evaluator or interpreter. `python3 -c
+"open(chr(47)+'etc'+chr(47)+'passwd').read()"` — the inline string
+contains no literal `/`, the path is computed at runtime, and Aegis
+has no visibility into the Python interpreter's heap. **Any binary
+that takes inline code (`sh -c`, `bash -c`, `python -c`, `node -e`,
+`perl -e`, `ruby -e`, `lua -e`) is a wholesale bypass for the argv
+gate when allowed in `allow_commands`.**
+
+Two layers of defense:
+
+**Layer 1 (always on): tightened `secure-defaults`.** The preset
+denies shell evaluators (`sh`, `bash`, `zsh`, `dash`, `fish`),
+inline-execution interpreters (`python`, `python3`, `ruby`, `node`,
+`perl`, ...), and generic command runners (`env`, `xargs`, `watch`,
+`timeout`) by default. Operators who legitimately need them must
+`!`-negate AND understand that the language-runtime defense
+collapses for those calls. The `aegis init` language templates that
+need the relevant interpreter (`python` for Python, `node` for
+Node, etc.) negate it AND add a `[subprocess.deny_args]` entry that
+blocks the inline-execution flags (`-c`, `-e`, `-p`).
+
+**Layer 2 (opt-in): `[subprocess].sandbox = "bwrap"`.** OS-level
+isolation. Every `subprocess.exec` call is wrapped with
+[bubblewrap](https://github.com/containers/bubblewrap), which
+constructs a fresh Linux namespace + bind-mount jail per call. The
+child sees:
+
+- `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin` (read-only) — needed
+  to exec at all
+- `/etc/ld.so.cache`, `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf` (read-only) — linker + DNS
+- `/proc`, `/dev` (special mounts, minimal)
+- Each concrete prefix derived from the policy's read/write/delete
+  allow lists (read-only or read-write as appropriate)
+- *Nothing else.* `/etc/passwd` is not bound. `~/.aws` is not
+  bound. The agent's writable directories outside the policy are
+  not bound. The child literally cannot reach paths the policy
+  didn't permit, **no matter what obfuscation an interpreter uses
+  to construct them.**
+
+```toml
+[subprocess]
+allow_commands = ["python3", "git", "make"]
+sandbox        = "bwrap"   # opt in to OS-level isolation
+```
+
+Properties:
+- Linux-only for v1. Requires `bubblewrap` installed (`apt install
+  bubblewrap` on Debian/Ubuntu, `dnf install bubblewrap` on
+  Fedora). Aegis refuses to load if `sandbox = "bwrap"` is set but
+  the binary isn't on `PATH` — silent fall-through to non-sandboxed
+  execution would be the wrong direction.
+- Per-call overhead: ~10-50ms for the namespace setup.
+- Network: kept (`--share-net`) if any `[network].http_*_allow` is
+  populated; otherwise the netns is dropped (`--unshare-net`).
+- Process: `--die-with-parent`, `--unshare-pid/uts/ipc`,
+  `--new-session`. The child is sandboxed and won't outlive Aegis.
+- Env: `--clearenv` then `--setenv` per declared `allow_vars`.
+  Mirrors the language-layer env filter; bwrap is also responsible
+  for env scoping when this mode is on.
+
+When `sandbox = "bwrap"` is enabled, the argv path-gate (Layer 1)
+becomes a fast first-line check; the bwrap layer is the actual
+enforcement. Even if the path-gate has a false negative for some
+clever argv, the child still can't reach paths outside the
+bind-mount layout.
+
+macOS/Windows operators get Layer 1 only today; platform-specific
+backends (`sandbox-exec`, Job Objects) are future work.
+
 #### Subprocess env is filtered, not inherited
 
 The child process **does not inherit the parent's full environment**.

@@ -585,13 +585,37 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         // policy bypass for any command that prints / logs / sends
         // its env. Use env_clear() and pass only what the policy
         // says the child should see.
-        let mut cmd = std::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
-        cmd.env_clear();
-        for (name, value) in ctx.policy.subprocess_env(&argv[0]) {
-            cmd.env(name, value);
-        }
-        let output = cmd.output();
+        let env_pairs = ctx.policy.subprocess_env(&argv[0]);
+        let output = match ctx.policy.sandbox_mode() {
+            aegis_policy::SandboxMode::None => {
+                // Default mode: spawn directly with filtered env.
+                let mut cmd = std::process::Command::new(&argv[0]);
+                cmd.args(&argv[1..]);
+                cmd.env_clear();
+                for (name, value) in &env_pairs {
+                    cmd.env(name, value);
+                }
+                cmd.output()
+            }
+            aegis_policy::SandboxMode::Bwrap => {
+                // Sandboxed mode: bubblewrap builds a fresh
+                // namespaced jail per call, with bind mounts derived
+                // from the policy. The child's filesystem view is
+                // exactly what the policy allows; paths outside it
+                // do not exist for the child, no matter what
+                // obfuscation a clever interpreter might use to
+                // construct them. bwrap itself handles env via
+                // --clearenv / --setenv (built into bwrap_argv).
+                let bwrap_argv = ctx.policy.bwrap_argv(&argv, &env_pairs);
+                let mut cmd = std::process::Command::new(&bwrap_argv[0]);
+                cmd.args(&bwrap_argv[1..]);
+                // Parent env is irrelevant — bwrap clears it via
+                // --clearenv inside the jail. We still env_clear()
+                // the parent invocation as a belt-and-suspenders.
+                cmd.env_clear();
+                cmd.output()
+            }
+        };
         match output {
             Ok(out) => {
                 let ok = out.status.success();

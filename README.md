@@ -249,6 +249,13 @@ operational items (◇) gate easy adoption.
   themselves)
 - ✅ Local-only visibility class (read OK, value never bubbles up;
   output-boundary substring redaction)
+- ✅ Subprocess argv path-policy gate
+  (`subprocess.exec(["cat", "/etc/passwd"])` rejected — argv args
+  that look like paths are checked against `[filesystem]` rules)
+- ✅ Opt-in OS-level sandbox via `[subprocess].sandbox = "bwrap"`
+  (Linux only; bubblewrap-backed namespaced bind-mount jail per
+  call — paths outside the policy literally don't exist for the
+  child, defeats every interpreter-side path-obfuscation trick)
 
 ### Still open
 

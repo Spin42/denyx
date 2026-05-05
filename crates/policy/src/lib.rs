@@ -324,6 +324,46 @@ pub struct SubprocessPolicy {
     /// the spec so portable policies can capture intent today.
     #[serde(default)]
     pub deny_args: std::collections::BTreeMap<String, Vec<String>>,
+    /// OS-level isolation mode for subprocess.exec. "none" (default)
+    /// runs the child as a normal process inheriting the parent's
+    /// filesystem and (filtered) env. "bwrap" wraps every call with
+    /// bubblewrap, building a fresh namespaced jail per call whose
+    /// view of the filesystem is exactly what the policy permits —
+    /// at the OS layer, not just at the argv-scan layer. The child
+    /// literally cannot reach paths Aegis didn't bind in.
+    ///
+    /// Linux-only for v1. macOS / Windows operators get the
+    /// language-runtime defenses (argv path gate + deny lists);
+    /// platform-specific sandbox backends (sandbox-exec, Job
+    /// Objects) are future work.
+    ///
+    /// When set to "bwrap", policy load verifies the bubblewrap
+    /// binary is on PATH and refuses to start otherwise.
+    #[serde(default)]
+    pub sandbox: SandboxMode,
+}
+
+/// OS-level isolation backend for `subprocess.exec`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    /// Run the child as a regular process. Aegis's argv path-gate
+    /// + deny lists are the defense. Cross-platform.
+    #[default]
+    None,
+    /// Wrap each call with bubblewrap. Linux-only. The child
+    /// receives a constructed filesystem view; paths outside the
+    /// policy's allow lists do not exist for it.
+    Bwrap,
+}
+
+impl SandboxMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxMode::None => "none",
+            SandboxMode::Bwrap => "bwrap",
+        }
+    }
 }
 
 
@@ -553,6 +593,21 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
                 over.subprocess.local_only_commands,
             ),
             deny_args: merge_deny_args(base.subprocess.deny_args, over.subprocess.deny_args),
+            // Sandbox is a scalar; over wins if it's not the default
+            // (None). User explicitly setting `sandbox = "none"` to
+            // override an inherited "bwrap" is currently
+            // distinguishable only via "is the user file's value
+            // identical to the base's value?" — which we can't tell
+            // through serde defaults. Practical compromise: take
+            // over.sandbox unless it's the default; this means
+            // a user can't silently turn off an inherited sandbox
+            // by writing `sandbox = "none"`, which is the safe
+            // direction.
+            sandbox: if over.subprocess.sandbox == SandboxMode::default() {
+                base.subprocess.sandbox
+            } else {
+                over.subprocess.sandbox
+            },
         },
         runtime: RuntimePolicy {
             // Scalar overlay: user-file value wins when set, else
@@ -643,7 +698,35 @@ impl Policy {
         let policy = Self::from_file(file, root)?;
         let policy_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         policy.guard_self_writable(&policy_path)?;
+        // Sandbox preflight: refuse to start if the operator asked
+        // for bwrap but the binary isn't available — silent
+        // fall-through to non-sandboxed execution would be worse
+        // than failing loudly.
+        policy.guard_sandbox_available()?;
         Ok(policy)
+    }
+
+    /// If `[subprocess].sandbox = "bwrap"` is configured, verify the
+    /// `bwrap` binary is on PATH. Without this check, an operator
+    /// who set sandbox = "bwrap" expecting OS-level isolation could
+    /// silently run un-sandboxed if bwrap isn't installed — exactly
+    /// the wrong direction. Refuse to load instead.
+    pub fn guard_sandbox_available(&self) -> Result<()> {
+        match self.sandbox_mode() {
+            SandboxMode::None => Ok(()),
+            SandboxMode::Bwrap => {
+                if which_on_path("bwrap").is_none() {
+                    anyhow::bail!(
+                        "policy sets `[subprocess].sandbox = \"bwrap\"` but the \
+                         `bwrap` binary is not on PATH. Install bubblewrap \
+                         (Debian/Ubuntu: `apt install bubblewrap`; Fedora: \
+                         `dnf install bubblewrap`) or set `sandbox = \"none\"`. \
+                         Linux-only for v1; macOS/Windows backends are future work."
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Refuse to load a policy that grants write or delete on its own
@@ -1104,6 +1187,147 @@ impl Policy {
         out
     }
 
+    /// The OS-level sandbox backend the policy declares for
+    /// `subprocess.exec`. See [`SandboxMode`].
+    pub fn sandbox_mode(&self) -> SandboxMode {
+        self.file.subprocess.sandbox
+    }
+
+    /// Build the `bwrap` argv that wraps `user_argv` with the
+    /// bind-mount layout derived from this policy. Pass `env` as
+    /// the (name, value) pairs the child should see — typically
+    /// `policy.subprocess_env(argv0)`.
+    ///
+    /// The returned `Vec<String>` is meant to be handed to
+    /// `std::process::Command::new(<vec[0]>).args(<vec[1..]>)`.
+    /// Only valid when `sandbox_mode() == Bwrap`.
+    ///
+    /// Layout (kept minimal — we'd rather break a niche binary than
+    /// silently expose a path the policy didn't permit):
+    ///
+    /// - `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin` read-only
+    ///   (binaries + libs the child needs to exec at all).
+    /// - `/etc/ld.so.cache`, `/etc/ld.so.conf*`, `/etc/alternatives`,
+    ///   `/etc/resolv.conf` read-only (linker + DNS).
+    /// - `/proc`, `/dev` (special mounts; `--proc` and `--dev` give
+    ///   the child a working but minimal view).
+    /// - For each concrete prefix derived from the policy's
+    ///   read-side fs lists (read_allow + local_only_read): `--ro-bind-try`.
+    /// - For each concrete prefix from write_allow / delete_allow:
+    ///   `--bind-try` (read-write).
+    /// - Network: `--unshare-net` if the policy enables NO http_*
+    ///   capability (the child shouldn't have network either).
+    ///   Otherwise `--share-net` (default for bwrap, name resolution
+    ///   needs /etc/resolv.conf which is bound).
+    /// - Process isolation: `--die-with-parent`, `--new-session`,
+    ///   `--unshare-pid`, `--unshare-uts`, `--unshare-ipc`.
+    /// - `--clearenv` then `--setenv` per declared var (mirrors the
+    ///   existing env_clear() filter — the bwrap pass is also
+    ///   responsible for env scoping when this mode is on).
+    pub fn bwrap_argv(
+        &self,
+        user_argv: &[String],
+        env: &[(String, String)],
+    ) -> Vec<String> {
+        let mut a: Vec<String> = vec!["bwrap".into()];
+
+        // System dirs needed for the child to exec at all.
+        for sys in &[
+            "/usr",
+            "/lib",
+            "/lib64",
+            "/bin",
+            "/sbin",
+            "/etc/ld.so.cache",
+            "/etc/ld.so.conf",
+            "/etc/ld.so.conf.d",
+            "/etc/alternatives",
+            "/etc/resolv.conf",
+            "/etc/nsswitch.conf",
+            "/etc/hosts",
+        ] {
+            a.push("--ro-bind-try".into());
+            a.push((*sys).into());
+            a.push((*sys).into());
+        }
+
+        a.push("--proc".into());
+        a.push("/proc".into());
+        a.push("--dev".into());
+        a.push("/dev".into());
+
+        // Read-side bind mounts derived from policy patterns.
+        let read_paths = collect_concrete_prefixes(
+            &self.root,
+            &self.file.filesystem.read_allow,
+        );
+        for p in read_paths.iter().chain(collect_concrete_prefixes(
+            &self.root,
+            &self.file.filesystem.local_only_read,
+        ).iter()) {
+            if let Some(s) = p.to_str() {
+                a.push("--ro-bind-try".into());
+                a.push(s.into());
+                a.push(s.into());
+            }
+        }
+
+        // Write-side: write_allow + delete_allow.
+        let write_paths = collect_concrete_prefixes(
+            &self.root,
+            &self.file.filesystem.write_allow,
+        );
+        for p in write_paths.iter().chain(collect_concrete_prefixes(
+            &self.root,
+            &self.file.filesystem.delete_allow,
+        ).iter()) {
+            if let Some(s) = p.to_str() {
+                a.push("--bind-try".into());
+                a.push(s.into());
+                a.push(s.into());
+            }
+        }
+
+        // Network: drop the netns if no HTTP verb is permitted.
+        let any_net = !self.file.network.http_get_allow.is_empty()
+            || !self.file.network.http_post_allow.is_empty()
+            || !self.file.network.http_put_allow.is_empty()
+            || !self.file.network.http_patch_allow.is_empty()
+            || !self.file.network.http_delete_allow.is_empty()
+            || !self.file.network.local_only_hosts.is_empty();
+        if !any_net {
+            a.push("--unshare-net".into());
+        }
+
+        // Process isolation.
+        a.push("--die-with-parent".into());
+        a.push("--new-session".into());
+        a.push("--unshare-pid".into());
+        a.push("--unshare-uts".into());
+        a.push("--unshare-ipc".into());
+
+        // Env: clear, then set explicitly.
+        a.push("--clearenv".into());
+        for (k, v) in env {
+            a.push("--setenv".into());
+            a.push(k.clone());
+            a.push(v.clone());
+        }
+
+        // Working directory inside the sandbox: policy root if it's
+        // bind-mounted (it usually is via read_allow / write_allow).
+        if let Some(s) = self.root.to_str() {
+            a.push("--chdir".into());
+            a.push(s.into());
+        }
+
+        // The user's argv follows the bwrap separator.
+        a.push("--".into());
+        a.extend(user_argv.iter().cloned());
+
+        a
+    }
+
     /// Match argv[0] against the subprocess command policy. Both lists
     /// match against the *basename* of argv[0] (so "/usr/bin/git" and
     /// "git" both match "git"). Deny wins. Empty allowlist means "no
@@ -1479,6 +1703,120 @@ fn derive_capabilities(file: &PolicyFile) -> Vec<&'static str> {
         out.push("subprocess.exec");
     }
     out
+}
+
+/// For a list of allow-list patterns, derive the set of concrete
+/// filesystem prefixes the bwrap sandbox should bind in. Each
+/// pattern's prefix is the part up to the first glob character
+/// (`*`, `?`, `[`, `{`), trimmed back to a `/` boundary so the
+/// result is a directory or file path. Tilde-prefixed patterns are
+/// home-expanded; relative patterns are root-anchored; absolute
+/// patterns are taken as-is.
+///
+/// Output is deduped and pruned: if `/foo` and `/foo/bar` both
+/// appear, only `/foo` is kept (the broader binding subsumes the
+/// narrower one).
+fn collect_concrete_prefixes(root: &Path, patterns: &[String]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for raw in patterns {
+        // Skip negation entries (handled at merge time but defensive).
+        let Some(prefix) = concrete_prefix_of(raw) else {
+            // No concrete prefix at all (pattern is just `**` or
+            // `*.json`): bind the whole policy root.
+            out.push(root.to_path_buf());
+            continue;
+        };
+        let resolved = if let Some(rest) = prefix.strip_prefix("~/") {
+            match home_dir() {
+                Some(h) => h.join(rest),
+                None => continue,
+            }
+        } else if prefix == "~" {
+            match home_dir() {
+                Some(h) => h,
+                None => continue,
+            }
+        } else if prefix.starts_with('/') {
+            PathBuf::from(prefix)
+        } else if prefix.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(prefix)
+        };
+        out.push(resolved);
+    }
+    // Dedup + prune children of broader paths.
+    out.sort();
+    out.dedup();
+    let mut pruned: Vec<PathBuf> = Vec::with_capacity(out.len());
+    for p in out {
+        let covered = pruned.iter().any(|existing| p.starts_with(existing));
+        if !covered {
+            pruned.push(p);
+        }
+    }
+    pruned
+}
+
+/// Concrete-prefix extractor: walk the pattern character by
+/// character and return the part before the first glob metachar
+/// (`*`, `?`, `[`, `{`), trimmed back to the last `/` so the
+/// result is a directory boundary. Returns `None` if the pattern
+/// has no concrete prefix at all (e.g. `**`).
+///
+/// Examples:
+///   `src/**`        → Some("src")
+///   `src/foo/*.py`  → Some("src/foo")
+///   `*.json`        → None
+///   `**`            → None
+///   `/etc/passwd`   → Some("/etc/passwd")  (no glob, used as-is)
+///   `~/.aws/**`     → Some("~/.aws")
+fn concrete_prefix_of(raw: &str) -> Option<&str> {
+    if raw.is_empty() {
+        return None;
+    }
+    // Strip leading `!` (gitignore-style negation; defensive — by
+    // the time this runs, merge has already consumed them, but if
+    // someone calls with a raw list, behave sensibly).
+    let raw = raw.strip_prefix('!').unwrap_or(raw);
+    let glob_at = raw.find(|c: char| matches!(c, '*' | '?' | '[' | '{'));
+    let head = match glob_at {
+        Some(p) => &raw[..p],
+        None => raw,
+    };
+    if head.is_empty() {
+        return None;
+    }
+    // Trim back to the last `/` (or keep whole if no `/`, which
+    // means it's a bare name).
+    if let Some(idx) = head.rfind('/') {
+        if idx == 0 {
+            // Like `/foo*` → keep `/`. Caller handles "bind /".
+            // Returning Some("") would lose the absolute marker.
+            // Empty-after-/ is fine: caller resolves accordingly.
+            return Some(&head[..1]);
+        }
+        Some(&head[..idx])
+    } else {
+        // bare name with no slash — concrete prefix is the bare
+        // name (resolved against root).
+        Some(head)
+    }
+}
+
+/// Look up a binary on PATH. Returns the first matching path, or
+/// `None` if no entry of `$PATH` contains an executable file with
+/// the given name. Used at policy load to check that the configured
+/// sandbox backend is actually available.
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let full = dir.join(name);
+        if full.is_file() {
+            return Some(full);
+        }
+    }
+    None
 }
 
 fn home_dir() -> Option<PathBuf> {

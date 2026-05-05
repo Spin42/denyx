@@ -97,28 +97,80 @@ deny_vars = [
 
 [subprocess]
 deny_commands = [
-    # Filesystem destruction
+    # ── Wholesale-bypass commands ──────────────────────────────────
+    # These execute arbitrary code with arbitrary args, opaque to
+    # the argv path-gate. Allowing any of them in `allow_commands`
+    # nullifies Aegis's filesystem and (often) network policies for
+    # whatever the binary chooses to do. Negate via `!sh` etc. only
+    # if you understand the consequences — see docs/04-policy-file.md
+    # "Subprocess is a privilege boundary".
+
+    # Shell evaluators (run arbitrary -c "...")
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "csh",
+    "tcsh",
+    "ksh",
+    "ash",
+    "busybox",
+    # Code interpreters with -c / -e / inline-execution flags
+    "python",
+    "python2",
+    "python3",
+    "pypy",
+    "pypy3",
+    "ruby",
+    "perl",
+    "php",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "lua",
+    "luajit",
+    "tclsh",
+    "expect",
+    # Generic command runners — they spawn whatever you tell them to
+    # spawn, sidestepping the allow_commands list entirely
+    "env",
+    "xargs",
+    "watch",
+    "timeout",
+    "nohup",
+    "setsid",
+    "nice",
+    "ionice",
+    "taskset",
+    "chrt",
+    # ── Filesystem destruction ─────────────────────────────────────
     "rm",
     "dd",
     "mkfs",
     "shred",
-    # Privilege escalation
+    # ── Privilege escalation ───────────────────────────────────────
     "sudo",
     "doas",
     "su",
-    # Out-of-band network access (the agent should use net.* capabilities)
+    # ── Out-of-band network access (agent should use net.* capabilities)
     "curl",
     "wget",
     "nc",
-    # Remote shell
+    "ncat",
+    "socat",
+    # ── Remote shell ───────────────────────────────────────────────
     "ssh",
     "scp",
-    # Direct DB clients (force agents through database.* capability)
+    "rsync",
+    # ── Direct DB clients (force agents through a higher-level layer)
     "psql",
     "mysql",
     "redis-cli",
     "mongosh",
-    # Deployment tools (force agents through deployment.* capability)
+    "sqlite3",
+    # ── Deployment tools (same reasoning)
     "kubectl",
     "helm",
     "aws",
@@ -129,6 +181,13 @@ deny_commands = [
     "terraform",
     "pulumi",
 ]
+
+[subprocess.deny_args]
+# `find -exec CMD` and `find -execdir CMD` spawn CMD with whatever
+# args find chose. Same wholesale-bypass shape as the commands
+# above; deny the flag specifically since `find` itself is otherwise
+# a useful tool that doesn't bypass.
+find = ["-exec", "-execdir"]
 "#;
 
 /// Look up a preset by name. Returns the raw TOML source.
