@@ -174,8 +174,13 @@ The `ConfirmHook` trait lets a host plug in interactive approval for
 capabilities listed in `[confirm_per_call]`. The CLI uses a TTY prompt
 when `aegis run` runs interactively, `AllowAllConfirm` when `--yes` is
 passed, and `DenyAllConfirm` when stdin/stderr aren't a TTY. The MCP
-server defaults to `AllowAllConfirm` because there's no UI surface to
-prompt through (in-process embedders should plug their own UI in).
+server selects between `AllowAllConfirm` and `DenyAllConfirm` via the
+`--confirm-mode {auto-allow,auto-deny}` flag (default `auto-allow`).
+In `auto-deny`, a confirm-gated call returns a tool result with
+`isError: true` and `aegis_error_kind: "confirm_denied"`, naming the
+capability — the orchestrator can interpret that and prompt the user
+out-of-band before reissuing. In-process embedders that want real
+prompt UI should plug their own `ConfirmHook` implementation.
 
 ### Local-only reads (taint)
 

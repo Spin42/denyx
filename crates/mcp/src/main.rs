@@ -28,7 +28,9 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aegis_host::{AllowAllConfirm, AuditSink, JsonlAuditSink, Runner};
+use aegis_host::{
+    AegisError, AllowAllConfirm, AuditSink, ConfirmHook, DenyAllConfirm, JsonlAuditSink, Runner,
+};
 use aegis_policy::Policy;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -50,6 +52,40 @@ struct Cli {
     /// Append audit events to this file (JSON Lines). Default: stderr.
     #[arg(long)]
     audit_log: Option<PathBuf>,
+
+    /// How `confirm_per_call`-listed capabilities behave when invoked
+    /// through this MCP server.
+    ///
+    /// - `auto-allow` (default, backward-compatible): the
+    ///   confirm hook always allows. Same as before this flag
+    ///   existed. `confirm_per_call` is effectively ignored.
+    /// - `auto-deny`: the confirm hook always denies. Any call to a
+    ///   capability listed in `confirm_per_call` returns a tool
+    ///   result with `isError: true` and a `ConfirmDenied` message
+    ///   naming the capability. The orchestrator (Claude Code,
+    ///   opencode, ...) can interpret that error, present a prompt
+    ///   to the user, and re-issue the call from a sibling MCP
+    ///   server / tool that's NOT confirm-gated, or instruct the
+    ///   user to remove the entry from `confirm_per_call` for that
+    ///   session.
+    #[arg(long, default_value = "auto-allow")]
+    confirm_mode: ConfirmMode,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum ConfirmMode {
+    AutoAllow,
+    AutoDeny,
+}
+
+impl ConfirmMode {
+    fn into_hook(self) -> Arc<dyn ConfirmHook> {
+        match self {
+            ConfirmMode::AutoAllow => Arc::new(AllowAllConfirm),
+            ConfirmMode::AutoDeny => Arc::new(DenyAllConfirm),
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,12 +107,16 @@ until you launch with --policy <project.toml>. See examples/policies/ for templa
         Some(path) => Arc::new(JsonlAuditSink::file(path)?),
         None => Arc::new(JsonlAuditSink::stderr()),
     };
-    // MVP: auto-allow confirm-per-call. Interactive hosts that want
-    // real confirm prompts should embed aegis-host in-process and
-    // plug in their own ConfirmHook implementation.
+    // The confirm-mode flag chooses between auto-allow (default,
+    // backward-compatible) and auto-deny. Interactive hosts that
+    // want real prompt UI should embed aegis-host in-process and
+    // plug in their own ConfirmHook implementation; auto-deny is
+    // the closest-to-interactive option for MCP today (the
+    // orchestrator interprets the structured error and decides
+    // whether to prompt the user out-of-band).
     let runner = Runner::new(policy)
         .with_audit(audit)
-        .with_confirm_hook(Arc::new(AllowAllConfirm));
+        .with_confirm_hook(cli.confirm_mode.into_hook());
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -190,7 +230,9 @@ fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Valu
 
     let script_result = match dispatch(&name, &args, &task_id) {
         Ok(s) => s,
-        Err(msg) => return tool_error_response(id, msg),
+        Err(msg) => {
+            return tool_error_response(id, &AegisError::Other(msg));
+        }
     };
 
     match runner.run(&task_id, &script_result.script, &script_result.script_name) {
@@ -203,18 +245,34 @@ fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Valu
                 "isError": false,
             }),
         ),
-        Err(e) => tool_error_response(id, e.to_string()),
+        Err(e) => tool_error_response(id, &e),
     }
 }
 
-fn tool_error_response(id: Value, message: String) -> Response {
+/// Tag the error with a stable `aegis_error_kind` string so the
+/// orchestrator can branch on it programmatically without scraping
+/// the human-readable message. ConfirmDenied is the meaningful one
+/// for the confirm-mode plumbing: an orchestrator that sees
+/// `aegis_error_kind == "confirm_denied"` can prompt the user
+/// out-of-band and re-issue from a different code path.
+fn tool_error_response(id: Value, err: &AegisError) -> Response {
+    let kind = match err {
+        AegisError::ConfirmDenied(_) => "confirm_denied",
+        AegisError::Policy(_) => "policy_violation",
+        AegisError::Verifier(_) => "verifier_rejection",
+        AegisError::RuntimeLimit(_) => "runtime_limit",
+        AegisError::Starlark(_) => "starlark_error",
+        AegisError::Io(_) => "io_error",
+        AegisError::Other(_) => "other",
+    };
     Response::ok(
         id,
         json!({
             "content": [
-                { "type": "text", "text": message }
+                { "type": "text", "text": err.to_string() }
             ],
             "isError": true,
+            "aegis_error_kind": kind,
         }),
     )
 }

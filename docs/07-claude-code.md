@@ -100,6 +100,43 @@ To collect audit events to a file:
 
 Each tool call produces one JSON Lines record per effecting action.
 
+### Confirm-gated capabilities
+
+If your policy has `confirm_per_call = ["fs.delete", "subprocess.exec"]`,
+the MCP server's `--confirm-mode` flag picks how those calls are
+treated:
+
+- **`--confirm-mode auto-allow`** (default): the confirm hook
+  always allows. Same as not having `confirm_per_call` at all from
+  the MCP path's perspective. Use this when you trust the agent
+  surface and just want the audit log entry.
+- **`--confirm-mode auto-deny`**: the confirm hook always denies.
+  Each confirm-gated call returns a tool result with
+  `isError: true` and `aegis_error_kind: "confirm_denied"`,
+  naming the capability. Sonnet/Opus can read that error and
+  decide whether to prompt the human (out-of-band) before
+  reissuing — it's the closest thing to interactive confirm that
+  works through MCP today.
+
+Real round-trip prompting through MCP (server-initiated user
+interaction) requires bidirectional protocol support that's not
+yet implemented in Aegis. For interactive prompts today, use
+the `aegis run` CLI directly instead of the MCP server.
+
+```json
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "aegis-mcp",
+      "args": [
+        "--policy", "/path/to/aegis.toml",
+        "--confirm-mode", "auto-deny"
+      ]
+    }
+  }
+}
+```
+
 ### What "policy-gated" actually buys you
 
 A few examples of what Claude Code can no longer do, when wired this
