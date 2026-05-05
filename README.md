@@ -203,6 +203,7 @@ The deep dive lives in [`docs/`](docs/):
 | [07-claude-code.md](docs/07-claude-code.md)         | Wire `aegis-mcp` into Claude Code. Two integration shapes.           |
 | [08-opencode.md](docs/08-opencode.md)               | Same for opencode.                                                    |
 | [09-local-executor.md](docs/09-local-executor.md)   | The full agentic stack: cloud orchestrator → local 7B → Aegis. Includes evaluation results. |
+| [10-running-examples.md](docs/10-running-examples.md) | Reproduction guide for the three eval harnesses (single-step, 36-task multi-step, Sonnet/Opus orchestrated). |
 | [AGENT_POLICY_SPEC.md](docs/AGENT_POLICY_SPEC.md)   | The portable spec — implement the policy format in non-Aegis runtimes. |
 | [CONCLUSIONS.md](docs/CONCLUSIONS.md)               | Sigil retrospective notes (background reading for `02-from-sigil.md`). |
 | [PROJECT_PLAN.md](docs/PROJECT_PLAN.md)             | Initial design plan; historical artifact.                            |
