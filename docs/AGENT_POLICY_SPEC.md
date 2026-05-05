@@ -156,29 +156,43 @@ npm = ["publish"]
 # runtime) to the dotted Aegis capabilities they require. A consuming
 # host that receives a tool call by name (Bash, Read, Edit, WebFetch...)
 # looks up the name here, gets back the implied capabilities, and
-# verifies each against [functions].allow before invoking the tool.
-# Default-deny: a tool not declared here is rejected.
-Read     = ["fs.read"]
-Edit     = ["fs.read", "fs.write"]
-Write    = ["fs.write"]
-Bash     = ["subprocess.exec"]
-WebFetch = ["net.http_get"]
+# verifies each is enabled (i.e. has a populated resource section)
+# before invoking the tool. Default-deny: a tool not declared here is
+# rejected.
+Read      = ["fs.read"]
+Edit      = ["fs.read", "fs.write"]
+Write     = ["fs.write"]
+Bash      = ["subprocess.exec"]
+WebFetch  = ["net.http_get"]
 
-# ----- Capability allowlist -----
-[functions]
-# Which capabilities the script may reference at all. Names are dotted
-# (`fs.read`, `subprocess.exec`, etc.); pre-execution check rejects any
-# script that mentions a capability not in this list. Default-deny
-# means absence is sufficient — a `[functions].deny` section is
-# rarely needed, and is reserved for explicit override of an
-# inherited allow.
-allow = [
-    "fs.read", "fs.write",
-    "net.http_get",
-    "subprocess.exec",
-    "env.read",
-]
+# Long-form `[tools.X]` table: capabilities + optional routing
+# hints. Bridges (e.g. local-executor harnesses) can read
+# `backend_url`/`backend_method` to inject "for WebSearch, GET this
+# URL" into the model's system prompt — so the model doesn't have
+# to guess. The routing hint is informational; the network
+# allowlist is the enforcement.
+[tools.WebSearch]
+capabilities   = ["net.http_get"]
+backend_url    = "https://api.duckduckgo.com/?format=json&no_html=1&skip_disambig=1&q="
+backend_method = "GET"
+description    = "DuckDuckGo Instant Answer API (public, non-tracking, JSON)."
 ```
+
+There is no separate `[functions]` allowlist. The set of permitted
+capabilities is **derived** from which resource sections are
+populated:
+
+- `[filesystem].read_allow` or `local_only_read` non-empty ⇒ `fs.read`
+- `[filesystem].write_allow` non-empty ⇒ `fs.write`
+- `[filesystem].delete_allow` non-empty ⇒ `fs.delete`
+- `[network].http_get_allow` (or any `local_only_hosts` entry) ⇒ `net.http_get`
+- `[network].http_post_allow` (or any `local_only_hosts` entry) ⇒ `net.http_post`
+- `[network].http_put_allow` / `http_patch_allow` / `http_delete_allow` (or `local_only_hosts`) ⇒ the matching verb
+- `[environment].allow_vars` or `local_only_vars` non-empty ⇒ `env.read`
+- `[subprocess].allow_commands` or `local_only_commands` non-empty ⇒ `subprocess.exec`
+
+Listing the resource is the declaration of intent; there's no second
+allowlist to keep in sync.
 
 ### Capability names
 
@@ -534,7 +548,7 @@ The honest picture:
 | `[environment]` allow_vars / deny_vars | ✅ enforced |
 | `[subprocess].allow_commands` / `deny_commands` | ✅ enforced |
 | `[subprocess.deny_args]`         | ✅ enforced (substring on joined argv[1..]) |
-| `[functions].allow` / `deny`     | ✅ enforced (verifier + runtime) |
+| Derived capability set            | ✅ enforced (verifier + runtime); auto-derived from populated resource sections, no `[functions]` block |
 | `[tools]` mapping                | ✅ exposed via Policy::check_tool for hosts that consult Aegis as a policy oracle |
 | `confirm_per_call`               | ✅ enforced |
 | `inherits` (presets)             | ✅ resolved at load |

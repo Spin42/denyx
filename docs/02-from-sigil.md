@@ -1,0 +1,132 @@
+# From Sigil to Aegis
+
+> ← [Back to docs README](README.md)
+
+Aegis is the second iteration of an idea. The first was Sigil — a research
+project that designed a custom DSL for agent code, fine-tuned local models
+to emit it, and ran it in a custom interpreter. Sigil shipped, learned a
+lot, and ultimately produced a sober retrospective: the **language**
+shouldn't be the variable. The deliverable should be the **policy
+substrate**, with the language as close to something the model already
+knows as possible.
+
+This document is the bridge between those two projects. It's the design
+history that justifies why Aegis looks the way it does. The deep
+retrospective notes live in [CONCLUSIONS.md](CONCLUSIONS.md); this is the
+condensed version.
+
+## What Sigil tried
+
+- **A bespoke language.** Sigil-DSL. Indentation-sensitive but
+  not-quite-Python. The promise: a language designed *for* policy
+  enforcement, with capability types built into the grammar.
+- **Fine-tuned local models.** Multiple checkpoints (`qwen-sigil-v6`,
+  `qwen-sigil-v7`, `deepseek-sigil`, `phi-sigil-v2`, `codestral-sigil-base`)
+  trained to emit Sigil-DSL natively.
+- **A custom interpreter.** Designed around the DSL. Capability gates
+  baked into the AST walker.
+- **A "meet the model halfway" stance.** When the model emitted something
+  the strict DSL couldn't parse, the path of least resistance was to relax
+  the dialect (allow f-strings, allow top-level for/if, etc.) — pulling
+  the language toward what the model wanted to write.
+
+## What it ran into
+
+1. **Pre-training proximity dominates fine-tuning.** Even after extensive
+   tuning, the local models would drop back to Python idioms — `import
+   json`, f-strings, `for x in y:` at the top level — because that's what
+   they had seen ten million times during pre-training. Five hours of
+   fine-tuning can't redirect that habit reliably.
+2. **The custom DSL had no ecosystem.** No syntax highlighting, no
+   formatter, no LSP. Every code review of an agent script was harder
+   because reviewers had to parse a language they didn't know.
+3. **Capability typing in the grammar wasn't load-bearing.** The same
+   capability gates could be enforced equally well at the *runtime* level,
+   without requiring the language itself to encode them.
+4. **The "meet halfway" treadmill.** Each dialect relaxation made the
+   parser more complex and the spec harder to reason about, but didn't
+   reach a stable point — the next failure mode was always one tuning
+   gap away.
+5. **Stream C (the local-7B path) plateaued at 7/30 multi-step tasks.**
+   Multi-step composition was where the bespoke-DSL tax compounded most.
+
+The retrospective concluded: **the runtime, not the language, is what
+matters.** A capability-typed runtime over a language the model already
+fluently writes is a strictly better deal than a custom language and a
+fine-tuned model.
+
+## What changed for Aegis
+
+| Decision               | Sigil                              | Aegis                                                |
+|------------------------|------------------------------------|------------------------------------------------------|
+| Language               | Bespoke DSL                        | Starlark (Buck2's strict Python subset)              |
+| Capability gating      | Grammar-level types                | Runtime builtins, all capability calls go through Rust |
+| Local-model strategy   | Fine-tune to emit the DSL          | Use stock models; teach via prompt + RAG when needed |
+| Policy expression      | Embedded in the language           | External TOML file, parsed as data, never executable |
+| "Meet the model"       | Relax the language                 | Don't bend the language; close gaps via RAG/retry    |
+| Trust boundary         | Interpreter                        | Interpreter + pre-execution verifier + audit log     |
+
+Three of these are load-bearing for everything that follows:
+
+### 1. Starlark, not a custom DSL
+
+Aegis embeds [Starlark](https://github.com/bazelbuild/starlark), the
+strict-Python-subset language Bazel and Buck2 use. It's about as close to
+"what a 7B coder model writes when asked for Python" as any safe language
+gets. No imports, no top-level for/if, no f-strings — but stock Python idioms
+like `def`, list/dict comprehensions inside functions, normal string
+operations, all work. Crucially, **Starlark is a real language with a real
+ecosystem** (LSPs, formatters, well-defined semantics). Aegis adds nothing
+to it.
+
+### 2. Don't bend the language
+
+The earlier project's reflex was: when the model emits non-Sigil idioms,
+expand the dialect. Aegis explicitly does the opposite. When a 7B model
+emits `import json` (which Starlark rejects), the answer is to teach the
+model — via the system prompt, via RAG, via validator-in-loop retry. The
+runtime stays spec-compliant Starlark.
+
+This stance is *load-bearing across the project*. It's why local-executor
+evaluation works at all (see [09-local-executor.md](09-local-executor.md)):
+a 7B model + 4 retrieved worked examples + one retry on Starlark errors
+gets 27-29 of 31 multi-step tasks correct, *without ever relaxing the
+runtime*.
+
+### 3. Policy as portable data
+
+Sigil expressed policy in the same language the agent ran in — hard to
+reason about, easy for the agent to be confused into "modifying" it
+in-flight. Aegis's policy is **TOML**. It is parsed as configuration data,
+never as code. The agent script literally cannot rewrite or extend the
+policy from inside the sandbox. And because it's TOML, the same file is
+consumable by any agent runtime — Claude Code, Cursor, opencode, custom
+hosts. See [AGENT_POLICY_SPEC.md](AGENT_POLICY_SPEC.md) for the portable
+spec.
+
+## What Sigil's retrospective measured
+
+Numbers worth keeping in mind, because they motivated several design
+choices in Aegis:
+
+- **Stream C ceiling at parity:** Sigil's local-7B Stream C topped out at
+  **7/30 multi-step tasks** despite extensive tuning effort.
+- **Aegis with a stock 7B (`qwen2.5-coder:7b`):** **10/10 single-step**,
+  **27-29/31 multi-step** with embedding-RAG + 1-retry validator-in-loop.
+- **Aegis with cloud orchestrator on top:** Sonnet **28/31 / $1.16**, Opus
+  **31/31 / $2.24** on the same 31-task suite.
+
+The pre-training-proximity intuition — that pulling the language toward
+what stock models already know is more effective than pulling models
+toward a custom language — is now backed by parity-task numbers across
+both stacks.
+
+## Further reading
+
+- [CONCLUSIONS.md](CONCLUSIONS.md) — the original Sigil retrospective in
+  full. Twelve numbered conclusions; each is a design constraint Aegis
+  inherits.
+- [PROJECT_PLAN.md](PROJECT_PLAN.md) — the initial Aegis design plan
+  (slices 1-3), kept as a historical artifact.
+- [03-architecture.md](03-architecture.md) — what the architecture choices
+  here actually look like in code.
