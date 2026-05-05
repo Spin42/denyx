@@ -33,9 +33,10 @@ from typing import Any, Callable, Optional
 
 import urllib.request
 
-# Local module (same directory as this file)
+# Local modules (same directory as this file)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rag  # noqa: E402
+from local_mcp import load_tools_routing, render_tools_routing  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MCP_BIN = REPO_ROOT / "target" / "release" / "aegis-mcp"
@@ -148,7 +149,7 @@ len, str, int, float, bool, list, dict, range, sorted, reversed, min, max, sum
 String methods: .split, .strip, .startswith, .endswith, .replace, .upper, .lower, .format, .count, .find, .join
 List/dict comprehensions: [x for x in items], [x for x in items if cond], {k: v for ...}
 
-================================================================
+{tools_routing}================================================================
 WORKED EXAMPLES — these are the patterns most relevant to YOUR task. Note: every line starts at column 0. Copy these conventions.
 ================================================================
 
@@ -948,13 +949,21 @@ TASKS: list[Task] = [
 # Driver
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(task: Task, ollama_host: str, k: int = 4) -> str:
+def build_system_prompt(
+    task: Task,
+    ollama_host: str,
+    k: int = 4,
+    tools_routing: str = "",
+) -> str:
     """Per-task system prompt: constant header (rules + anti-patterns +
-    checklist) plus the K most-relevant worked examples retrieved by
-    embedding similarity against the task description."""
+    checklist), any declared `[tools.X]` routing hints from the policy,
+    and the K most-relevant worked examples retrieved by embedding
+    similarity against the task description."""
     examples = rag.retrieve(task.description, k=k, host=ollama_host)
-    return SYSTEM_PROMPT_TEMPLATE.replace(
-        "{retrieved_examples}", rag.render_examples(examples)
+    return (
+        SYSTEM_PROMPT_TEMPLATE
+        .replace("{tools_routing}", tools_routing)
+        .replace("{retrieved_examples}", rag.render_examples(examples))
     )
 
 
@@ -1034,6 +1043,7 @@ def evaluate_one(
     task: Task,
     show_script: bool,
     max_retries: int = 1,
+    tools_routing: str = "",
 ) -> Result:
     if task.setup:
         task.setup()
@@ -1041,7 +1051,7 @@ def evaluate_one(
     retries_used = 0
 
     try:
-        prompt = build_system_prompt(task, ollama_host)
+        prompt = build_system_prompt(task, ollama_host, tools_routing=tools_routing)
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": task.description},
@@ -1140,6 +1150,12 @@ def main() -> int:
     setup_fixtures()
     print(f"# precomputing {len(rag.EXAMPLES)} library embeddings via {rag.EMBED_MODEL}...")
     rag.precompute_library_embeddings(host=args.ollama)
+    # Surface declared `[tools.X]` routing hints to qwen so it knows
+    # which URL to call for named operations (e.g. WebSearch).
+    routing_block = render_tools_routing(load_tools_routing(args.policy))
+    if routing_block:
+        n = routing_block.count("- ")
+        print(f"# surfaced {n} declared tools to the local model")
     client = McpClient(args.mcp_bin, args.policy)
     tasks = TASKS
     if args.only:
@@ -1154,7 +1170,10 @@ def main() -> int:
     try:
         for task in tasks:
             print(f"== [{task.category}] {task.name} (expect: {task.expect})")
-            res = evaluate_one(client, args.model, args.ollama, task, args.show_script)
+            res = evaluate_one(
+                client, args.model, args.ollama, task, args.show_script,
+                tools_routing=routing_block,
+            )
             results.append(res)
             outcome = "ERR" if res.is_error else "OK "
             mark = "✓" if res.verify_passed else "✗"

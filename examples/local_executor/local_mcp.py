@@ -51,6 +51,85 @@ import rag  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_AEGIS_MCP = REPO_ROOT / "target" / "release" / "aegis-mcp"
 
+# tomllib is stdlib in Python 3.11+. We use it to surface the
+# `[tools.X]` routing hints to the local model. If the host runs an
+# older Python, the feature degrades silently — the model just
+# doesn't get the routing block in its prompt.
+try:
+    import tomllib as _toml  # type: ignore[import-not-found]
+except ImportError:
+    _toml = None  # type: ignore[assignment]
+
+
+def load_tools_routing(policy_path: Path) -> list[dict]:
+    """Extract long-form `[tools.X]` entries from a policy file.
+
+    Each returned dict has keys: name, capabilities, backend_url,
+    backend_method (defaulted to GET), description. Short-form
+    entries (capability-list-only) are skipped — they have no
+    routing info to surface.
+    """
+    if _toml is None:
+        return []
+    try:
+        with open(policy_path, "rb") as f:
+            doc = _toml.load(f)
+    except (OSError, _toml.TOMLDecodeError):
+        return []
+    raw_tools = doc.get("tools", {})
+    if not isinstance(raw_tools, dict):
+        return []
+    out: list[dict] = []
+    for name, entry in raw_tools.items():
+        # Only the long form (a TOML table with capabilities + routing
+        # hints) carries info worth surfacing. Skip short-form entries
+        # which are just `Tool = ["cap1", "cap2"]`.
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("backend_url")
+        if not isinstance(url, str) or not url:
+            continue
+        out.append(
+            {
+                "name": name,
+                "capabilities": entry.get("capabilities", []) or [],
+                "backend_url": url,
+                "backend_method": (entry.get("backend_method") or "GET").upper(),
+                "description": entry.get("description") or "",
+            }
+        )
+    return out
+
+
+def render_tools_routing(routes: list[dict]) -> str:
+    """Format a Declared-Tools block for the qwen system prompt.
+    Returns an empty string if no routed tools are declared, so the
+    block can be conditionally omitted from the prompt.
+    """
+    if not routes:
+        return ""
+    lines = [
+        "================================================================",
+        "DECLARED TOOLS (use these URLs when the orchestrator asks for them)",
+        "================================================================",
+        "",
+        "Each entry below is a named operation declared in the policy file",
+        "with a fixed backend URL. When the step description mentions one",
+        "of these tool names (or its purpose), call the listed URL via the",
+        "matching net.http_* builtin — do NOT invent a different host.",
+        "",
+    ]
+    for r in routes:
+        method = r["backend_method"]
+        url = r["backend_url"]
+        desc = r["description"]
+        lines.append(f"- {r['name']}: {method} {url}")
+        if desc:
+            lines.append(f"    {desc}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 PROTOCOL_VERSION = "2024-11-05"
 
 LOCAL_SYSTEM_PROMPT_TEMPLATE = """You are a local code executor running under the Aegis policy-enforced runtime.
@@ -97,7 +176,7 @@ len, str, int, float, bool, list, dict, range, sorted, reversed, min, max, sum
 .split, .strip, .startswith, .endswith, .replace, .upper, .lower, .format, .count, .find, .join
 list/dict comprehensions
 
-================================================================
+{tools_routing}================================================================
 WORKED EXAMPLES — patterns most relevant to your step
 ================================================================
 
@@ -251,11 +330,14 @@ def execute_step(
     model: str,
     ollama_host: str,
     counter: list[int],
+    tools_routing: str = "",
     max_retries: int = 1,
 ) -> tuple[str, bool, int, str]:
     """Run one delegated step. Returns (text, is_error, retries_used, script)."""
     examples = rag.retrieve(step, k=4, host=ollama_host)
     system_prompt = LOCAL_SYSTEM_PROMPT_TEMPLATE.replace(
+        "{tools_routing}", tools_routing
+    ).replace(
         "{retrieved_examples}", rag.render_examples(examples)
     )
     messages = [
@@ -366,6 +448,16 @@ def main() -> int:
     aegis = AegisMcpClient(args.mcp_bin, args.policy, args.audit_log)
     counter = [0]
 
+    # Load any [tools.X] long-form routing hints from the policy and
+    # render them into a system-prompt block. The block is empty if
+    # the policy declared none.
+    routing_block = render_tools_routing(load_tools_routing(args.policy))
+    if routing_block:
+        print(
+            f"[local_mcp] surfaced {routing_block.count('- ')} declared tools to the local model",
+            file=sys.stderr,
+        )
+
     def trace(event: dict) -> None:
         if args.trace is None:
             return
@@ -427,6 +519,7 @@ def main() -> int:
                                 model=args.model,
                                 ollama_host=args.ollama,
                                 counter=counter,
+                                tools_routing=routing_block,
                             )
                         except Exception as e:
                             text, is_error, retries, script = (f"local-executor crash: {e}", True, 0, "")
