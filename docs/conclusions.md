@@ -7,9 +7,9 @@ are not Sigil-specific; they are inputs for the next project on
 > **Status (2026-05-04): Sigil experiment closed.**
 >
 > - Project retrospective: [`SIGIL_RESULT.md`](../sigil/papers/SIGIL_RESULT.md) (sibling repo)
-> - Next-project plan: [`./PROJECT_PLAN.md`](./PROJECT_PLAN.md) — Starlark-dialect host with capability-typed effects, runtime verifier, and audit logging. Designed to make "agent deletes production database" structurally impossible.
+> - Next-project plan: [`./project-plan.md`](./project-plan.md) — Starlark-dialect host with capability-typed effects, runtime verifier, and audit logging. Designed to make "agent deletes production database" structurally impossible.
 > - This file remains the strategic-conclusions reference; the
->   PROJECT_PLAN.md is the actionable next-steps doc.
+>   project-plan.md is the actionable next-steps doc.
 
 Origin: refined during the 2026-05-04 NH2 Tier B work, where the lift
 estimator made the multi-step ceiling concrete; subsequent NH6 / NH10 /

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Adversarial exfiltration probe for Aegis's local-only redaction.
 
-This harness is the empirical companion to docs/SECURITY_THREAT_MODEL.md's
+This harness is the empirical companion to docs/security-threat-model.md's
 "What it does NOT defend against" section. It runs hand-written Starlark
 scripts that *deliberately try* to leak a `local_only_var` through the
 substring-redaction layer, and reports which techniques bypass it.

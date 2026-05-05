@@ -192,27 +192,39 @@ MCP-aware orchestrator.
 
 ## Documentation
 
-The deep dive lives in [`docs/`](docs/):
+The deep dive lives in [`docs/`](docs/) — start with the
+[index](docs/README.md). Two kinds of docs, distinguishable by
+filename:
 
-| Doc                                                | What's in it                                                          |
-|----------------------------------------------------|----------------------------------------------------------------------|
-| [01-why-aegis.md](docs/01-why-aegis.md)             | The problem statement and threat model.                              |
-| [02-from-sigil.md](docs/02-from-sigil.md)           | What the earlier Sigil project taught us; why Aegis looks the way it does. |
-| [03-architecture.md](docs/03-architecture.md)       | Capability typing, the three lines of defense, the crate layout.     |
-| [04-policy-file.md](docs/04-policy-file.md)         | **Policy file reference.** Every section, every option, with examples. Includes the `aegis init` generator and the local-only-reads feature. |
-| [05-install.md](docs/05-install.md)                 | Prerequisites: Rust, Ollama, Claude Code / opencode.                 |
-| [06-quickstart.md](docs/06-quickstart.md)           | A 5-minute walkthrough — generate, run, audit.                       |
-| [07-claude-code.md](docs/07-claude-code.md)         | Wire `aegis-mcp` into Claude Code. Two integration shapes.           |
-| [08-opencode.md](docs/08-opencode.md)               | Same for opencode.                                                    |
-| [09-local-executor.md](docs/09-local-executor.md)   | The full agentic stack: cloud orchestrator → local 7B → Aegis. Includes evaluation results. |
-| [10-running-examples.md](docs/10-running-examples.md) | Reproduction guide for the three eval harnesses (single-step, 36-task multi-step, Sonnet/Opus orchestrated). |
-| [AGENT_POLICY_SPEC.md](docs/AGENT_POLICY_SPEC.md)   | The portable spec — implement the policy format in non-Aegis runtimes. |
-| [CONCLUSIONS.md](docs/CONCLUSIONS.md)               | Sigil retrospective notes (background reading for `02-from-sigil.md`). |
-| [PROJECT_PLAN.md](docs/PROJECT_PLAN.md)             | Initial design plan; historical artifact.                            |
+- **Numbered (`NN-...md`)** are the reading path: read 01 → 10 in
+  order to understand Aegis end-to-end.
+- **Lowercase reference (`name.md`)** is looked up, not read in
+  sequence: specifications, security writeups, historical artifacts.
 
-The single most important read is
-[**docs/04-policy-file.md**](docs/04-policy-file.md). The policy file is
-the whole product.
+### Reading path
+
+| #  | Doc                                                | What's in it |
+|----|----------------------------------------------------|--------------|
+| 01 | [why-aegis](docs/01-why-aegis.md)                  | Problem statement and threat-model framing. |
+| 02 | [from-sigil](docs/02-from-sigil.md)                | What the predecessor Sigil project taught us; why Aegis looks the way it does. |
+| 03 | [architecture](docs/03-architecture.md)            | Capability typing, the three lines of defense, the crate layout. |
+| 04 | [policy-file](docs/04-policy-file.md)              | **The most important read.** Every section, every option, with examples. The `aegis init` generator and the local-only-reads feature. |
+| 05 | [install](docs/05-install.md)                      | Prerequisites: Rust, Ollama, Claude Code / opencode. |
+| 06 | [quickstart](docs/06-quickstart.md)                | 5-minute walkthrough — generate, run, audit. |
+| 07 | [claude-code](docs/07-claude-code.md)              | Wire `aegis-mcp` into Claude Code. |
+| 08 | [opencode](docs/08-opencode.md)                    | Same for opencode. |
+| 09 | [local-executor](docs/09-local-executor.md)        | The full agentic stack: cloud orchestrator → local 7B → Aegis. Includes evaluation results. |
+| 10 | [running-examples](docs/10-running-examples.md)    | Reproduction guide for the three eval harnesses. |
+
+### Reference
+
+| Doc                                                       | What's in it |
+|-----------------------------------------------------------|--------------|
+| [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec. Implement in non-Aegis runtimes. |
+| [security-threat-model](docs/security-threat-model.md)    | One-page review companion. What Aegis claims to defend; what it explicitly does *not*. Read first if you're auditing. |
+| [security-audit](docs/security-audit.md)                  | The 16-surface bypass-assessment writeup. Findings + fixes. |
+| [conclusions](docs/conclusions.md)                        | Sigil retrospective notes (background for `02-from-sigil.md`). |
+| [project-plan](docs/project-plan.md)                      | Initial design plan; historical artifact. |
 
 ## Why "Aegis"?
 
@@ -289,7 +301,7 @@ operational items (◇) gate easy adoption.
   read/write/delete on the audit log — same shape as the
   self-writable guard for the policy file)
 - ✅ One-page security threat-model doc
-  ([docs/SECURITY_THREAT_MODEL.md](docs/SECURITY_THREAT_MODEL.md))
+  ([docs/security-threat-model.md](docs/security-threat-model.md))
   — what Aegis defends against, what it does *not*, the trust
   boundaries, the assumptions
 - ✅ Adversarial exfiltration probe

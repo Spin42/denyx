@@ -193,7 +193,7 @@ new log starting from seq=1, then replaces the file) is not
 detectable from the chain alone. Defense: forward the log to
 syslog or an immutable sink, OR keep an external reference for
 the expected last seq. Both are operator-side mitigations
-documented in `docs/SECURITY_AUDIT.md`.
+documented in `docs/security-audit.md`.
 
 ### Confirm hook
 

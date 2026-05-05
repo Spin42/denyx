@@ -2,7 +2,7 @@
 # denies for credentials, secrets, dangerous commands, cloud-metadata
 # IPs); declares only what's specific to this project on top.
 #
-# See docs/AGENT_POLICY_SPEC.md for the portable schema. The format is
+# See docs/agent-policy-spec.md for the portable schema. The format is
 # usable by any agentic system, not just Aegis.
 
 inherits = "secure-defaults"

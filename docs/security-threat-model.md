@@ -10,7 +10,7 @@ sit. Everything below is what you should hold the implementation
 accountable to.
 
 For the systematic post-implementation bypass review, see
-[SECURITY_AUDIT.md](SECURITY_AUDIT.md). For the policy file reference,
+[security-audit.md](security-audit.md). For the policy file reference,
 see [04-policy-file.md](04-policy-file.md).
 
 ## What Aegis is
@@ -151,8 +151,8 @@ files:
 
 | Doc | Purpose |
 |-----|---------|
-| **This doc** (`SECURITY_THREAT_MODEL.md`) | What Aegis claims to defend; what it doesn't. Read first. |
-| [SECURITY_AUDIT.md](SECURITY_AUDIT.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
+| **This doc** (`security-threat-model.md`) | What Aegis claims to defend; what it doesn't. Read first. |
+| [security-audit.md](security-audit.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
 | [04-policy-file.md](04-policy-file.md) | Policy file reference (operator-facing). |
 | [03-architecture.md](03-architecture.md) | How the runtime is structured (developer-facing). |
 | [examples/local_executor/run_exfil.py](../examples/local_executor/run_exfil.py) | The adversarial exfiltration probe — runs hand-written Starlark that *tries* to leak `local_only_var` values. Empirical version of the "what we don't defend against" list. |

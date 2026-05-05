@@ -41,7 +41,7 @@ the same level of trust as any other software boundary.
 
 ## What ports from Sigil
 
-(See `CONCLUSIONS.md` and `papers/SIGIL_RESULT.md` for the full
+(See `conclusions.md` and `papers/SIGIL_RESULT.md` for the full
 retrospective.)
 
 | Sigil asset | Status in next project |

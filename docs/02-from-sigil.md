@@ -13,7 +13,7 @@ knows as possible.
 
 This document is the bridge between those two projects. It's the design
 history that justifies why Aegis looks the way it does. The deep
-retrospective notes live in [CONCLUSIONS.md](CONCLUSIONS.md); this is the
+retrospective notes live in [conclusions.md](conclusions.md); this is the
 condensed version.
 
 ## The design principle that fell out of the retrospective
@@ -224,7 +224,7 @@ in-flight. Aegis's policy is **TOML**. It is parsed as configuration data,
 never as code. The agent script literally cannot rewrite or extend the
 policy from inside the sandbox. And because it's TOML, the same file is
 consumable by any agent runtime — Claude Code, Cursor, opencode, custom
-hosts. See [AGENT_POLICY_SPEC.md](AGENT_POLICY_SPEC.md) for the portable
+hosts. See [agent-policy-spec.md](agent-policy-spec.md) for the portable
 spec.
 
 ## What Sigil's retrospective measured
@@ -261,10 +261,10 @@ both stacks.
 
 ## Further reading
 
-- [CONCLUSIONS.md](CONCLUSIONS.md) — the original Sigil retrospective in
+- [conclusions.md](conclusions.md) — the original Sigil retrospective in
   full. Twelve numbered conclusions; each is a design constraint Aegis
   inherits.
-- [PROJECT_PLAN.md](PROJECT_PLAN.md) — the initial Aegis design plan
+- [project-plan.md](project-plan.md) — the initial Aegis design plan
   (slices 1-3), kept as a historical artifact.
 - [03-architecture.md](03-architecture.md) — what the architecture choices
   here actually look like in code.

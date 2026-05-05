@@ -22,7 +22,7 @@ is allowed to do, and the runtime enforces it. This document covers:
 - [Common patterns](#common-patterns)
 
 For the *portable* spec — the implementation-neutral wire format —
-see [AGENT_POLICY_SPEC.md](AGENT_POLICY_SPEC.md). This document is the
+see [agent-policy-spec.md](agent-policy-spec.md). This document is the
 how-to-use guide for the Aegis runtime specifically.
 
 ## Quick reference
@@ -806,5 +806,5 @@ orchestrator sees.
   script in 5 minutes.
 - [09-local-executor.md](09-local-executor.md) — the full agentic
   setup with a local model + cloud orchestrator.
-- [AGENT_POLICY_SPEC.md](AGENT_POLICY_SPEC.md) — the portable spec for
+- [agent-policy-spec.md](agent-policy-spec.md) — the portable spec for
   non-Aegis runtimes that want to consume the same TOML format.

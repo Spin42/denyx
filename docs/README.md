@@ -13,51 +13,44 @@ It ships as three things: a CLI binary (`aegis`), an embeddable Rust
 crate (`aegis-host`), and an MCP server (`aegis-mcp`) that any agentic
 host (Claude Code, opencode, Cursor, custom orchestrators) can wire in.
 
-## Where to start
+## How this directory is organised
 
-- **First contact:** [01-why-aegis.md](01-why-aegis.md) — the problem
-  this exists to solve and the threat model.
-- **Background:** [02-from-sigil.md](02-from-sigil.md) — what the
-  earlier Sigil project tried, what it taught us, and what changed.
-- **How it's built:** [03-architecture.md](03-architecture.md) —
-  capability typing, the three lines of defense, how the runtime
-  enforces things.
-- **Policy file (the most important read):** [04-policy-file.md](04-policy-file.md) —
-  full walkthrough of the TOML format, the `secure-defaults` preset,
-  inheritance / negation, and the `aegis init` generator.
-- **Install:** [05-install.md](05-install.md) — prerequisites
-  (Rust toolchain, Ollama for the local-executor flow, Claude or
-  opencode for the orchestrated flow).
-- **Quickstart:** [06-quickstart.md](06-quickstart.md) — a 5-minute
-  walkthrough: generate a policy, run a script, watch the audit log.
-- **Claude Code integration:** [07-claude-code.md](07-claude-code.md) —
-  wire `aegis-mcp` into Claude Code as a policy-gated tool surface.
-- **opencode integration:** [08-opencode.md](08-opencode.md) — same
-  for opencode.
-- **The agentic story:** [09-local-executor.md](09-local-executor.md) —
-  cloud orchestrator (Sonnet/Opus) → local 7B executor → Aegis runtime.
-  This is the architecture the project's evaluation harness measures.
-- **Reproduce the numbers:** [10-running-examples.md](10-running-examples.md) —
-  prerequisites and step-by-step for the three evaluation harnesses
-  (single-step, 36-task multi-step, Sonnet/Opus orchestrated). Read
-  this if you want to confirm the headline numbers on your own
-  machine.
+Two kinds of docs, distinguishable at a glance from the filename:
 
-## Reference material
+- **Numbered (`NN-...md`)** — the **reading path**. Read 01 → 10 in
+  order to understand Aegis end-to-end. Each one builds on the
+  previous and the sequence is curated.
+- **Lowercase reference (`name.md`)** — **looked up, not read in
+  sequence**. Specifications, security writeups, historical
+  artifacts. Use the table of contents below or the link from
+  whatever numbered doc points to them.
 
-- [AGENT_POLICY_SPEC.md](AGENT_POLICY_SPEC.md) — the portable spec.
-  Tool-agnostic; consumable by any agentic system. Use this if you're
-  implementing the policy format in a non-Aegis runtime.
-- [SECURITY_THREAT_MODEL.md](SECURITY_THREAT_MODEL.md) — one-page
-  review companion. What Aegis defends against, what it explicitly
-  does *not* defend against, and where the trust boundaries sit.
-  Read first if you're auditing with hostile intent.
-- [SECURITY_AUDIT.md](SECURITY_AUDIT.md) — the 16-surface
-  bypass-assessment writeup that triggered the recent security work.
-- [CONCLUSIONS.md](CONCLUSIONS.md) — the Sigil retrospective notes
-  Aegis was built from. Background reading for `02-from-sigil.md`.
-- [PROJECT_PLAN.md](PROJECT_PLAN.md) — initial design plan, kept as a
-  historical artifact.
+The index below lists everything in both groups in one place.
+
+## Reading path (numbered)
+
+| #  | Doc                                                | Purpose |
+|----|----------------------------------------------------|---------|
+| 01 | [why-aegis](01-why-aegis.md)                       | The problem statement and threat-model framing. Start here. |
+| 02 | [from-sigil](02-from-sigil.md)                     | The predecessor Sigil project: what it tried, what it taught us, why Aegis looks the way it does. |
+| 03 | [architecture](03-architecture.md)                 | Capability typing, the three lines of defense, the crate layout. |
+| 04 | [policy-file](04-policy-file.md)                   | **The most important read.** Every section, every option, with worked examples. The `aegis init` generator and the local-only-reads feature. |
+| 05 | [install](05-install.md)                           | Prerequisites: Rust toolchain, Ollama (for the local-executor flow), Claude Code / opencode (for the orchestrated flow). |
+| 06 | [quickstart](06-quickstart.md)                     | A 5-minute walkthrough — generate a policy, run a script, watch the audit log. |
+| 07 | [claude-code](07-claude-code.md)                   | Wire `aegis-mcp` into Claude Code. Two integration shapes. |
+| 08 | [opencode](08-opencode.md)                         | Same for opencode. |
+| 09 | [local-executor](09-local-executor.md)             | The full agentic stack: cloud orchestrator → local 7B executor → Aegis runtime. The architecture the eval harness measures. |
+| 10 | [running-examples](10-running-examples.md)         | Reproduction guide for the three eval harnesses (single-step, 36-task multi-step, Sonnet/Opus orchestrated). Read this to confirm the headline numbers on your own machine. |
+
+## Reference (lowercase)
+
+| Doc                                                          | Purpose |
+|--------------------------------------------------------------|---------|
+| [agent-policy-spec](agent-policy-spec.md)                    | Portable spec for the policy format. Tool-agnostic — consumable by any agentic system. Use this if you're implementing the policy format in a non-Aegis runtime. |
+| [security-threat-model](security-threat-model.md)            | One-page review companion. What Aegis claims to defend against, what it explicitly does *not* defend against, the trust boundaries, the assumptions. **Read first if you're auditing with hostile intent.** |
+| [security-audit](security-audit.md)                          | The 16-surface bypass-assessment writeup that triggered the recent security work. Findings + fixes + verified-safe surfaces. |
+| [conclusions](conclusions.md)                                | The Sigil retrospective notes Aegis was built from. Background reading for `02-from-sigil.md`. |
+| [project-plan](project-plan.md)                              | Initial design plan, kept as a historical artifact. |
 
 ## Project layout
 
@@ -67,8 +60,8 @@ crates/
   host/     — Starlark embedding, capability builtins, audit, verifier
   cli/      — `aegis` binary (run + init subcommands)
   mcp/      — `aegis-mcp` MCP server (stdio JSON-RPC)
-docs/       — this directory
+docs/       — this directory (numbered reading path + lowercase reference)
 examples/
   policies/        — reference policies (FastAPI, Rails, ...)
-  local_executor/  — evaluation harness (Ollama + qwen + aegis-mcp)
+  local_executor/  — evaluation harness + adversarial exfil probe
 ```
