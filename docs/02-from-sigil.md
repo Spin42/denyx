@@ -2,10 +2,11 @@
 
 > ← [Back to docs README](README.md)
 
-Aegis is the second iteration of an idea. The first was Sigil — a research
-project that designed a custom DSL for agent code, fine-tuned local models
-to emit it, and ran it in a custom interpreter. Sigil shipped, learned a
-lot, and ultimately produced a sober retrospective: the **language**
+Aegis is the second iteration of an idea. The first was
+[**Sigil**](https://github.com/mlainez/sigil) — a research project that
+designed a custom DSL for agent code, fine-tuned local models to emit
+it, and ran it in a custom interpreter. Sigil shipped, learned a lot,
+and ultimately produced a sober retrospective: the **language**
 shouldn't be the variable. The deliverable should be the **policy
 substrate**, with the language as close to something the model already
 knows as possible.
