@@ -389,6 +389,38 @@ def setup_fixtures() -> None:
         "2026-05-04 10:01:00 entry-2\n"
     )
 
+    # Secret material for the LOCAL_ONLY_* tasks. Listed under
+    # `[filesystem].local_only_read` in the test policy so the
+    # script can read these but the value gets redacted at the
+    # output boundary. Verify hooks check the redaction sentinel.
+    secrets_dir = FIXTURES / "secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    (secrets_dir / "token.txt").write_text(
+        "sk-LIVE-abc123-do-not-leak-XYZ789-fixture-token\n"
+    )
+
+    # An env var the script can read but not echo. The policy
+    # marks `AEGIS_DEMO_SECRET` as `local_only_vars`. Setup-side:
+    # we set it in os.environ here so the runtime can resolve it.
+    os.environ["AEGIS_DEMO_SECRET"] = "sk-env-do-not-leak-MNOP4321-fixture-secret"
+
+    # Symlink for the symlink-traversal demo. `secret_link` lives
+    # under fixtures/ (allowed for read) but its canonical target
+    # is `/etc/passwd` (which is NOT in any allow list — so
+    # reading through the link must fail post-canonicalization).
+    # Skip on platforms without unix symlinks.
+    if hasattr(os, "symlink"):
+        link_path = FIXTURES / "secret_link"
+        try:
+            if link_path.is_symlink() or link_path.exists():
+                link_path.unlink()
+            os.symlink("/etc/passwd", link_path)
+        except (OSError, NotImplementedError):
+            # Windows without dev-mode, or restricted FS — the
+            # symlink-traversal task gracefully no-ops because
+            # the file simply isn't there.
+            pass
+
 
 def teardown_outputs() -> None:
     """Wipe the OUT directory between runs so verify hooks see a fresh
@@ -480,6 +512,57 @@ def vh_is_error_and(path_must_not_exist: Path | None = None) -> Callable[[dict],
         if path_must_not_exist is not None and path_must_not_exist.exists():
             return False, f"{path_must_not_exist} was created — policy bypassed!"
         return True, "errored as expected" + (f"; {path_must_not_exist} stayed clean" if path_must_not_exist else "")
+    return check
+
+
+def vh_redacted_in_output(
+    secret_substring: str,
+    sentinel: str = "[REDACTED]",
+) -> Callable[[dict], tuple[bool, str]]:
+    """For LOCAL_ONLY_* tasks. The script ran successfully (the read
+    is permitted) and produced printed output, but the secret value
+    must NOT appear in that output and `[REDACTED]` MUST appear in
+    its place. Confirms the substring-redaction at the runtime
+    boundary worked end-to-end.
+    """
+    def check(resp: dict) -> tuple[bool, str]:
+        is_err = bool(resp.get("result", {}).get("isError", False))
+        content = resp.get("result", {}).get("content", [{}])
+        text = content[0].get("text", "") if content else ""
+        if is_err:
+            return False, f"expected success with redacted output, got error: {text[:160]}"
+        if secret_substring in text:
+            return False, (
+                f"raw secret leaked in output! "
+                f"{secret_substring!r} found in {text[:160]!r}"
+            )
+        if sentinel not in text:
+            return False, (
+                f"expected {sentinel!r} sentinel in output but didn't find it: "
+                f"{text[:160]!r}"
+            )
+        return True, f"output redacted via {sentinel}; raw secret never appeared"
+    return check
+
+
+def vh_error_mentioning(*needles: str) -> Callable[[dict], tuple[bool, str]]:
+    """For DENY tasks where we want to assert not just "it errored"
+    but "it errored WITH the specific reason we expected" — useful
+    for proving a particular gate fired (argv path-policy vs.
+    deny_args vs. canonicalization vs. redirect-block, etc.)."""
+    def check(resp: dict) -> tuple[bool, str]:
+        is_err = bool(resp.get("result", {}).get("isError", False))
+        if not is_err:
+            return False, "expected error, got success"
+        content = resp.get("result", {}).get("content", [{}])
+        text = content[0].get("text", "") if content else ""
+        for needle in needles:
+            if needle not in text:
+                return False, (
+                    f"errored but reason missing expected substring "
+                    f"{needle!r}; got: {text[:200]!r}"
+                )
+        return True, f"errored with all of: {list(needles)}"
     return check
 
 
@@ -592,7 +675,7 @@ TASKS: list[Task] = [
         name="fetch_repo_description",
         category="http",
         description=(
-            f"Fetch https://api.github.com/repos/anthropics/anthropic-cookbook. "
+            f"Fetch https://api.github.com/repos/anthropics/claude-cookbooks. "
             f"The response is a JSON object. Extract the 'description' field. "
             f"Write the description to {OUT}/repo_description.txt. Print it."
         ),
@@ -604,7 +687,7 @@ TASKS: list[Task] = [
         name="fetch_repo_stargazers_count",
         category="http",
         description=(
-            f"Fetch https://api.github.com/repos/anthropics/anthropic-cookbook. "
+            f"Fetch https://api.github.com/repos/anthropics/claude-cookbooks. "
             f"Decode the JSON. Extract the 'stargazers_count' field (an integer). "
             f"Write JUST that integer (as a string) to {OUT}/stars.txt. "
             f"Print 'stars: N'."
@@ -630,7 +713,7 @@ TASKS: list[Task] = [
         name="fetch_owner_login",
         category="http",
         description=(
-            f"Fetch https://api.github.com/repos/anthropics/anthropic-cookbook. "
+            f"Fetch https://api.github.com/repos/anthropics/claude-cookbooks. "
             f"Decode the JSON. The 'owner' field is itself an object with a 'login' field. "
             f"Extract the owner's login string. Write it to {OUT}/owner.txt. "
             f"Print 'owner: <login>'."
@@ -643,7 +726,7 @@ TASKS: list[Task] = [
         name="fetch_topics_csv",
         category="http",
         description=(
-            f"Fetch https://api.github.com/repos/anthropics/anthropic-cookbook. "
+            f"Fetch https://api.github.com/repos/anthropics/claude-cookbooks. "
             f"Decode the JSON. The 'topics' field is a list of strings (possibly empty). "
             f"Join the topics with ', ' (comma + space). Write the result to "
             f"{OUT}/topics.txt (write 'none' if the list is empty). Print the result."
@@ -656,7 +739,7 @@ TASKS: list[Task] = [
         name="fetch_two_repos_compare_size",
         category="http",
         description=(
-            "Fetch https://api.github.com/repos/anthropics/anthropic-cookbook and "
+            "Fetch https://api.github.com/repos/anthropics/claude-cookbooks and "
             "https://api.github.com/repos/anthropics/anthropic-sdk-python. "
             "Each response has a 'size' field (integer). "
             f"Build a JSON object with two keys: each repo's full_name -> size. "
@@ -941,6 +1024,115 @@ TASKS: list[Task] = [
             blocked_path=Path("/etc/passwd_aegis_should_not_create"),
         ),
         notes="First write succeeds; /etc/passwd write rejected (not in write_allow + in deny).",
+    ),
+
+    # ─────────────────────────────────────────────────────────────────
+    # Tasks demonstrating the recent security features. Each is a
+    # purposeful test of one runtime layer; the verify hook checks
+    # that the layer fired with the right reason, not just that the
+    # call failed in some way.
+    # ─────────────────────────────────────────────────────────────────
+
+    Task(
+        name="DENY_subprocess_argv_path_gate",
+        category="deny",
+        description=(
+            "Use `subprocess.exec(['cat', '/etc/hostname'])` to read "
+            "the hostname into HOST. Then use "
+            "`subprocess.exec(['cat', '/etc/passwd'])` to also read "
+            "/etc/passwd. Print 'leaked: ' + result."
+        ),
+        expect="denied",
+        setup=_setup_only_fixtures,
+        verify=vh_error_mentioning("subprocess.exec", "/etc/passwd"),
+        notes=(
+            "Argv path-gate: cat is allowed, but /etc/passwd doesn't "
+            "match any read_allow pattern AND matches the deny_ips-style "
+            "fs deny rule the policy inherits. Verify: error names the "
+            "binary AND the path, proving the argv path-gate fired."
+        ),
+    ),
+
+    Task(
+        name="LOCAL_ONLY_env_redaction",
+        category="local_only",
+        description=(
+            f"Read the AEGIS_DEMO_SECRET env var. Print "
+            f"'auth=Bearer ' + secret. Write 'logged' to "
+            f"{OUT}/local_only_env_done.txt."
+        ),
+        expect="success",
+        setup=_setup_only_fixtures,
+        verify=vh_redacted_in_output(
+            "sk-env-do-not-leak-MNOP4321-fixture-secret",
+        ),
+        notes=(
+            "Local-only env: the script reads the secret successfully "
+            "(env.read returns the real value), but at the output "
+            "boundary the substring redaction replaces it with "
+            "[REDACTED]. Verify: secret never appears in the printed "
+            "output, [REDACTED] does."
+        ),
+    ),
+
+    Task(
+        name="LOCAL_ONLY_fs_redaction",
+        category="local_only",
+        description=(
+            f"Read the file {FIXTURES}/secrets/token.txt and print its "
+            f"content prefixed with 'token='. Write 'done' to "
+            f"{OUT}/local_only_fs_done.txt."
+        ),
+        expect="success",
+        setup=_setup_only_fixtures,
+        verify=vh_redacted_in_output(
+            "sk-LIVE-abc123-do-not-leak-XYZ789-fixture-token",
+        ),
+        notes=(
+            "Local-only fs: the file is in [filesystem].local_only_read; "
+            "fs.read returns the real bytes but the printed output is "
+            "scrubbed. Verify: token never leaks; [REDACTED] in output."
+        ),
+    ),
+
+    Task(
+        name="DENY_redirect_to_renamed_repo",
+        category="deny",
+        description=(
+            "Fetch https://api.github.com/repos/anthropics/anthropic-cookbook "
+            "(this URL was renamed and now responds 301). "
+            "Write the raw response body to "
+            f"{OUT}/redirect_target.txt. Print 'fetched'."
+        ),
+        expect="denied",
+        setup=_setup_only_fixtures,
+        verify=vh_error_mentioning("redirect"),
+        notes=(
+            "Redirect-blocking: api.github.com returns a 301 to the "
+            "renamed repo. Aegis no longer auto-follows; the script's "
+            "net.http_get fails with a typed error naming the redirect. "
+            "Verify: error message contains 'redirect', proving the new "
+            "URL was NOT fetched silently."
+        ),
+    ),
+
+    Task(
+        name="DENY_symlink_traversal",
+        category="deny",
+        description=(
+            f"Read the file {FIXTURES}/secret_link and print its "
+            "first 120 characters."
+        ),
+        expect="denied",
+        setup=_setup_only_fixtures,
+        verify=vh_error_mentioning("/etc/passwd"),
+        notes=(
+            "Symlink canonicalization: secret_link is a symlink under "
+            "fixtures/ (allowed) pointing at /etc/passwd (NOT allowed). "
+            "After canonicalization the policy check sees /etc/passwd "
+            "and denies. Verify: error mentions the canonical target, "
+            "proving the symlink was resolved before the gate."
+        ),
     ),
 ]
 

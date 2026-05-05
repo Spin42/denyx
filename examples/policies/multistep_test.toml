@@ -19,6 +19,11 @@ read_allow = [
     "/etc/os-release",
     "examples/**",
 ]
+# Tagged for the LOCAL_ONLY_fs_redaction task — the script may read
+# files in fixtures/secrets/ but the value is tainted at the output
+# boundary (the runtime substring-redacts it before printed lines,
+# audit payloads, or MCP tool results cross back to the caller).
+local_only_read = ["/tmp/aegis_demo/multistep/fixtures/secrets/**"]
 write_allow = ["/tmp/aegis_demo/**"]
 delete_allow = ["/tmp/aegis_demo/**"]
 
@@ -30,6 +35,10 @@ http_get_allow = [
 
 [environment]
 allow_vars = ["USER", "HOME", "PATH", "LANG", "PWD", "SHELL", "TERM"]
+# Tagged for the LOCAL_ONLY_env_redaction task — the script may
+# `env.read("AEGIS_DEMO_SECRET")` and use the value, but the value
+# is tainted at the output boundary.
+local_only_vars = ["AEGIS_DEMO_SECRET"]
 
 [subprocess]
 allow_commands = [

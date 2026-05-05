@@ -37,6 +37,11 @@ host (Claude Code, opencode, Cursor, custom orchestrators) can wire in.
 - **The agentic story:** [09-local-executor.md](09-local-executor.md) —
   cloud orchestrator (Sonnet/Opus) → local 7B executor → Aegis runtime.
   This is the architecture the project's evaluation harness measures.
+- **Reproduce the numbers:** [10-running-examples.md](10-running-examples.md) —
+  prerequisites and step-by-step for the three evaluation harnesses
+  (single-step, 36-task multi-step, Sonnet/Opus orchestrated). Read
+  this if you want to confirm the headline numbers on your own
+  machine.
 
 ## Reference material
 

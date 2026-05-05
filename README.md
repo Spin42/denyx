@@ -221,8 +221,10 @@ determines which arrows it stops.
 ## Status
 
 Pre-1.0. The runtime is solid; the eval harness reproduces stable
-numbers (qwen 7B alone: 27-29/31 multi-step; Sonnet-orchestrated:
-28/31; Opus-orchestrated: 31/31). The policy spec is portable and
+numbers (qwen 7B alone: 36/36 on the current 36-task suite, which
+includes 5 feature-demo tasks pinning specific runtime layers;
+Sonnet-orchestrated: 28/31 on the original 31-task subset;
+Opus-orchestrated: 31/31). The policy spec is portable and
 documented. APIs may still change.
 
 ## Roadmap to production-readiness
