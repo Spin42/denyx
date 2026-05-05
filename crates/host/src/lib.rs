@@ -32,6 +32,40 @@ pub mod confirm;
 pub mod taint;
 pub mod verifier;
 
+/// Shared `ureq` agent with auto-redirect disabled. ureq's default
+/// agent follows up to 5 redirects without re-checking the new URL
+/// against the policy — a redirect from an allowed origin to an
+/// internal IP would slip past `[network]` entirely. We disable
+/// auto-follow and surface 3xx responses as a clear error so
+/// scripts must call net.http_* again on the new URL (which goes
+/// through the policy gate).
+fn no_redirect_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| ureq::AgentBuilder::new().redirects(0).build())
+}
+
+/// Convert a `ureq::Response` to its body string, but reject 3xx
+/// redirects with a clear error pointing at the Location header.
+/// The redirected URL must be checked separately by the script
+/// via another net.http_* call so the policy gate fires on the
+/// new host.
+fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
+    let status = resp.status();
+    if (300..400).contains(&status) {
+        let location = resp
+            .header("Location")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(no Location header)".to_string());
+        anyhow::bail!(
+            "HTTP {status} redirect to {location:?}; Aegis does not auto-follow \
+             redirects to prevent bypass of [network] policy. Call net.http_get / \
+             net.http_post again with the redirected URL if your policy permits \
+             that host."
+        );
+    }
+    Ok(resp.into_string()?)
+}
+
 pub use audit::{AuditEvent, AuditSink, JsonlAuditSink, NullAuditSink};
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
 pub use taint::{redact, TaintRegistry, REDACTED};
@@ -230,13 +264,26 @@ impl Runner {
         if let Err(starlark_msg) = eval_result {
             // If a builtin captured a typed error before Starlark wrapped
             // it, surface that — the kind drives exit-code mapping.
+            //
+            // ALL error messages on this path are scrubbed for taint
+            // before becoming AegisError. Without this, a script
+            // could leak a tainted value via `fail(secret)` —
+            // Starlark's error rendering would include the secret
+            // in `starlark_msg`, and the unscrubbed string would
+            // flow out through AegisError to the caller (CLI
+            // stderr, MCP tool result, etc.). Same boundary
+            // discipline as outcome.printed; the error path is
+            // just another way bytes leave the runtime.
             return Err(match captured {
-                Some(c) => match c.kind {
-                    CapturedKind::Policy => AegisError::Policy(c.message),
-                    CapturedKind::ConfirmDenied => AegisError::ConfirmDenied(c.message),
-                    CapturedKind::RuntimeLimit => AegisError::RuntimeLimit(c.message),
-                },
-                None => AegisError::Starlark(starlark_msg),
+                Some(c) => {
+                    let scrubbed = redact(&c.message, &taints);
+                    match c.kind {
+                        CapturedKind::Policy => AegisError::Policy(scrubbed),
+                        CapturedKind::ConfirmDenied => AegisError::ConfirmDenied(scrubbed),
+                        CapturedKind::RuntimeLimit => AegisError::RuntimeLimit(scrubbed),
+                    }
+                }
+                None => AegisError::Starlark(redact(&starlark_msg, &taints)),
             });
         }
 
@@ -681,10 +728,11 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
-                    let resp = ureq::get(parsed.as_str())
+                    let resp = no_redirect_agent()
+                        .get(parsed.as_str())
                         .timeout(ctx.policy.network_timeout())
                         .call()?;
-                    Ok(resp.into_string()?)
+                    finalize_http_response(resp)
                 })();
                 if let Ok(body) = result.as_ref() {
                     if ctx.policy.host_is_local_only(&host_label) {
@@ -745,10 +793,11 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 )?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
-                    let resp = ureq::post(parsed.as_str())
+                    let resp = no_redirect_agent()
+                        .post(parsed.as_str())
                         .timeout(ctx.policy.network_timeout())
                         .send_string(body)?;
-                    Ok(resp.into_string()?)
+                    finalize_http_response(resp)
                 })();
                 if let Ok(b) = result.as_ref() {
                     if ctx.policy.host_is_local_only(&host_label) {
@@ -809,10 +858,11 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 )?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
-                    let resp = ureq::put(parsed.as_str())
+                    let resp = no_redirect_agent()
+                        .put(parsed.as_str())
                         .timeout(ctx.policy.network_timeout())
                         .send_string(body)?;
-                    Ok(resp.into_string()?)
+                    finalize_http_response(resp)
                 })();
                 if let Ok(b) = result.as_ref() {
                     if ctx.policy.host_is_local_only(&host_label) {
@@ -873,10 +923,11 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 )?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
-                    let resp = ureq::patch(parsed.as_str())
+                    let resp = no_redirect_agent()
+                        .request("PATCH", parsed.as_str())
                         .timeout(ctx.policy.network_timeout())
                         .send_string(body)?;
-                    Ok(resp.into_string()?)
+                    finalize_http_response(resp)
                 })();
                 if let Ok(b) = result.as_ref() {
                     if ctx.policy.host_is_local_only(&host_label) {
@@ -933,10 +984,11 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 ctx.require_confirm("net.http_delete", format!("DELETE {}", parsed))?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
-                    let resp = ureq::delete(parsed.as_str())
+                    let resp = no_redirect_agent()
+                        .delete(parsed.as_str())
                         .timeout(ctx.policy.network_timeout())
                         .call()?;
-                    Ok(resp.into_string()?)
+                    finalize_http_response(resp)
                 })();
                 if let Ok(b) = result.as_ref() {
                     if ctx.policy.host_is_local_only(&host_label) {
