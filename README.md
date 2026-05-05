@@ -195,6 +195,77 @@ numbers (qwen 7B alone: 27-29/31 multi-step; Sonnet-orchestrated:
 28/31; Opus-orchestrated: 31/31). The policy spec is portable and
 documented. APIs may still change.
 
+## Roadmap to production-readiness
+
+Aegis is a serious prototype with end-to-end functionality, but
+**not yet hardened enough to be your default for unattended
+agentic work**. These are the open items between today and "drop
+this on three machines and standardize." Listed roughly by
+priority — the security items (☐) gate daily-driver use; the
+operational items (◇) gate easy adoption.
+
+### Already shipped (this codebase)
+
+- ✅ Subprocess env filtering (child only sees declared `allow_vars`)
+- ✅ Wall-time deadline + call-stack cap (`[runtime].max_seconds`,
+  `max_callstack_size`)
+- ✅ Structured confirm-mode for `aegis-mcp` (auto-allow / auto-deny
+  with `aegis_error_kind: "confirm_denied"` tag for orchestrator
+  branching)
+- ✅ `aegis policy validate` + `aegis policy show` (CI lint and
+  operator visibility)
+- ✅ Per-call HTTP timeout (`[network].timeout_seconds`, default 30s)
+- ✅ Self-writable guard (refuses policies that grant write/delete on
+  themselves)
+- ✅ Local-only visibility class (read OK, value never bubbles up;
+  output-boundary substring redaction)
+
+### Still open
+
+#### Security gates (block daily-driver use)
+
+- ☐ **Tamper-evident audit log.** Today the JSONL log is plain text.
+  An agent allowed to write to the log's path could rewrite history.
+  Need at minimum HMAC-chained entries with a key the agent can't
+  reach.
+- ☐ **Fuzz the verifier and the TOML/policy parser.** A week of
+  `cargo-fuzz` against the verifier's comment/string-stripping, the
+  globset path matchers, and the TOML deserializer. Fix what falls
+  out.
+- ☐ **External security review.** AI-generated security code is
+  unaudited security code. The policy crate, the verifier, and the
+  taint-redaction code in `crates/host/src/taint.rs` need a human
+  security engineer reading them with hostile intent. **This is the
+  single biggest gating item.**
+- ☐ **Adversarial exfiltration probe in the eval harness.** An agent
+  that *deliberately tries* to leak a `local_only_var` via
+  XOR/base64/chunking — see what bypasses the substring redaction.
+  Will probably find a real path; that finding directly informs
+  whether the local-only feature is shippable as advertised or
+  needs real information-flow tracking.
+
+#### Operational gates (block easy adoption)
+
+- ◇ **Published binaries.** `cargo install`, Homebrew tap, or
+  pre-built tarballs. Build-from-source is fine for evaluation, not
+  for "ship to three machines and standardize."
+- ◇ **`aegis-mcp` consuming `[tools.X]` routing hints.** The Rust
+  schema and the local-executor bridge (`local_mcp.py`) both speak
+  it; `aegis-mcp` itself doesn't yet surface routing back to MCP
+  clients. Means Claude Code calling `aegis_run` directly gets no
+  benefit from `backend_url` today.
+- ◇ **Policy schema migration tool.** When the schema changes
+  pre-1.0, existing policies are hand-edited. An `aegis policy
+  migrate` would smooth this.
+- ◇ **One-page security threat-model doc.** Gathers the assumptions
+  and limitations from across the docs into one place a security
+  reviewer can sit down with.
+
+For today: use Aegis for experimental setups, in containers, on
+machines where the cost of an Aegis bug is "I have to recover a VM"
+not "my SSH key got exfiltrated." For default-on-everything use,
+the four ☐ items above are the real gating list.
+
 ## Project layout
 
 ```
