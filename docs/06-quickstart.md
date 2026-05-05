@@ -200,6 +200,26 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 You'll get back the server's capability advertisement. The two methods
 that matter operationally are `tools/list` and `tools/call`.
 
+## 8. Inspect or validate the policy
+
+Two CLI subcommands let you reason about a policy without running
+anything against it:
+
+```sh
+aegis policy validate aegis.toml
+# OK: aegis.toml parses, resolves, passes self-writable guard. 5 capability(ies) enabled.
+
+aegis policy show aegis.toml
+# (prints derived capabilities, every populated section, declared
+# tools with routing hints, runtime caps, confirm-gated caps)
+```
+
+`policy validate` is a clean fit for CI: exit 0 ⇒ the policy is
+loadable and won't trip the self-writable guard at runtime.
+`policy show` is the answer to "what is my agent actually allowed
+to do?" — it expands the inherited preset, surfaces every rule,
+and lists the capability set derived from your resource sections.
+
 ## Where next
 
 - [04-policy-file.md](04-policy-file.md) — full policy reference (you'll

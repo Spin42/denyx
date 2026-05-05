@@ -227,6 +227,15 @@ the MVP's scope. The threat model is *prompt engineering can't bypass it*
   - `5` i/o or configuration error
 - `aegis init --lang <LANG> [--output PATH] [--force]` — emit a starter
   policy. See [04-policy-file.md](04-policy-file.md#the-init-generator).
+- `aegis policy validate <PATH>` — parse + resolve inheritance + run
+  the load-time guards (including the self-writable check) without
+  running any script. Exits 0 on OK; non-zero with a clear error
+  otherwise. Useful as a CI lint step.
+- `aegis policy show <PATH>` — print a human-readable summary of
+  the resolved policy: derived capabilities, every populated rule
+  section, declared tools (with routing hints), runtime caps,
+  confirm-gated capabilities. Useful for "what is my agent
+  actually allowed to do?".
 
 If `--policy` is omitted on `aegis run`, the runtime falls back to the
 built-in `secure-defaults` baseline and prints a loud-and-safe banner on

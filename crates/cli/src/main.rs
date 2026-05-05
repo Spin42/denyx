@@ -45,6 +45,34 @@ enum Command {
     Run(RunArgs),
     /// Generate a starter policy file for a project language.
     Init(InitArgs),
+    /// Inspect or validate a policy file.
+    Policy(PolicyCli),
+}
+
+#[derive(Parser, Debug)]
+struct PolicyCli {
+    #[command(subcommand)]
+    command: PolicyCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyCommand {
+    /// Parse a policy file, resolve inheritance, run all load-time
+    /// safety checks (including the self-writable guard), and exit 0
+    /// on success. Useful as a CI lint step. Non-zero exit + a
+    /// human-readable error on failure.
+    Validate(PolicyTargetArgs),
+    /// Print a human-readable summary of a policy: effective
+    /// capabilities (derived from populated resource sections), all
+    /// allow/deny rules, declared tools with routing hints, runtime
+    /// caps, confirm-gated capabilities. Exits 0 on success.
+    Show(PolicyTargetArgs),
+}
+
+#[derive(Parser, Debug)]
+struct PolicyTargetArgs {
+    /// Path to the policy TOML file.
+    policy: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -125,7 +153,133 @@ fn dispatch() -> Result<(), CliError> {
     match cli.command {
         Command::Run(args) => run(args),
         Command::Init(args) => init_cmd(args),
+        Command::Policy(p) => match p.command {
+            PolicyCommand::Validate(a) => policy_validate(a),
+            PolicyCommand::Show(a) => policy_show(a),
+        },
     }
+}
+
+fn policy_validate(args: PolicyTargetArgs) -> Result<(), CliError> {
+    let policy = Policy::load(&args.policy)
+        .map_err(|e| CliError::Other(format!("validation failed: {e}")))?;
+    let n = policy.effective_functions().len();
+    println!(
+        "OK: {} parses, resolves, passes self-writable guard. {n} capability(ies) enabled.",
+        args.policy.display()
+    );
+    Ok(())
+}
+
+fn policy_show(args: PolicyTargetArgs) -> Result<(), CliError> {
+    let policy = Policy::load(&args.policy)
+        .map_err(|e| CliError::Other(format!("load policy {:?}: {e}", args.policy)))?;
+    let file = policy.file_snapshot();
+
+    println!("# policy: {}", args.policy.display());
+    if let Some(name) = &file.name {
+        println!("# name:   {name}");
+    }
+    if let Some(desc) = &file.description {
+        println!("# desc:   {desc}");
+    }
+    if let Some(parent) = &file.inherits {
+        println!("# inherits: {parent}");
+    }
+    println!();
+
+    let effective = policy.effective_functions();
+    println!("[capabilities]   (derived from populated resource sections)");
+    if effective.is_empty() {
+        println!("  (none — every effecting call will be denied)");
+    } else {
+        for cap in &effective {
+            println!("  - {cap}");
+        }
+    }
+    println!();
+
+    print_section_list("[filesystem].read_allow", &file.filesystem.read_allow);
+    print_section_list("[filesystem].local_only_read", &file.filesystem.local_only_read);
+    print_section_list("[filesystem].write_allow", &file.filesystem.write_allow);
+    print_section_list("[filesystem].delete_allow", &file.filesystem.delete_allow);
+    print_section_list("[filesystem].deny", &file.filesystem.deny);
+
+    print_section_list("[network].http_get_allow", &file.network.http_get_allow);
+    print_section_list("[network].http_post_allow", &file.network.http_post_allow);
+    print_section_list("[network].http_put_allow", &file.network.http_put_allow);
+    print_section_list("[network].http_patch_allow", &file.network.http_patch_allow);
+    print_section_list("[network].http_delete_allow", &file.network.http_delete_allow);
+    print_section_list("[network].local_only_hosts", &file.network.local_only_hosts);
+    print_section_list("[network].deny_hosts", &file.network.deny_hosts);
+    print_section_list("[network].deny_ips", &file.network.deny_ips);
+
+    print_section_list("[environment].allow_vars", &file.environment.allow_vars);
+    print_section_list(
+        "[environment].local_only_vars",
+        &file.environment.local_only_vars,
+    );
+    print_section_list("[environment].deny_vars", &file.environment.deny_vars);
+
+    print_section_list("[subprocess].allow_commands", &file.subprocess.allow_commands);
+    print_section_list(
+        "[subprocess].local_only_commands",
+        &file.subprocess.local_only_commands,
+    );
+    print_section_list("[subprocess].deny_commands", &file.subprocess.deny_commands);
+    if !file.subprocess.deny_args.is_empty() {
+        println!("[subprocess.deny_args]");
+        for (cmd, patterns) in &file.subprocess.deny_args {
+            println!("  - {cmd}: {patterns:?}");
+        }
+        println!();
+    }
+
+    if file.runtime.max_seconds.is_some() || file.runtime.max_callstack_size.is_some() {
+        println!("[runtime]");
+        if let Some(s) = file.runtime.max_seconds {
+            println!("  - max_seconds: {s}");
+        }
+        if let Some(n) = file.runtime.max_callstack_size {
+            println!("  - max_callstack_size: {n}");
+        }
+        println!();
+    }
+
+    if !file.tools.is_empty() {
+        println!("[tools]");
+        for (name, record) in &file.tools {
+            println!("  - {name}: {:?}", record.capabilities);
+            if let Some(url) = &record.backend_url {
+                println!("      → {} {url}", record.method());
+            }
+            if let Some(d) = &record.description {
+                println!("      ({d})");
+            }
+        }
+        println!();
+    }
+
+    if !file.confirm_per_call.is_empty() {
+        println!("[confirm_per_call]");
+        for cap in &file.confirm_per_call {
+            println!("  - {cap}");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+fn print_section_list(label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    println!("{label}");
+    for item in items {
+        println!("  - {item}");
+    }
+    println!();
 }
 
 fn init_cmd(args: InitArgs) -> Result<(), CliError> {
