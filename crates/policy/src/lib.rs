@@ -1823,12 +1823,25 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Resolve a user-supplied path to an absolute path. Steps:
+/// Resolve a user-supplied path to an absolute, **canonicalized**
+/// path. Steps:
 /// - `~/...` expands to `$HOME/...` (and a bare `~` to `$HOME`).
 /// - relative paths are joined with `root`.
 /// - `.` and `..` components are normalized.
+/// - Symlinks at every component are resolved via `canonicalize`,
+///   so a symlink at `<root>/src/secret` pointing to `/etc/passwd`
+///   resolves to `/etc/passwd` BEFORE the policy check runs. The
+///   policy then evaluates the canonical target, not the source.
 ///
-/// Does not require the path to exist (writes can target new files).
+/// Behavior when the path doesn't exist (e.g. `fs.write` of a new
+/// file): canonicalize the deepest existing ancestor, then append
+/// the unresolved tail. This canonicalizes whatever symlinks are
+/// in the existing prefix while still permitting writes that
+/// create new leaves.
+///
+/// If even the policy root cannot be canonicalized, fall back to
+/// the lexical normalization (existing behavior). The fallback
+/// loses symlink resolution but doesn't make anything worse.
 fn resolve_path(root: &Path, p: &Path) -> PathBuf {
     let raw = if let Some(s) = p.to_str() {
         if s == "~" {
@@ -1848,16 +1861,55 @@ fn resolve_path(root: &Path, p: &Path) -> PathBuf {
         root.join(p)
     };
 
-    let mut out = PathBuf::new();
+    let mut lexical = PathBuf::new();
     for c in raw.components() {
         match c {
             Component::ParentDir => {
-                out.pop();
+                lexical.pop();
             }
             Component::CurDir => {}
-            other => out.push(other.as_os_str()),
+            other => lexical.push(other.as_os_str()),
         }
     }
-    out
+    canonicalize_with_unresolved_tail(&lexical)
+}
+
+/// Canonicalize `path` so that any symlinks in its existing prefix
+/// are resolved BEFORE the policy check. Behavior:
+///
+/// - If the whole path exists: `fs::canonicalize(path)` directly.
+///   Symlinks throughout are resolved.
+/// - If the path doesn't exist (e.g. fs.write of a new file):
+///   walk back to the deepest existing ancestor, canonicalize
+///   that, then append the unresolved tail. This still resolves
+///   symlinks in the existing prefix while letting `fs.write` of
+///   genuinely new files proceed.
+/// - If even the deepest ancestor can't be canonicalized (the
+///   path's root is gone, or a permission error), fall back to
+///   the lexical path. The fallback doesn't introduce any new
+///   bypass — at worst it preserves the pre-canonicalization
+///   behavior for that one call.
+fn canonicalize_with_unresolved_tail(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    // Walk back component by component until we find an ancestor
+    // that does exist; canonicalize that and re-append the tail.
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+    while let Some(name) = current.file_name() {
+        tail.push(name.to_os_string());
+        if !current.pop() {
+            break;
+        }
+        if let Ok(c) = std::fs::canonicalize(&current) {
+            let mut out = c;
+            for t in tail.iter().rev() {
+                out.push(t);
+            }
+            return out;
+        }
+    }
+    path.to_path_buf()
 }
 
