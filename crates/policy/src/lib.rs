@@ -55,6 +55,14 @@ pub enum PolicyError {
         policy_path: PathBuf,
         action: &'static str,
     },
+    #[error(
+        "{role} at {path:?} is matched by [filesystem].{action}_allow; refusing to load — the {role} must be unreachable to the agent so it can't tamper with the evidentiary trail or the runtime contract. Tighten your allow patterns or add the path to [filesystem].deny."
+    )]
+    ProtectedPath {
+        role: &'static str,
+        path: PathBuf,
+        action: &'static str,
+    },
     #[error("runtime cap exceeded: {kind} ({detail})")]
     RuntimeLimit { kind: &'static str, detail: String },
 }
@@ -667,6 +675,43 @@ impl Policy {
         Ok(())
     }
 
+    /// Refuse to load a policy that grants the agent any access to
+    /// the audit log file — write, delete, OR read. The audit log
+    /// is the operator's evidentiary trail; an agent that can write
+    /// it can fabricate history, an agent that can delete it can
+    /// erase its own actions, and an agent that can READ it can
+    /// compute valid hash-chain `prev_hash` values to forge events
+    /// (the chain check would still flag in-place mutation, but a
+    /// careful append with the right prev_hash would slip past
+    /// without read-protection).
+    ///
+    /// The CLI and MCP server call this automatically when an
+    /// `--audit-log` path is configured.
+    pub fn guard_audit_log(&self, audit_path: &Path) -> Result<(), PolicyError> {
+        if self.check_fs_write(audit_path).is_ok() {
+            return Err(PolicyError::ProtectedPath {
+                role: "audit log",
+                path: audit_path.to_path_buf(),
+                action: "write",
+            });
+        }
+        if self.check_fs_delete(audit_path).is_ok() {
+            return Err(PolicyError::ProtectedPath {
+                role: "audit log",
+                path: audit_path.to_path_buf(),
+                action: "delete",
+            });
+        }
+        if self.check_fs_read(audit_path).is_ok() {
+            return Err(PolicyError::ProtectedPath {
+                role: "audit log",
+                path: audit_path.to_path_buf(),
+                action: "read",
+            });
+        }
+        Ok(())
+    }
+
     /// Construct a policy from the built-in `secure-defaults` preset
     /// alone, with no user file layered on top. This is the fallback
     /// used by the CLI and MCP server when invoked without a policy
@@ -1139,10 +1184,127 @@ impl Policy {
         Ok(())
     }
 
+    /// Walk argv (skipping argv[0]) and reject the call if any
+    /// argument *that looks like a path* would point at a resource
+    /// the script itself couldn't reach via the fs builtins. This is
+    /// what stops `subprocess.exec(["cat", "/etc/passwd"])` from
+    /// being a bypass for `[filesystem]`-denied paths.
+    ///
+    /// Rules per argument:
+    /// 1. Skip arguments that don't look like paths (flags starting
+    ///    with `-`, `-` itself meaning stdin/stdout, bare names that
+    ///    don't exist as files at the policy root, anything not
+    ///    containing `/` and not starting with a path-like prefix).
+    /// 2. Resolve the argument against the policy root (handles
+    ///    `~/`, `./`, absolute paths, and `..` normalization).
+    /// 3. Reject if the resolved path matches `[filesystem].deny`.
+    /// 4. Reject if the resolved path doesn't match ANY allow list
+    ///    (read_allow, local_only_read, write_allow, delete_allow).
+    ///    The argument may be either read or written by the binary;
+    ///    we don't know which, so passing in any allow list is
+    ///    sufficient.
+    ///
+    /// Known limitations (documented in 04-policy-file.md):
+    /// - Paths embedded inside a quoted string argument
+    ///   (`sh -c "cat /etc/passwd"`) are NOT extracted. Defense:
+    ///   don't list shell evaluators in `allow_commands`.
+    /// - Bare names of files that don't exist at the policy root
+    ///   are NOT checked. A binary that *creates* a new file via
+    ///   such an argument can write outside `write_allow`. Defense:
+    ///   prefer absolute or `./`-prefixed paths in agent code; deny
+    ///   binaries that take bare-name destinations (`tee`, `cp`,
+    ///   `mv`).
+    /// - Paths read from env vars or stdin by the binary aren't
+    ///   visible to argv scan. Defense: don't grant the binary
+    ///   access to those env vars (`[environment].allow_vars`
+    ///   filtering already covers env; stdin is the operator's
+    ///   problem).
+    pub fn check_subprocess_argv_paths(
+        &self,
+        argv: &[String],
+    ) -> Result<(), PolicyError> {
+        if argv.len() < 2 {
+            return Ok(());
+        }
+        for arg in &argv[1..] {
+            if !looks_like_path_arg(arg, &self.root) {
+                continue;
+            }
+            let resolved = resolve_path(&self.root, Path::new(arg));
+            if self.fs_deny.is_match(&resolved) {
+                return Err(PolicyError::PathDenied {
+                    action: "subprocess.exec",
+                    path: resolved,
+                    reason: format!(
+                        "argv element {arg:?} resolves to a path matched by \
+                         [filesystem].deny — subprocess cannot reach what \
+                         the script itself cannot reach"
+                    ),
+                });
+            }
+            let permitted = self.fs_read.is_match(&resolved)
+                || self.fs_local_only_read.is_match(&resolved)
+                || self.fs_write.is_match(&resolved)
+                || self.fs_delete.is_match(&resolved);
+            if !permitted {
+                return Err(PolicyError::PathDenied {
+                    action: "subprocess.exec",
+                    path: resolved,
+                    reason: format!(
+                        "argv element {arg:?} resolves to a path that's not in any \
+                         [filesystem] allow list (read_allow, local_only_read, \
+                         write_allow, delete_allow) — subprocess cannot reach what \
+                         the script itself cannot reach"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Snapshot of the underlying file for audit log provenance.
     pub fn file_snapshot(&self) -> &PolicyFile {
         &self.file
     }
+}
+
+/// Heuristic: does this argv element look like a path Aegis should
+/// gate? Conservative — we'd rather miss a bare-name file than
+/// reject `git log` (which has "log" as a subcommand, not a path).
+///
+/// Returns true if:
+/// - starts with `/`            (absolute path)
+/// - starts with `./` or `../`  (explicit relative)
+/// - starts with `~/` or is `~` (home expansion)
+/// - contains `/`               (multi-component relative, e.g. `src/main.py`)
+/// - is a bare name that exists as a file/dir at the policy root
+///
+/// Returns false for flags (`-x`, `--foo`), `-` (stdin/stdout
+/// convention), and bare strings that don't name an existing root
+/// entry.
+fn looks_like_path_arg(arg: &str, root: &Path) -> bool {
+    if arg.is_empty() || arg == "-" {
+        return false;
+    }
+    if arg.starts_with('-') {
+        return false;
+    }
+    if arg.starts_with('/')
+        || arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.starts_with("~/")
+        || arg == "~"
+    {
+        return true;
+    }
+    if arg.contains('/') {
+        return true;
+    }
+    // Bare name: only treat as a path if it actually exists at root.
+    // Prevents `git log` / `make build` / `echo hello` from tripping
+    // the gate while still catching `cat README.md` when README.md
+    // is real.
+    root.join(arg).exists()
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -16,3 +16,4 @@ chrono.workspace = true
 starlark.workspace = true
 allocative.workspace = true
 ureq.workspace = true
+sha2.workspace = true

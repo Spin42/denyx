@@ -561,6 +561,22 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
             ctx.capture(CapturedKind::Policy, &msg);
             return Err(e.into());
         }
+        // Path-gate every argv element that looks like a path — closes
+        // the "cat /etc/passwd" loophole where an allowed binary could
+        // be used to reach files the script itself couldn't reach via
+        // fs.read/fs.write.
+        if let Err(e) = ctx.policy.check_subprocess_argv_paths(&argv) {
+            let msg = e.to_string();
+            ctx.emit(AuditEvent::denied(
+                &ctx.task_id,
+                step,
+                "subprocess.exec",
+                &format!("argv={:?}", argv),
+                &msg,
+            ));
+            ctx.capture(CapturedKind::Policy, &msg);
+            return Err(e.into());
+        }
         let cmd_summary = argv.join(" ");
         ctx.require_confirm("subprocess.exec", format!("exec: {}", cmd_summary))?;
         // Build the child env from scratch. The default `Command`
