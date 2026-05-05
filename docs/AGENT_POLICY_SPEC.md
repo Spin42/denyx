@@ -372,6 +372,62 @@ allowed.
   patterns (`"add "` with trailing space, or include the gem name).
   Implementers MAY skip the arg-level check in v1; Aegis implements it.
 
+### Subprocess is a privilege boundary
+
+Listing a binary in `allow_commands` is a *privilege grant*, not just
+a permission. Every implementation MUST treat the choice as such.
+
+The runtime gates argv at three levels (Aegis names; ports may rename):
+
+1. **Command gate** — argv[0] must pass `allow_commands` and
+   `deny_commands` (above).
+2. **Args gate** — `subprocess.deny_args` substring check.
+3. **Argv path gate** — every argv element that *looks like a path*
+   (absolute, starts with `~/`, contains `/`, or names an existing
+   file at the policy root) is checked against the same `[filesystem]`
+   rules as `fs.read` / `fs.write`. Aegis rejects
+   `subprocess.exec(["cat", "/etc/passwd"])` if `/etc/passwd` is
+   outside the read-side allow lists. Implementers SHOULD do the
+   same; a port that skips this check has a real bypass for any
+   file-touching binary it allows.
+
+What these gates **cannot** see:
+
+- **Paths constructed inside an inline interpreter argument.** A
+  shell evaluator (`sh -c "..."`, `bash -c "..."`) or a code
+  interpreter (`python -c "..."`, `node -e "..."`,
+  `ruby -e "..."`, `perl -e "..."`) takes its content as a single
+  string argv element. The runtime sees the string but cannot
+  reason about what code inside it will open. `python -c
+  "open(chr(47)+'etc'+chr(47)+'passwd').read()"` contains no
+  literal `/`, the path is computed at runtime, and the gate is
+  blind. **Implementations MUST treat shell evaluators and inline-
+  exec interpreters as wholesale-bypass commands** and either
+  deny them by default or document the consequence loudly. Aegis's
+  `secure-defaults` preset denies them; language templates that
+  legitimately need an interpreter (Python, Node, Ruby) negate
+  the deny AND add a `deny_args` entry blocking the inline-exec
+  flag (`-c`, `-e`, `-p`, etc.).
+
+- **Paths read from environment variables or stdin** by the
+  binary. Defense: filter the child env to the declared
+  `allow_vars` only (Aegis does this), and don't pipe untrusted
+  content into the child's stdin.
+
+- **Children of generic command runners** (`env CMD`, `xargs CMD`,
+  `find -exec CMD`, `timeout CMD`, `nohup CMD`, ...). These
+  binaries spawn whatever command they're told to spawn, sidestepping
+  `allow_commands` for the actual work. Aegis's `secure-defaults`
+  denies them and adds `find = ["-exec", "-execdir"]` to
+  `deny_args`. Implementers SHOULD do the same.
+
+For total isolation, implementers SHOULD additionally provide an
+opt-in OS-level sandbox backend (Aegis: `[subprocess].sandbox =
+"bwrap"` on Linux). With sandboxing on, the child's filesystem
+view is exactly what the policy bind-mounts in; paths outside the
+view do not exist for the child no matter what obfuscation is
+used.
+
 ### Confirm-per-call
 
 When a capability fires that's listed in `confirm_per_call`, the
