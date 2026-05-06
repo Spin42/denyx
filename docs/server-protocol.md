@@ -652,7 +652,7 @@ rejected with `401`; valid audit POSTs return `204`.
 
 Pseudo-Python; not production-ready. Illustrates the wire protocol
 with bearer-auth validation. Real production servers should:
-  - replace the in-memory token map with a database
+  - replace the in-memory token + policy with a database
   - back the audit handler with durable storage
   - serve over TLS via a reverse proxy (nginx, Caddy, ingress sidecar)
   - add request logging and metrics
@@ -661,44 +661,35 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import secrets
 
-# Maps each bearer token to the policy TOML it's entitled to.
-# In production this is a database row keyed on the token (or on
-# the JWT subject); here it's an in-memory dict so the example is
-# self-contained. The same dict serves both the auth check ("is
-# this token a valid key?") and the policy lookup ("what TOML
-# does this token get?"); production servers usually separate
-# auth-validation from policy-routing.
-TOKEN_POLICIES = {
-    "dev-laptop-token-abc123": """\
+# Auth: the single bearer token this server accepts. In production
+# this is a database lookup keyed on the token (or on a JWT
+# subject); here it's one constant for the simplest possible
+# example.
+EXPECTED_TOKEN = "dev-laptop-token-abc123"
+
+# The policy this server returns to any successfully-authenticated
+# request. In production the server typically returns a different
+# policy per token / per team / per project (see the "Which policy
+# to serve" section above for the routing patterns); a minimal
+# example serves the same policy to anyone who authenticates.
+POLICY_TOML = """\
 inherits = "secure-defaults"
 
 [filesystem]
 read_allow  = ["src/**"]
 write_allow = ["/tmp/**"]
-""",
-}
+"""
 
 
-def extract_bearer(headers):
-    """Return the bearer token from the Authorization header,
-    or None if the header is missing or malformed."""
+def is_authorised(headers):
+    """True if the Authorization header carries the expected
+    bearer token. Uses constant-time comparison to avoid
+    timing-oracle attacks on the equality check."""
     auth = headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
-        return None
-    return auth[len("Bearer "):].strip()
-
-
-def authorise(headers):
-    """Validate the bearer token. Returns the matched token on
-    success, None on failure. Uses constant-time comparison to
-    avoid timing-oracle attacks on the token-equality check."""
-    presented = extract_bearer(headers)
-    if presented is None:
-        return None
-    for known in TOKEN_POLICIES:
-        if secrets.compare_digest(presented, known):
-            return known
-    return None
+        return False
+    presented = auth[len("Bearer "):].strip()
+    return secrets.compare_digest(presented, EXPECTED_TOKEN)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -706,11 +697,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/policy":
             self.send_error(404)
             return
-        token = authorise(self.headers)
-        if token is None:
+        if not is_authorised(self.headers):
             self.send_error(401, "Bearer token missing or invalid")
             return
-        body = TOKEN_POLICIES[token].encode()
+        body = POLICY_TOML.encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/toml")
         self.send_header("Content-Length", str(len(body)))
@@ -721,8 +711,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/audit":
             self.send_error(404)
             return
-        token = authorise(self.headers)
-        if token is None:
+        if not is_authorised(self.headers):
             self.send_error(401, "Bearer token missing or invalid")
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -732,10 +721,7 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "audit body must be valid JSON")
             return
-        # Truncate the token for log readability without leaking
-        # the full secret to console logs.
-        print(f"AUDIT [{token[:8]}…]: "
-              f"{event['capability']} {event['status']} "
+        print(f"AUDIT: {event['capability']} {event['status']} "
               f"task={event['task_id']} step={event['step']}")
         self.send_response(204)
         self.end_headers()
