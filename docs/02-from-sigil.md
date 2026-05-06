@@ -1,20 +1,38 @@
-# From Sigil to Denyx
+# From Sigil to Aegis to Denyx
 
 > ← [Back to docs README](README.md)
 
-Denyx is the second iteration of an idea. The first was
-[**Sigil**](https://github.com/mlainez/sigil) — a research project that
-designed a custom DSL for agent code, fine-tuned local models to emit
-it, and ran it in a custom interpreter. Sigil shipped, learned a lot,
-and ultimately produced a sober retrospective: the **language**
-shouldn't be the variable. The deliverable should be the **policy
-substrate**, with the language as close to something the model already
-knows as possible.
+Denyx is the third name on the project's lineage and the second
+substantive iteration. The chronology:
 
-This document is the bridge between those two projects. It's the design
-history that justifies why Denyx looks the way it does. The deep
-retrospective notes live in [conclusions.md](conclusions.md); this is the
-condensed version.
+1. **[Sigil](https://github.com/mlainez/sigil)** — the original
+   research project. Designed a custom DSL for agent code,
+   fine-tuned local models to emit it, ran it in a custom
+   interpreter. Sigil shipped, learned a lot, and produced a sober
+   retrospective: *the language shouldn't be the variable*. The
+   deliverable should be the **policy substrate**, with the language
+   as close to something the model already knows as possible.
+2. **Aegis** — the rewrite that acted on that retrospective.
+   Originally developed under the author's personal account
+   (`mlainez/aegis`); the architecture and threat model that
+   Denyx still runs on were designed and implemented during the
+   Aegis era. The name was retired before publishing because the
+   `aegis-*` crate names were partially taken on crates.io.
+3. **Denyx** — the same codebase, re-released under
+   [**Spin42**](https://spin42.com), the company of the author of
+   both Sigil and Aegis. Stewardship moved with the rename. The
+   GitHub repo lives at
+   [Spin42/denyx](https://github.com/Spin42/denyx) (GitHub
+   auto-redirects from the old `mlainez/aegis` URL).
+
+So when this document says "Denyx", read it as "the post-Sigil
+runtime, originally called Aegis, currently published as Denyx" —
+the same project under three names across two organisations.
+
+This document is the bridge between Sigil and the current runtime.
+It's the design history that justifies why Denyx looks the way it
+does. The deep retrospective notes live in
+[conclusions.md](conclusions.md); this is the condensed version.
 
 ## The design principle that fell out of the retrospective
 
