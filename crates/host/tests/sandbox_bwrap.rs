@@ -26,6 +26,41 @@ fn bwrap_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Stricter than `bwrap_available()`: verifies bubblewrap can
+/// actually create a working sandbox in the current environment.
+///
+/// CI runners (and some hardened Linux distros) ship the bwrap
+/// binary but disable the kernel features it relies on —
+/// unprivileged user namespaces, certain seccomp paths, the
+/// AppArmor profile required for chroot — so `bwrap --version`
+/// succeeds but `bwrap --ro-bind /usr /usr -- /bin/true` fails
+/// with `setting up uid map: Permission denied` or similar.
+///
+/// Use this for any test that drives a real subprocess through
+/// bwrap end-to-end; it skips cleanly on CI runners where the
+/// environment can't host the sandbox, while letting the test
+/// run unchanged on a developer laptop.
+fn bwrap_works() -> bool {
+    if !bwrap_available() {
+        return false;
+    }
+    Command::new("bwrap")
+        .args([
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--unshare-all",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn runner_for(toml: &str, root: PathBuf) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
     let policy = Policy::from_file(file, root).unwrap();
@@ -148,8 +183,12 @@ sandbox = "bwrap"
 
 #[test]
 fn end_to_end_cat_etc_passwd_blocked_by_sandbox() {
-    if !bwrap_available() {
-        eprintln!("skipping: bwrap not installed");
+    if !bwrap_works() {
+        eprintln!(
+            "skipping: bwrap is not installed or cannot create a working \
+             sandbox in this environment (common on CI runners with \
+             restricted user namespaces)"
+        );
         return;
     }
     // The classic bypass: cat is allowed, /etc/passwd would normally
@@ -189,8 +228,12 @@ print(out)
 
 #[test]
 fn end_to_end_obfuscated_path_in_python_blocked_by_sandbox() {
-    if !bwrap_available() {
-        eprintln!("skipping: bwrap not installed");
+    if !bwrap_works() {
+        eprintln!(
+            "skipping: bwrap is not installed or cannot create a working \
+             sandbox in this environment (common on CI runners with \
+             restricted user namespaces)"
+        );
         return;
     }
     // Tests command not on PATH inside sandbox: an absolute path
@@ -230,8 +273,12 @@ print(out)
 
 #[test]
 fn end_to_end_allowed_path_works_inside_sandbox() {
-    if !bwrap_available() {
-        eprintln!("skipping: bwrap not installed");
+    if !bwrap_works() {
+        eprintln!(
+            "skipping: bwrap is not installed or cannot create a working \
+             sandbox in this environment (common on CI runners with \
+             restricted user namespaces)"
+        );
         return;
     }
     // Sanity: a file that IS in read_allow should be readable from
