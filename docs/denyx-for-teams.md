@@ -77,6 +77,190 @@ properties:
    endpoints, bearer auth, a TOML body and a JSON event body.
    Anyone can stand up a conforming server in an afternoon.
 
+## Policy and audit: how to choose
+
+Denyx supports several deployment shapes, and the right one
+depends on the trust model, the size of the team, and how much
+infrastructure the team is willing to run. This section lays out
+the realistic options for **policy distribution** and **audit
+destination** independently — they're orthogonal knobs and you
+can mix any combination.
+
+### Policy distribution
+
+Where does the active policy come from?
+
+#### Option A — TOML committed to the project's git repo (default)
+
+Each developer runs Denyx with a `denyx.toml` that lives in the
+project's repo. `cargo install denyx-cli denyx-mcp`; clone the
+repo; the policy is right there.
+
+| Pros | Cons |
+|------|------|
+| **Zero infrastructure.** No server, no network dependency at startup, works on a plane. | **Can be modified locally without anyone noticing.** A developer can `vim denyx.toml`, save changes, and run their agent against the modified policy. The repo's `main` is unchanged but the local enforcement is. |
+| **Version-controlled and code-reviewed.** Policy changes go through PR. `git blame` shows who changed what and why. | **Drift across machines.** If a contributor doesn't `git pull`, their agent enforces yesterday's policy. Whether that's "good" depends on whether yesterday's policy was tighter or looser. |
+| **Transparent.** Anyone reading the codebase sees the policy. New contributors don't need a separate access grant. | **No org-wide policy.** Each project carries its own TOML. If your security team has rules that apply across all projects, they have to be replicated in each repo. |
+| **Works offline.** | **No central enforcement that all developers run *the* policy.** A determined developer can delete the file and run with no policy. (The Denyx CLI exits without one; the MCP server exits unless `--policy` resolves.) |
+
+**When to use:** small teams, single-project agents, projects where
+the policy author and the agent operator are the same person or
+team. The default for OSS projects shipping a `denyx.toml`
+alongside their code.
+
+**The honest framing**: committing `denyx.toml` to the repo is
+**convention-as-enforcement**. It's the same pattern as
+`.editorconfig`, `pyproject.toml`'s `[tool.ruff]` block, or any
+other in-repo config — culturally enforced, technically optional.
+That's enough for a lot of teams. It is *not* enough for a team
+that needs to demonstrate to a compliance reviewer that *every*
+agent run was gated by a specific approved policy version.
+
+#### Option B — Centralised policy server (`DENYX_POLICY_URL`)
+
+The Denyx client fetches the policy from an HTTP endpoint at
+startup. The TOML in the repo is either deleted or kept as a
+fallback / local-dev convenience.
+
+| Pros | Cons |
+|------|------|
+| **Single source of truth.** Update the server, every agent picks up the new policy on next restart. No chasing developers to `git pull`. | **Requires infrastructure.** A server, an auth token distribution mechanism, monitoring. The server going down means new agents can't start (the client refuses to start without a policy). |
+| **Cross-project / cross-team consistency.** The server can decide what policy each token / project / machine gets. Security can enforce one set of baseline rules across the entire org. | **Network dependency at startup.** `cargo install denyx-cli && denyx-mcp` no longer works on a plane. Local-only dev needs a local fallback path or a mocked server. |
+| **Per-machine / per-project differentiation.** A senior dev's agent can have a more permissive policy than a junior dev's; CI agents can have a tighter one than human-driven sessions. The server decides. | **Bearer-token management.** Rotating tokens, revoking access on offboarding, scoping permissions — all become operations the team has to run. |
+| **Compliance story.** "Every agent run on date X used policy version Y" is a server-side query, not a forensic walk across laptops. | **Latency.** A 5-second startup dependency the standalone shape doesn't have. Usually fine; visible if the server is on another continent. |
+
+**When to use:** organisations with central security/compliance
+review of policies; teams where developers shouldn't be able to
+self-modify the active policy; deployments at scale where pushing
+TOML changes across N developers is a coordination tax.
+
+**The honest framing**: this gives you **mandatory, server-enforced
+policy** — at the cost of running a server. The server is
+deliberately small (two HTTP endpoints) and you can stand it up in
+an afternoon, but it is real infrastructure with real
+operational cost.
+
+#### Option C — Hybrid: server with in-repo fallback
+
+Both the in-repo TOML *and* a `DENYX_POLICY_URL` are configured.
+The Denyx client uses the URL when reachable; if the URL is
+unset (or the server is unreachable), it falls back to the local
+file.
+
+> **Note:** the current Denyx client (`denyx-mcp` 0.1) does
+> **not** auto-fall-back from URL to local on a fetch failure — a
+> failed fetch is fatal and the client exits. The hybrid shape is
+> achieved by *unsetting* `DENYX_POLICY_URL` (e.g. via a
+> direnv-controlled env var that's only set on the corporate
+> network), so the client uses the local file when offline. A
+> first-class fall-back-on-error mode is on the v2 list for the
+> server protocol.
+
+| Pros | Cons |
+|------|------|
+| **Resilience to server outage.** Developers can keep working when the policy server is down. | **Two policies to maintain.** The in-repo file can drift from what the server serves. |
+| **Local-dev experience preserved.** Working offline / on a plane just works. | **Reduced compliance guarantee.** "Every agent run used the canonical policy" is no longer true if developers ran with the local fallback. |
+| **Smooth migration path.** Teams adopting the server can keep the in-repo file during the transition. | **More configuration to get right.** Which env vars are set when, and on which machines, matters. |
+
+**When to use:** during migration from in-repo to centralised,
+or for teams that want centralised policy as a *default* but
+explicitly tolerate the local-fallback case for offline /
+emergency work.
+
+### Audit destination
+
+Where do gate decisions get recorded?
+
+#### Option A — Local JSONL file only (default)
+
+Each Denyx-gated agent writes to a JSONL log on the machine where
+it runs. The audit file is hash-chained: SHA-256 of each line
+embedded in the next one's `denyx_prev_hash` field, so any
+tampering is detectable on later verification.
+
+| Pros | Cons |
+|------|------|
+| **Zero infrastructure.** | **Scattered.** Each developer has their own log. "What did all our agents do this week?" is N separate file-walks. |
+| **Tamper-detectable.** The hash chain catches insertions, deletions, and modifications. `denyx audit verify` reports mismatches. | **Local resilience only.** A developer can delete the file. Hash chain detects the deletion; doesn't recover the data. |
+| **Full history retained** (subject to disk space). | **Hard to query.** JSONL is a stream, not a database. Filtering across many machines requires shipping the data first. |
+| **No network round-trip.** Audit POST never delays a capability call. | **No real-time visibility.** Compliance / security can't see what's happening today without manually pulling the logs. |
+
+**When to use:** solo developer; small team where the audit log is
+"useful when something goes wrong" rather than a primary security
+control; environments where shipping logs off the machine is
+itself a compliance issue.
+
+#### Option B — Centralised HTTP POST (`DENYX_AUDIT_URL`)
+
+Every audit event POSTs to the configured URL. The server stores
+events in whatever backend the team runs (Postgres, ClickHouse,
+S3-as-JSONL, a SIEM, etc.).
+
+| Pros | Cons |
+|------|------|
+| **Real-time aggregation.** Compliance / security teams can run "what's happening right now" queries. | **Network dependency on the hot path.** Each gated capability call blocks for up to ~4 seconds (2s timeout + 1 retry) on the audit POST. Slow audit server = slow agent. |
+| **Org-wide visibility.** "Has any agent denied a `subprocess.exec` of `rm -rf /` this week?" is one SQL query. | **AUDIT GAP on persistent failure.** Two failed POSTs in a row produce a stderr `AUDIT GAP` line and the client continues without retrying that event. The capability call has already been gated locally; the missing record is a record-keeping gap, not a security bypass. Operators must monitor for AUDIT GAP lines. |
+| **Compliance-ready.** Auditable, exportable, retained per the team's data-retention policy. | **Server outage during a long-running session means missing events.** The client doesn't buffer; events that fail to POST are dropped (with the AUDIT GAP log). |
+| **Centralised retention policy.** "Keep audit data for 7 years" is configured once on the server, not per machine. | **Bearer-token management** (same auth concerns as the policy server). |
+
+**When to use:** teams that need real-time compliance visibility;
+deployments where the audit log feeds an existing SIEM or alerting
+pipeline; orgs that need to demonstrate "every agent action was
+recorded centrally."
+
+#### Option C — Local JSONL + log shipping (filebeat / vector / fluentd)
+
+Each Denyx-gated agent writes to a local JSONL file (Option A).
+A separate log-shipping process (filebeat, vector, fluentd, the
+team's existing log pipeline) tails the file and forwards events
+to a central system.
+
+| Pros | Cons |
+|------|------|
+| **Local resilience.** The local hash-chained file survives server outages; the shipper retries when the central system comes back. | **Lag.** Events show up in the central store seconds-to-minutes after the gate decision, not immediately. |
+| **Decouples Denyx from the audit transport.** If the team already runs vector / a SIEM agent, no new infrastructure needed — just point the shipper at the JSONL file. | **Two moving parts** instead of one. Shipper failures are silent unless monitored separately. |
+| **No hot-path network round-trip.** Capability calls don't wait for any network. | **Hash chain doesn't transit.** The central store gets the bare events; tamper detection lives only on the local file. |
+| **Standard tooling.** Most security teams already have a log-shipping story. | **Doesn't catch local-file deletion.** The shipper has whatever the file had at last tail; if the user deletes the file, the shipper just sees EOF. |
+
+**When to use:** teams that already operate a log pipeline;
+environments where blocking on a network POST per capability call
+is unacceptable (high-frequency agents); deployments that want
+centralised audit *eventually* but not synchronously.
+
+#### Option D — Local JSONL + HTTP POST (both)
+
+Both `DENYX_AUDIT_URL` is set *and* the local JSONL file path is
+configured (`--audit-log /var/log/denyx/audit.jsonl`). Every event
+goes to both places.
+
+| Pros | Cons |
+|------|------|
+| **Belt-and-braces.** If the central server fails, the local file still has everything. If the user tampers with the local file, the central server still has the canonical record. | **Hot-path latency stacks.** Each capability call blocks for the audit POST AND the local-file write (the latter is fast; the former is the binding cost). |
+| **Tamper detection on two sides.** Hash chain on local file + server-side `(task_id, step)` continuity check. | **Two retention policies to manage.** When does the local file get rotated? When does the server's data get aged out? Misalignment causes "we have it on the server but not locally" investigations. |
+
+**When to use:** high-stakes deployments where both local and
+central records are required by policy (some regulated
+industries); pre-production hardening where you want maximum
+forensic data while you tune the system.
+
+### Pick a combination
+
+The two axes are independent. A team might run:
+
+| Policy | Audit | Profile |
+|--------|-------|---------|
+| In-repo TOML (Option A) | Local JSONL only (Option A) | **Solo / small OSS team.** Zero infra. The default Denyx experience. |
+| In-repo TOML | Local JSONL + log shipping (Option C) | **Small org, existing log pipeline.** Convention-enforced policy + centralised audit-eventually. |
+| Centralised server (Option B) | Centralised HTTP POST (Option B) | **Compliance-driven org.** Mandatory policy + real-time audit. The "Denyx for Teams" sweet spot. |
+| Centralised server | Local JSONL + log shipping | **Compliance-driven org with high-frequency agents.** Mandatory policy + decoupled audit (no hot-path latency). |
+| Hybrid (Option C) | Both: local JSONL + HTTP POST (Option D) | **Belt-and-braces.** Resilient policy fallback + dual audit records. Highest operational overhead; highest forensic completeness. |
+| Centralised server | Local JSONL only | **Mandatory policy, no central audit yet.** Useful migration intermediate state — get the policy story sorted, then add audit aggregation later. |
+
+The "right" choice is whichever one matches the team's threat
+model and operational appetite. Denyx doesn't take a position on
+which is best; it tries to make all of them feasible without
+forcing infrastructure that some deployments don't need.
+
 ## What a basic Denyx-capable server has to do
 
 A conforming server implements **two HTTP endpoints**. Both
