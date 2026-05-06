@@ -10,12 +10,22 @@ The prompt is project-specific by design: every file it writes lands in
 the current working directory. Nothing is installed system-wide; nothing
 in `~/.config/...` is touched.
 
-> **Prerequisite.** You must have already built `denyx` and `denyx-mcp`
-> from source (see [docs/05-install.md](../docs/05-install.md) on Linux,
-> [docs/macos-deployment.md](../docs/macos-deployment.md) on macOS,
-> [docs/windows-deployment.md](../docs/windows-deployment.md) on Windows).
-> The prompt assumes the binaries exist somewhere reachable; it doesn't
-> walk you through building.
+> **Prerequisite.** Either:
+>
+> - **Recommended:** install the published crates with
+>   `cargo install denyx-cli denyx-mcp`. This puts a `denyx` and a
+>   `denyx-mcp` binary into `~/.cargo/bin/`, which should already be
+>   on your `$PATH`.
+> - **From source:** clone `Spin42/denyx`, run `cargo build --release`,
+>   and the prompt will pick up
+>   `<repo>/target/release/{denyx,denyx-mcp}`. Use this if you need
+>   features not yet on crates.io, or are contributing.
+>
+> On **macOS** the binaries must be installed inside a Lima VM (see
+> [docs/macos-deployment.md](../docs/macos-deployment.md)). On
+> **Windows** they go inside WSL2 (see
+> [docs/windows-deployment.md](../docs/windows-deployment.md)). On
+> **Linux** they install as host binaries.
 
 ---
 
@@ -45,23 +55,33 @@ out below — don't guess.
    Branch:
      - Linux native: `denyx-mcp` runs as a host binary.
      - macOS: `denyx-mcp` runs inside a Lima VM. The MCP config will
-       use `limactl shell denyx <path-to-denyx-mcp> ...`. If
-       `limactl --version` fails, stop and tell the user to follow
+       use `limactl shell denyx denyx-mcp ...`. If `limactl --version`
+       fails, stop and tell the user to follow
        docs/macos-deployment.md, then restart this prompt.
      - Windows: `denyx-mcp` runs inside WSL2. The MCP config will
-       use `wsl.exe -d <distro> -e <path-to-denyx-mcp> ...`. If WSL
-       isn't set up, stop and tell the user to follow
+       use `wsl.exe -d <distro> -e denyx-mcp ...`. If WSL isn't set
+       up, stop and tell the user to follow
        docs/windows-deployment.md, then restart this prompt.
 
-3. Find the denyx binaries. Ask the user:
-   "Where is your Denyx checkout? (The directory containing
-   `Cargo.toml` for the `denyx-*` workspace.)"
-   Then verify `<repo>/target/release/denyx` and `denyx-mcp` exist.
-   On macOS/Windows, the path is the *Linux-side* path inside the
-   VM/WSL — it's the same as the host path because of the Lima/WSL
-   mount conventions, but verify with the OS-appropriate shell.
-   If the binaries don't exist, stop and tell the user to run
-   `cargo build --release` in the denyx repo first.
+3. Find the denyx binaries. Try the recommended path first, then
+   fall back to source-built:
+
+   a. **Published install** — run `denyx --version` and
+      `denyx-mcp --version` (on Linux, on the host shell; on macOS,
+      inside `limactl shell denyx ...`; on Windows, inside
+      `wsl.exe -d <distro> -e ...`). If both succeed, use bare
+      `denyx` and `denyx-mcp` (they're on $PATH inside `~/.cargo/bin/`).
+      Set `<denyx>` and `<denyx-mcp>` to those bare command names
+      for the rest of this prompt.
+
+   b. **Source build** — if either command isn't found, ask the user:
+      "Where is your Denyx checkout? (The directory containing
+      `Cargo.toml` for the `denyx-*` workspace.)"
+      Then verify `<repo>/target/release/denyx` and `denyx-mcp`
+      exist. Set `<denyx>` and `<denyx-mcp>` to those absolute paths.
+      If the binaries don't exist, stop and tell the user to either
+      run `cargo install denyx-cli denyx-mcp` (preferred) or
+      `cargo build --release` in their checkout.
 
 == Step 1: Detect the project's language ==
 
@@ -80,7 +100,11 @@ project that ships a small npm bundle should set `--lang python`).
 
 Run from cwd:
 
-    <repo>/target/release/denyx init --lang <detected> --output ./denyx.toml
+    <denyx> init --lang <detected> --output ./denyx.toml
+
+(where `<denyx>` is whatever you resolved in Step 0.3 — bare
+`denyx` if installed via cargo, or
+`<repo>/target/release/denyx` if built from source).
 
 If `denyx.toml` already exists, ASK FIRST before clobbering. Offer
 to write `denyx.toml.new` instead and diff against the existing one.
@@ -145,28 +169,34 @@ Q5. **Approval gates.**
 
 == Step 4: Wire the project-local MCP config ==
 
-Build the MCP `command`/`args` based on the OS branch from Step 0:
+Build the MCP `command`/`args` based on the OS branch from Step 0
+and which install path resolved in 0.3. `<denyx-mcp>` below is
+either the bare command name (`denyx-mcp`, when installed via
+`cargo install denyx-mcp`) or the absolute path
+(`<repo>/target/release/denyx-mcp`, when built from source).
 
   - Linux native:
-      command: <repo>/target/release/denyx-mcp
+      command: <denyx-mcp>
       args:    ["--policy", "./denyx.toml", "--confirm-mode", "auto"]
 
   - macOS (Lima):
       command: limactl
-      args:    ["shell", "denyx", "<repo>/target/release/denyx-mcp",
+      args:    ["shell", "denyx", "<denyx-mcp>",
                 "--policy", "<absolute-policy-path>", "--confirm-mode", "auto"]
       (Lima mirrors the host's $HOME at the same absolute path
       inside the VM, so use the host's absolute path for the policy
-      file.)
+      file. The `<denyx-mcp>` here is whatever resolved inside the
+      VM in Step 0.3 — usually bare `denyx-mcp` since you'd
+      `cargo install` inside the VM.)
 
   - Windows (WSL2):
       command: wsl.exe
-      args:    ["-d", "<distro>", "-e",
-                "<repo>/target/release/denyx-mcp",
+      args:    ["-d", "<distro>", "-e", "<denyx-mcp>",
                 "--policy", "<wsl-side-policy-path>", "--confirm-mode", "auto"]
-      (Ask the user which WSL distro hosts the denyx build. The
+      (Ask the user which WSL distro hosts the denyx install. The
       policy path is the WSL-side path; if the policy lives on a
-      Windows drive, use `/mnt/c/...`.)
+      Windows drive, use `/mnt/c/...`. `<denyx-mcp>` is whatever
+      resolved inside WSL in Step 0.3 — usually bare `denyx-mcp`.)
 
 Now write the config:
 
@@ -194,9 +224,9 @@ server alongside whatever else is there.
 After the config is in place, run a manual sanity check yourself
 (no need to ask the user to restart the host):
 
-  1. From cwd, spawn `denyx-mcp` directly with the same flags the
-     config uses, send an `initialize` JSON-RPC, then `tools/call`
-     `denyx_run` with a one-line script like
+  1. From cwd, spawn `<denyx-mcp>` directly with the same flags
+     the config uses, send an `initialize` JSON-RPC, then
+     `tools/call` `denyx_run` with a one-line script like
      `print(fs.read("README.md")[:80])`.
      - If it errors with "policy violation", confirm `README.md`
        is actually in `read_allow` (the template usually allows
@@ -225,13 +255,18 @@ Tell the user:
   - **Commit `./denyx.toml`.** It's the policy contract for the
     project — everyone working on this codebase should see it,
     review it, and propose changes via PR.
-  - **Don't commit `./.mcp.json` (or `./opencode.json`) as-is** if
-    it embeds an absolute path to the user's local denyx-mcp
-    binary — that path differs per machine. Either:
-      * gitignore it and have each contributor run this prompt; OR
-      * commit a templated version (e.g. `.mcp.json.example`) where
-        the path is `${DENYX_MCP_BIN}` or similar, and document the
-        env var in the project README.
+  - **Whether to commit `./.mcp.json` (or `./opencode.json`)
+    depends on which install path you used:**
+      * If the config invokes bare `denyx-mcp` (cargo-installed
+        path), it's portable across contributors who have also run
+        `cargo install denyx-mcp`. Safe to commit — and recommended,
+        so contributors don't each have to re-run this prompt.
+      * If the config embeds an absolute path to a local checkout
+        (`<repo>/target/release/denyx-mcp`), that path differs per
+        machine. Either gitignore it and have each contributor run
+        this prompt, or commit a templated version (e.g.
+        `.mcp.json.example`) with `${DENYX_MCP_BIN}` and document
+        the env var in the project README.
   - For Linux operators who want OS-level isolation: edit
     `denyx.toml` and add `sandbox = "bwrap"` under
     `[subprocess]` (after installing bubblewrap with
