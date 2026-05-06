@@ -34,24 +34,48 @@ case you want to understand each step or do it without the prompt.
 
 ## Configure the MCP server
 
-opencode reads MCP server configuration from its workspace settings.
-Add an `denyx` server (consult opencode's current docs for the exact
-file path; older versions used `~/.config/opencode/config.json`,
-recent versions use a project-local `opencode.json` or similar):
+opencode reads MCP server configuration from a project-local
+`./opencode.json` (or the user-global
+`~/.config/opencode/opencode.json` if you want machine-wide
+enablement). Project-local is what you almost always want — it
+keeps Denyx scoped to the project you're gating, instead of
+opting every project on the machine in.
+
+The opencode config shape is **different from Claude Code's**.
+Specifically:
+
+- Top-level key is **`mcp`**, not `mcpServers` (Claude Code's name).
+- Each server entry has a **`type`** field — `"local"` for stdio
+  servers like `denyx-mcp`.
+- **`command`** is a single ARRAY that contains the binary AND
+  its arguments together; there is no separate `args` field.
+- An **`enabled`** boolean lets you toggle servers without
+  removing them.
+
+So a working `opencode.json` looks like:
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "denyx": {
-      "command": "denyx-mcp",
-      "args": [
+      "type": "local",
+      "command": [
+        "denyx-mcp",
         "--policy", "/absolute/path/to/your/denyx.toml",
         "--audit-log", "/absolute/path/to/audit.jsonl"
-      ]
+      ],
+      "enabled": true
     }
   }
 }
 ```
+
+If you copy-pasted the Claude Code shape (`mcpServers` + separate
+`command`/`args`) into `opencode.json`, opencode rejects the
+config at startup with `Configuration is invalid ... Unrecognized
+key: mcpServers`. The fix is purely shape: rewrite to the form
+above.
 
 Restart opencode. The server's tools should appear in the tool list,
 typically prefixed `denyx__` or similar (opencode's exact namespacing
@@ -83,13 +107,16 @@ opencode. Configure it as an MCP server:
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "local-executor": {
-      "command": "python3",
-      "args": [
+      "type": "local",
+      "command": [
+        "python3",
         "/path/to/denyx/examples/local_executor/local_mcp.py",
         "--policy", "/path/to/denyx.toml"
-      ]
+      ],
+      "enabled": true
     }
   }
 }

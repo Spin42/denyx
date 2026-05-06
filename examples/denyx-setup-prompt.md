@@ -200,21 +200,39 @@ either the bare command name (`denyx-mcp`, when installed via
 
 Now write the config:
 
-  - Claude Code: `./.mcp.json` in the project root:
+  - **Claude Code**: `./.mcp.json` in the project root.
       {
         "mcpServers": {
           "denyx": {
             "command": "<command>",
-            "args": [...]
+            "args": [...the args you built above...]
           }
         }
       }
 
-  - opencode: edit `./opencode.json` (or create it). Add an
-    `"mcp"` (or `"mcpServers"`, depending on opencode version)
-    block with the same shape. If unsure of the key name, ask the
-    user to share their opencode version and either look it up or
-    drop in both shapes for the user to prune.
+  - **opencode**: `./opencode.json` (or create it). The opencode
+    config shape is **different** from Claude Code's — don't
+    copy-paste the Claude Code shape into opencode.json or
+    opencode rejects it at startup with "Unrecognized key:
+    mcpServers".
+      {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+          "denyx": {
+            "type": "local",
+            "command": ["<command>", ...the args you built above...],
+            "enabled": true
+          }
+        }
+      }
+    Three opencode-specific quirks vs Claude Code:
+      * Top-level key is `mcp`, not `mcpServers`.
+      * Each server entry has `"type": "local"` (use `"remote"`
+        if you ever wire opencode at an HTTP-transport MCP
+        server; for `denyx-mcp` over stdio, it's `"local"`).
+      * `command` is a single ARRAY that contains the binary
+        AND its arguments — there is no separate `args` field.
+      * `"enabled": true` so opencode actually loads it.
 
 If a config already exists, MERGE — don't clobber. Add the `denyx`
 server alongside whatever else is there.
