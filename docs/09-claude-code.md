@@ -92,7 +92,75 @@ You have a placebo sandbox.
 To actually enforce the policy, write
 `./.claude/settings.json` in your project root (create the
 `.claude/` directory if it doesn't exist) with a `permissions.deny`
-list that blocks every effecting built-in:
+list that blocks every effecting built-in.
+
+> **The deny list depends on which Claude Code version you're
+> on.** Run `claude --version` to check. v2 ships a substantially
+> larger built-in tool surface than v1 — including `Skill`,
+> `CronCreate`/`CronDelete`, `TaskCreate`/`TaskUpdate`/`TaskStop`,
+> `Agent`, `EnterWorktree`/`ExitWorktree`, `SendMessage`,
+> `TeamCreate`/`TeamDelete` — that can each create an ungated
+> path if left enabled. Use the matching block below.
+
+#### Claude Code **v2** (current — most users)
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Monitor",
+      "NotebookEdit",
+      "PowerShell",
+      "Skill",
+      "Agent",
+      "CronCreate",
+      "CronDelete",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskStop",
+      "EnterWorktree",
+      "ExitWorktree",
+      "SendMessage",
+      "TeamCreate",
+      "TeamDelete"
+    ],
+    "disableBypassPermissionsMode": "disable",
+    "disableAutoMode": "disable"
+  }
+}
+```
+
+Two v2-specific extras worth highlighting:
+
+- **`disableBypassPermissionsMode: "disable"`** — prevents the
+  user (or a tricked user) from entering Claude Code's
+  `bypassPermissions` mode, which skips every permission check
+  including the deny list. Without this lock, a confused user
+  can disable your lockdown with one keystroke.
+- **`disableAutoMode: "disable"`** — prevents activation of
+  v2's ML-based `auto` mode, which can auto-approve tools the
+  classifier judges "safe." Auto-approval defeats the deny
+  list's purpose for any tool the classifier whitelists.
+
+Some v2 tools are deliberately **not** in the deny list because
+they don't side-effect: `TaskList`, `TaskGet`, `TaskOutput`,
+`CronList`, `TodoWrite`, `EnterPlanMode`/`ExitPlanMode`,
+`AskUserQuestion`, `ToolSearch`, `LSP`, `ListMcpResourcesTool`,
+`ReadMcpResourceTool`. Allowing these doesn't create a side-
+effect path; they're metadata / mode-switching / read-only.
+
+#### Claude Code **v1** (legacy)
+
+If you're still on v1, drop every entry that doesn't exist there
+yet. The shorter v1 list:
 
 ```json
 {
@@ -113,16 +181,40 @@ list that blocks every effecting built-in:
 }
 ```
 
-Add `"PowerShell"` on Windows. The bare tool name (e.g. `"Bash"`,
-not `"Bash(*)"`) means *"deny every invocation of this tool."*
-Deny rules always win over allow rules in Claude Code's
-permission system, so this is hard-deny. Restart Claude Code and
-the model now has exactly one path to side-effects: through the
-`mcp__denyx__*` tools, which all go through the policy gate.
+Add `"PowerShell"` on Windows. v1 doesn't have
+`disableBypassPermissionsMode` or `disableAutoMode`; the JSON is
+silently ignored if you include them, but they only protect v2.
 
-**This is project-local** — `./.claude/settings.json` only affects
-sessions started in this directory. Other projects on the same
-machine are unaffected.
+#### Why v2 needs the longer list
+
+The v2 additions matter because each of these tools can
+*independently* side-effect outside the MCP gate:
+
+| Tool | What it does ungated |
+|---|---|
+| `Skill` | Invokes registered slash commands programmatically — many of which run shell, edit files, or call APIs. |
+| `Agent` | Spawns a subagent with its own context and toolset. The subagent's permissions are not necessarily inherited from this project. |
+| `CronCreate` | Schedules arbitrary code to run on a recurring timer — survives the current session and can fire after the user has stopped paying attention. |
+| `Task*` (Create/Update/Stop) | Manages background tasks that can themselves run effecting tools. |
+| `EnterWorktree`/`ExitWorktree` | Switches to a different git worktree where rules and `.claude/settings.json` may differ. A v2 model can move out of your locked-down workspace. |
+| `SendMessage`, `TeamCreate`/`TeamDelete` | Inter-agent messaging and team management — experimental in v2 but can route work to other agents whose permissions you don't control. |
+
+If any of these is left enabled in v2, the lockdown has a hole.
+
+#### Common to both versions
+
+- Bare tool name (`"Bash"`, not `"Bash(*)"`) means "deny every
+  invocation of this tool." More-specific patterns like
+  `"Bash(git:*)"` are for partial denies; we want hard-deny.
+- Deny rules always win over allow rules. The first matching
+  rule wins, and rules are checked in order `deny → ask → allow`.
+- **This is project-local.** `./.claude/settings.json` only
+  affects sessions started in this directory. Other projects on
+  the same machine are unaffected.
+
+Restart Claude Code and the model now has exactly one path to
+side-effects: through the `mcp__denyx__*` tools, which all go
+through the policy gate.
 
 ### Add Claude Code's memory files to the policy
 
