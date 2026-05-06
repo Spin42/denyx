@@ -100,28 +100,33 @@ To collect audit events to a file:
 
 Each tool call produces one JSON Lines record per effecting action.
 
-### Confirm-gated capabilities
+### Approval-gated capabilities (`requires_approval`)
 
-If your policy has `confirm_per_call = ["fs.delete", "subprocess.exec"]`,
-the MCP server's `--confirm-mode` flag picks how those calls are
-treated:
+If your policy has
+`requires_approval = ["fs.delete", "subprocess.exec"]`, those
+capabilities escalate to the caller on every call. The MCP server's
+`--confirm-mode` flag picks how the escalation behaves:
 
-- **`--confirm-mode auto-allow`** (default): the confirm hook
-  always allows. Same as not having `confirm_per_call` at all from
-  the MCP path's perspective. Use this when you trust the agent
-  surface and just want the audit log entry.
-- **`--confirm-mode auto-deny`**: the confirm hook always denies.
-  Each confirm-gated call returns a tool result with
-  `isError: true` and `aegis_error_kind: "confirm_denied"`,
-  naming the capability. Sonnet/Opus can read that error and
-  decide whether to prompt the human (out-of-band) before
-  reissuing — it's the closest thing to interactive confirm that
-  works through MCP today.
-
-Real round-trip prompting through MCP (server-initiated user
-interaction) requires bidirectional protocol support that's not
-yet implemented in Aegis. For interactive prompts today, use
-the `aegis run` CLI directly instead of the MCP server.
+- **`--confirm-mode auto`** (default, recommended) — negotiate
+  per-client. If the client advertises the MCP `elicitation`
+  capability at handshake time, the server sends a real
+  `elicitation/create` request to the client and blocks for the
+  user's reply. If the client doesn't advertise elicitation, the
+  server falls back to `auto-deny` so the orchestrator can render
+  its own UX from the structured tag.
+- **`--confirm-mode elicit`** — force elicitation regardless of
+  capability advertisement. If the client doesn't actually
+  implement elicitation, the request times out (300 s) and denies
+  safely.
+- **`--confirm-mode auto-deny`** — every approval-required call
+  fails with `isError: true`, `aegis_error_kind: "confirm_denied"`,
+  naming the capability. The orchestrator (Sonnet/Opus) can read
+  that error and surface its own out-of-band prompt before
+  retrying. This is the most broadly-deployed shape today (see the
+  empirical note below).
+- **`--confirm-mode auto-allow`** — every approval-required call
+  passes silently. **Use only for tests and demos** — this defeats
+  the purpose of `requires_approval`.
 
 ```json
 {
@@ -130,12 +135,60 @@ the `aegis run` CLI directly instead of the MCP server.
       "command": "aegis-mcp",
       "args": [
         "--policy", "/path/to/aegis.toml",
-        "--confirm-mode", "auto-deny"
+        "--confirm-mode", "auto"
       ]
     }
   }
 }
 ```
+
+#### Empirical findings: what Claude Code actually does
+
+We drove a real `claude -p ... --permission-mode auto` session
+against `aegis-mcp --confirm-mode auto`, with a policy declaring
+`requires_approval = ["fs.delete"]` and a script that calls
+`fs.delete("/tmp/.../target.txt")`. The transcript shows:
+
+- Claude Code (2.1.x) **does not advertise the `elicitation`
+  capability** in its MCP `initialize` handshake.
+- aegis-mcp's `auto` mode therefore correctly falls back to
+  `auto-deny`, returning `isError: true`,
+  `aegis_error_kind: "confirm_denied"`,
+  `text: "confirm hook denied capability fs.delete"`.
+- The agent surfaced that text in its response.
+- The runtime correctly enforced the deny — `target.txt` was not
+  removed.
+
+This is the expected behaviour. **It also means: there is no
+human-in-the-loop prompt on the Claude-Code-`-p` path today, even
+with `requires_approval` set and `--confirm-mode auto`.** What you
+get is a guaranteed deny + a structured tag the orchestrator can
+react to. That's a meaningful enforcement layer (the runtime
+absolutely refused the call) but it is *not* a per-call user
+prompt.
+
+If you need a real prompt, today the deployment options are:
+
+1. **Use the CLI** (`aegis run`) when there's a human at the
+   terminal. The CLI prompts on stdin and the user actually sees
+   the question.
+2. **Use `--confirm-mode auto-deny` and let the orchestrator's UX
+   render the approval flow.** This is what auto already
+   degrades to. Some MCP hosts (interactive Claude Code, opencode
+   in some modes) catch the `confirm_denied` tag and surface a
+   "the agent wanted to do X — allow?" UI of their own; the user
+   then either edits the policy or re-issues from a sibling tool.
+3. **Use a client that supports MCP elicitation.** As of mid-2026
+   that's a small set; verify your specific client advertises
+   `capabilities.elicitation` at handshake. The aegis-mcp side of
+   the protocol is implemented and tested (see
+   `crates/mcp/tests/elicitation.rs`); the gap is the client.
+
+The protocol round-trip works end-to-end against any spec-
+compliant client that advertises elicitation. We don't ship a
+shim that pretends a non-elicitation-capable client supports it,
+because pretending in this direction means silently auto-allowing
+calls the user never approved.
 
 ### What "policy-gated" actually buys you
 

@@ -3,33 +3,46 @@
 > ← [Back to docs README](README.md)
 
 Aegis is a Rust workspace. There are no published crates yet — install
-from source.
+from source. The build process is the same on every platform; the
+*runtime layer* differs because OS-level isolation is platform-specific.
 
-## Prerequisites
+## Pick your platform
 
-| Component | Why                                                                | Required for                       |
-|-----------|--------------------------------------------------------------------|------------------------------------|
-| Rust      | Building the workspace.                                            | Everything.                         |
-| `git`     | Cloning the repo and (optionally) the integration with VCS in your scripts. | Everything.                |
-| Ollama    | Running the local executor model.                                  | The local-executor flow.           |
-| Claude Code or opencode | The cloud-orchestrator side.                            | The orchestrated flow.             |
-| Python 3.10+ | Running the example evaluation harnesses.                       | Reproducing the eval numbers.      |
+| Host OS    | Where Aegis runs                          | Sandbox layer                   | Setup guide                                                |
+|------------|-------------------------------------------|---------------------------------|------------------------------------------------------------|
+| **Linux**  | Native binary on the host                 | `bubblewrap` (`bwrap`) — native | This doc, "[Linux native](#linux-native)" below            |
+| **macOS**  | Linux binary inside a Lima VM             | `bubblewrap` inside the VM      | [macos-deployment.md](macos-deployment.md)                 |
+| **Windows**| Linux binary inside WSL2                  | `bubblewrap` inside WSL         | [windows-deployment.md](windows-deployment.md)             |
 
-If you only want to gate scripts you write yourself, you only need Rust
-and git. The rest are for the agentic setups in
-[09-local-executor.md](09-local-executor.md).
+The same policy file, the same MCP surface, and the same audit-log
+shape work in all three configurations — the only thing that varies
+is the bridge between your MCP host (Claude Code, opencode, …) and
+the place `aegis-mcp` actually executes.
 
-## Install Rust
+If you're a *developer* of Aegis itself (modifying the Rust crates),
+you can build and run on any of the three; macOS and Windows builds
+are uncommon for the runtime path because the bwrap-backed sandbox
+is Linux-kernel-only.
 
-The Aegis workspace targets stable Rust. Use [rustup](https://rustup.rs/):
+## Linux (native)
 
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-. "$HOME/.cargo/env"
-rustc --version    # 1.75+ confirmed
-```
+This is the canonical path. `aegis-mcp` runs as a Linux binary on
+your host, with `bwrap` available on `PATH` for OS-level isolation
+when `[subprocess].sandbox = "bwrap"` is enabled in the policy.
 
-## Build Aegis
+### 1. Prerequisites
+
+| Component   | Why                                          | Install                                                                      |
+|-------------|----------------------------------------------|------------------------------------------------------------------------------|
+| Rust stable | Building the workspace.                      | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`            |
+| `git`       | Cloning the repo.                            | Distro package; almost always pre-installed.                                 |
+| `bubblewrap` | OS-level sandbox backend (optional but recommended). | Debian/Ubuntu: `apt install bubblewrap` · Fedora: `dnf install bubblewrap` · Arch: `pacman -S bubblewrap` |
+
+If you only want the language-level gate (Starlark + capability
+typing + audit log) without OS-level isolation, you can skip
+bubblewrap. The policy then must use `[subprocess].sandbox = "none"`.
+
+### 2. Build
 
 ```sh
 git clone https://github.com/<owner>/post-sigil aegis
@@ -41,8 +54,7 @@ That produces three binaries under `target/release/`:
 
 - `aegis` — the CLI (run + init subcommands)
 - `aegis-mcp` — the MCP server
-- (intentionally no separate library binary — `aegis-host` and
-  `aegis-policy` are linked into the others)
+- (`aegis-host` and `aegis-policy` are libraries, linked into both)
 
 Optionally put them on your `PATH`:
 
@@ -52,14 +64,71 @@ ln -sf "$PWD/target/release/aegis"     "$HOME/.local/bin/aegis"
 ln -sf "$PWD/target/release/aegis-mcp" "$HOME/.local/bin/aegis-mcp"
 ```
 
-Smoke test:
+### 3. Smoke test
 
 ```sh
 aegis --help
 aegis init --lang python --output -    # writes a sample policy to stdout
 ```
 
-## Install Ollama (for the local-executor flow)
+### 4. Run the test suite (optional)
+
+```sh
+cargo test --workspace
+```
+
+You should see ~177 tests pass.
+
+## macOS
+
+See **[macos-deployment.md](macos-deployment.md)**. Short version:
+
+```sh
+brew install lima
+limactl start --name=aegis examples/macos/aegis.lima.yaml
+limactl shell aegis -- bash -lc "cd '$PWD' && cargo build --release"
+```
+
+Then point Claude Code's MCP config at
+`limactl shell aegis <path-to>/target/release/aegis-mcp ...`.
+
+The Lima template in
+[`examples/macos/aegis.lima.yaml`](../examples/macos/aegis.lima.yaml)
+provisions bubblewrap and the Rust toolchain on first boot. Builds
+and runs identically to a native Linux deployment from that point
+on.
+
+## Windows
+
+See **[windows-deployment.md](windows-deployment.md)**. Short version,
+in elevated PowerShell:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Then in the resulting Ubuntu shell:
+
+```sh
+sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+git clone https://github.com/<owner>/post-sigil aegis
+cd aegis
+cargo build --release
+```
+
+Then point Claude Code's MCP config at
+`wsl.exe -d Ubuntu-24.04 -e <path-to>/target/release/aegis-mcp ...`.
+
+## Optional components
+
+These are independent of the OS-level setup above. Install them on
+the side that runs your *agent* (typically the host OS), not
+necessarily the side that runs `aegis-mcp`.
+
+### Ollama (for the local-executor flow)
 
 If you want to run the architecture from
 [09-local-executor.md](09-local-executor.md) — cloud orchestrator
@@ -72,15 +141,15 @@ curl -fsSL https://ollama.com/install.sh | sh
 ```
 
 macOS: download from [ollama.com](https://ollama.com) and run the
-installer.
+installer (Ollama runs natively on macOS, no Lima needed for it).
 
-Start the daemon (it usually runs as a systemd service after install;
-otherwise `ollama serve &`).
+Windows: download from [ollama.com](https://ollama.com); Ollama on
+Windows runs natively, not inside WSL.
 
 Pull the models the evaluation harness uses:
 
 ```sh
-ollama pull qwen2.5-coder:7b      # local executor (default in the harness)
+ollama pull qwen2.5-coder:7b      # local executor
 ollama pull nomic-embed-text       # for the embedding-RAG retrieval
 ```
 
@@ -92,78 +161,54 @@ Confirm it's serving on `http://localhost:11434`:
 curl -s http://localhost:11434/api/tags | head -c 200
 ```
 
-The local executor harness lives at
-`examples/local_executor/run_multistep.py`. It assumes Ollama is
-reachable at the default URL and that `qwen2.5-coder:7b` is installed.
+### Claude Code (for the orchestrator flow)
 
-## Install Claude Code (for the orchestrator flow)
-
-[Claude Code](https://claude.com/claude-code) provides the `claude` CLI.
-The orchestrated harness uses `claude -p ... --mcp-config ...` to run
-Sonnet or Opus as the orchestrator while delegating actual code to the
-local executor via `aegis-mcp`. See
-[07-claude-code.md](07-claude-code.md) for the integration setup.
-
-Install:
+[Claude Code](https://claude.com/claude-code) provides the `claude`
+CLI. The orchestrated harness uses
+`claude -p ... --mcp-config ...` to run Sonnet or Opus as the
+orchestrator while delegating actual code to the local executor via
+`aegis-mcp`. See [07-claude-code.md](07-claude-code.md) for the
+integration setup.
 
 ```sh
 # follow https://claude.com/claude-code for the latest install method
 claude --version
 ```
 
-You'll need an Anthropic API key and a way to authenticate Claude Code
-to your account; consult Claude Code's documentation for current setup.
+You'll need an Anthropic API key and a way to authenticate Claude
+Code to your account; consult Claude Code's documentation for
+current setup.
 
-## Install opencode (alternative orchestrator host)
+### opencode (alternative orchestrator host)
 
-[opencode](https://opencode.ai/) is an open-source agentic IDE that also
-speaks MCP. See [08-opencode.md](08-opencode.md) for the MCP server
-configuration.
+[opencode](https://opencode.ai/) is an open-source agentic IDE that
+also speaks MCP. See [08-opencode.md](08-opencode.md) for the MCP
+server configuration.
 
-## Python (only if you want to reproduce the eval)
+### Python (only if you want to reproduce the eval)
 
-The harnesses under `examples/local_executor/` are pure-Python and use
-only the standard library plus `urllib`. Python 3.10+ is enough; no
+The harnesses under `examples/local_executor/` are pure-Python and
+use only the standard library. Python 3.10+ is enough; no
 `pip install` is required:
 
 ```sh
 python3 examples/local_executor/run.py --help
 python3 examples/local_executor/run_multistep.py --help
 python3 examples/local_executor/run_orchestrated.py --help
+python3 examples/local_executor/run_pentest.py --help
 ```
 
-The orchestrated harness (`run_orchestrated.py`) additionally requires
-the `claude` CLI on `PATH`.
-
-## Run the test suite
-
-Confirm everything is wired:
-
-```sh
-cargo test
-```
-
-You should see output like:
-
-```
-     Running tests/policy.rs (target/debug/deps/policy-...)
-test result: ok. 34 passed; 0 failed; ...
-     Running tests/host.rs (target/debug/deps/host-...)
-test result: ok. 7 passed; 0 failed; ...
-     Running tests/taint.rs (target/debug/deps/taint-...)
-test result: ok. 7 passed; 0 failed; ...
-     Running tests/verifier.rs (target/debug/deps/verifier-...)
-test result: ok. 8 passed; 0 failed; ...
-     Running tests/init.rs (target/debug/deps/init-...)
-test result: ok. 10 passed; 0 failed; ...
-```
+The orchestrated and pentest harnesses additionally require the
+`claude` CLI on `PATH`.
 
 ## Where next
 
-- [06-quickstart.md](06-quickstart.md) — generate a policy, run a script,
-  watch the audit log.
-- [07-claude-code.md](07-claude-code.md) — wire Aegis into Claude Code as
-  an MCP tool.
+- [06-quickstart.md](06-quickstart.md) — generate a policy, run a
+  script, watch the audit log.
+- [07-claude-code.md](07-claude-code.md) — wire Aegis into Claude
+  Code as an MCP tool.
 - [08-opencode.md](08-opencode.md) — same for opencode.
-- [09-local-executor.md](09-local-executor.md) — the full Sonnet/Opus →
-  local 7B → Aegis architecture.
+- [09-local-executor.md](09-local-executor.md) — the full Sonnet/Opus
+  → local 7B → Aegis architecture.
+- [macos-deployment.md](macos-deployment.md) — full macOS guide.
+- [windows-deployment.md](windows-deployment.md) — full Windows guide.

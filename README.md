@@ -13,29 +13,49 @@ not in a wrapper that asks the model nicely.
 
 > ## ⚠ Status & honest disclosures
 >
-> - **Use at your own risk.** Aegis is **in active development** and
->   has not been hardened for production. There are no security audits,
->   no released versions on crates.io, and APIs may still change.
+> - **Pre-1.0, use at your own risk.** No published crates, no
+>   pre-built binaries, schema may shift in minor ways before v1.
 >   Don't run it against systems you can't afford to recover.
-> - **AI-generated codebase.** Almost all of the code, tests, and
->   documentation in this repository was written by Claude (Anthropic)
->   under human direction. The human (project owner) decided the
->   architecture, design constraints, threat model, and load-bearing
->   tradeoffs; Claude wrote the implementation, the tests, and most of
->   the docs. This is disclosed because it materially affects how you
->   should evaluate the code: please **read the diffs before trusting
->   them**, especially anywhere security-critical (the policy crate,
->   the verifier, and the taint-redaction code in `crates/host/`).
-> - **Threat-model scope.** The runtime defends against *prompt
->   engineering* — the policy is enforced in Rust and a malicious
->   prompt cannot bypass it by clever phrasing. It does NOT defend
->   against a determined adversary doing deliberate exfiltration via
->   obfuscation (XOR, base64, chunking) of tainted values. See
->   [docs/04-policy-file.md](docs/04-policy-file.md#how-local-only-works)
->   for the limits of the local-only scrubbing.
-> - **No OS-level isolation.** Aegis is a *language-runtime*
->   gate, not a sandbox in the seccomp/namespace/VM sense. For full
->   isolation, run it inside a container.
+> - **AI-generated codebase.** Most of the code, tests, and docs were
+>   written by Claude (Anthropic) under human direction; the
+>   architecture and threat model are human, the implementation is
+>   not. **Read the diffs before trusting them** — especially the
+>   policy crate, the verifier, and the taint-redaction code in
+>   `crates/host/`.
+> - **Empirically tested, not human-reviewed.** A 16-surface static
+>   bypass assessment ([docs/security-audit.md](docs/security-audit.md)),
+>   a 12-technique exfil probe at **0 LEAK / 3 WEAK_LEAK / 9
+>   REDACTED**, an AI-driven pentest with Sonnet and Opus (two High
+>   findings, both closed;
+>   [docs/security-pentest-report.md](docs/security-pentest-report.md)),
+>   and `cargo-fuzz` + a 200 000-iteration regression sweep
+>   ([fuzz/](fuzz/README.md)). **No human security engineer has read
+>   the code with hostile intent yet** — that external review is the
+>   single biggest gating item between today and unattended
+>   production use.
+> - **Threat-model scope.** Defends against prompt engineering — the
+>   policy is Rust-enforced; clever phrasing can't bypass it. The
+>   local-only IFC layer covers a documented transform set (reverse,
+>   hex, single-byte XOR + hex(XOR), base64 std/url-safe, ROT-1..25,
+>   chunking detection) plus arg-side denial at outbound effects. It
+>   does NOT catch scripts running their own crypto (AES, custom
+>   permutations) or pure side channels (length, comparison oracles,
+>   substring guesses). Full scope in
+>   [docs/security-threat-model.md](docs/security-threat-model.md).
+> - **`requires_approval` is not always a real user prompt.** The
+>   CLI prompts on stdin. The MCP server's default `auto` mode sends
+>   `elicitation/create` only if the client advertises the
+>   capability; most don't yet (including Claude Code 2.1.x in `-p`
+>   mode), so `auto` falls back to `auto-deny` with a structured
+>   `confirm_denied` tag for the orchestrator. The runtime denies
+>   correctly either way; a real prompt is delivered only by the CLI
+>   or elicitation-capable clients. See
+>   [docs/07-claude-code.md](docs/07-claude-code.md#empirical-findings-what-claude-code-actually-does).
+> - **OS isolation is opt-in and platform-specific.** Linux:
+>   `[subprocess].sandbox = "bwrap"`. macOS: Lima VM
+>   ([docs/macos-deployment.md](docs/macos-deployment.md)). Windows:
+>   WSL2 ([docs/windows-deployment.md](docs/windows-deployment.md)).
+>   Without one of these, Aegis is the language-level gate only.
 
 ## The problem
 
@@ -163,11 +183,23 @@ explicitly granted.
 
 ## Get started
 
+On Linux, native install:
+
 ```sh
 cargo build --release                     # builds aegis + aegis-mcp
 aegis init --lang python                  # generates a starter policy
 aegis run --policy aegis.toml my.star     # runs the script under it
 ```
+
+On **macOS**, run inside a Lima VM (one-time `brew install lima` plus
+[`examples/macos/aegis.lima.yaml`](examples/macos/aegis.lima.yaml)) —
+full guide at [docs/macos-deployment.md](docs/macos-deployment.md).
+
+On **Windows**, run inside WSL2 (one-time `wsl --install -d Ubuntu-24.04`)
+— full guide at [docs/windows-deployment.md](docs/windows-deployment.md).
+
+The same policy file, MCP surface, and audit-log shape work on all
+three; only the bridge between your MCP host and `aegis-mcp` differs.
 
 `aegis init` supports `python`, `node`, `ruby`, `rust`, `go`, with
 language-appropriate toolchain allowlists and git-destructive denies
@@ -223,6 +255,9 @@ filename:
 | [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec. Implement in non-Aegis runtimes. |
 | [security-threat-model](docs/security-threat-model.md)    | One-page review companion. What Aegis claims to defend; what it explicitly does *not*. Read first if you're auditing. |
 | [security-audit](docs/security-audit.md)                  | The 16-surface bypass-assessment writeup. Findings + fixes. |
+| [security-pentest-report](docs/security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). 2 High findings, both remediated. |
+| [macos-deployment](docs/macos-deployment.md)              | macOS deployment guide: Lima VM + bubblewrap. |
+| [windows-deployment](docs/windows-deployment.md)          | Windows deployment guide: WSL2 + bubblewrap. |
 | [conclusions](docs/conclusions.md)                        | Sigil retrospective notes (background for `02-from-sigil.md`). |
 | [project-plan](docs/project-plan.md)                      | Initial design plan; historical artifact. |
 
@@ -269,16 +304,33 @@ operational items (◇) gate easy adoption.
 - ✅ Subprocess env filtering (child only sees declared `allow_vars`)
 - ✅ Wall-time deadline + call-stack cap (`[runtime].max_seconds`,
   `max_callstack_size`)
-- ✅ Structured confirm-mode for `aegis-mcp` (auto-allow / auto-deny
-  with `aegis_error_kind: "confirm_denied"` tag for orchestrator
-  branching)
+- ✅ Per-call approval escalation (`requires_approval = [...]` in
+  the policy). The CLI prompts on stdin. The MCP server has four
+  modes: `auto` (default; sends MCP `elicitation/create` to the
+  client when it advertises elicitation capability, falls back to
+  `auto-deny` otherwise), `elicit` (force elicitation), `auto-deny`
+  (return `aegis_error_kind: "confirm_denied"` for the orchestrator
+  to handle), `auto-allow` (tests and demos only). Bidirectional
+  JSON-RPC dispatch is implemented and tested
+  (`crates/mcp/tests/elicitation.rs`); whether a real user prompt
+  appears depends on the client supporting elicitation. Empirical
+  finding: Claude Code 2.1.x in `claude -p` mode does **not**
+  advertise elicitation, so the dominant deployment shape today is
+  "runtime denies the call, orchestrator surfaces the structured
+  tag." See [docs/07-claude-code.md](docs/07-claude-code.md#empirical-findings-what-claude-code-actually-does).
 - ✅ `aegis policy validate` + `aegis policy show` (CI lint and
   operator visibility)
 - ✅ Per-call HTTP timeout (`[network].timeout_seconds`, default 30s)
 - ✅ Self-writable guard (refuses policies that grant write/delete on
   themselves)
-- ✅ Local-only visibility class (read OK, value never bubbles up;
-  output-boundary substring redaction)
+- ✅ Local-only visibility class (read OK, value never bubbles up):
+  output-boundary scrub for the original value plus the documented
+  transform set (reverse, hex lower/upper, XOR with each single-byte
+  key, hex(XOR) compositions); subsequence-chunking detection on
+  joined printed output; arg-side denial at every outbound effect
+  (`fs.write`, `fs.delete`, `subprocess.exec` for non-local-only
+  commands, `net.http_*` for non-local-only hosts) with the matched
+  transform label included in the audit-event payload
 - ✅ Subprocess argv path-policy gate
   (`subprocess.exec(["cat", "/etc/passwd"])` rejected — argv args
   that look like paths are checked against `[filesystem]` rules)
@@ -307,10 +359,36 @@ operational items (◇) gate easy adoption.
 - ✅ Adversarial exfiltration probe
   ([examples/local_executor/run_exfil.py](examples/local_executor/run_exfil.py))
   — 12 hand-written Starlark exfil techniques against
-  `local_only_vars`. Current run: **6 LEAK / 3 WEAK_LEAK / 3
-  REDACTED**. Confirms substring redaction is *not* a
-  sufficient defence against a deliberate adversary; the gap
-  is documented honestly in the threat-model doc.
+  `local_only_vars`. Current run: **0 LEAK / 3 WEAK_LEAK / 9
+  REDACTED**. Every full-secret exfil shape in the probe (raw
+  print, reverse, hex, XOR + hex, per-char chunking, fs.write
+  to disk, subprocess argv, fail() with mutated form) is now
+  caught — either at the output boundary (transform-aware
+  scrub, chunking detection) or at the arg-side gate (refuse
+  the call rather than scrub on the way out). The 3 remaining
+  WEAK_LEAK are inherent non-byte-channels: `len(secret)`,
+  single-char comparison oracle, and `"MNOP" in secret`-style
+  substring guesses — these reveal at most O(log secret) bits
+  per query and are documented honestly in the threat-model doc.
+- ✅ AI-driven pentest harness
+  ([examples/local_executor/run_pentest.py](examples/local_executor/run_pentest.py))
+  — drives `claude-sonnet-4-6` and `claude-opus-4-7` as adversarial
+  testers against `aegis-mcp`. Round 1 surfaced two **High** findings
+  (custom base64 encoding and ROT-N — both bypassed the substring
+  scrub independently in <15 turns from each model); both
+  remediated by extending the transform set in
+  `crates/host/src/taint.rs` (added `base64_std`, `base64_std_nopad`,
+  `base64_urlsafe`, `base64_urlsafe_nopad`, `rot1`…`rot25`).
+  Closure verified: re-classifying both transcripts against the
+  patched runtime reports 0 DERIVED_LEAK. Full report at
+  [docs/security-pentest-report.md](docs/security-pentest-report.md).
+- ✅ Fuzz harnesses: three `cargo +nightly fuzz` targets for the
+  verifier, the policy TOML deserializer + resolver, and the
+  glob-pattern compiler / path matchers
+  ([fuzz/](fuzz/README.md)); plus a stable-toolchain randomized
+  regression sweep that runs in plain `cargo test` on every CI
+  build (200 000 iterations across the same surfaces, no panics
+  or non-idempotent decisions found).
 - ✅ `aegis-mcp` surfaces `[tools.X]` routing hints
   (`aegis_tool_routing` MCP tool) so Claude Code calling
   `aegis_run` directly can read `backend_url` / capabilities /
@@ -320,23 +398,13 @@ operational items (◇) gate easy adoption.
 
 #### Security gates (block daily-driver use)
 
-- ☐ **Fuzz the verifier and the TOML/policy parser.** A week of
-  `cargo-fuzz` against the verifier's comment/string-stripping, the
-  globset path matchers, and the TOML deserializer. Fix what falls
-  out.
 - ☐ **External security review.** AI-generated security code is
   unaudited security code. The policy crate, the verifier, and the
   taint-redaction code in `crates/host/src/taint.rs` need a human
   security engineer reading them with hostile intent. **This is the
-  single biggest gating item.** The threat-model doc and the exfil
-  probe's findings are bundled to give the reviewer a clear scope.
-- ☐ **Real information-flow tracking for `local_only_*`.** The
-  exfil probe found 6 substring-redaction bypasses (encode,
-  reverse, hex, XOR, fs.write to disk, error-path with mutation).
-  Closing this requires either real IFC at the runtime layer, or
-  scoping `local_only_*` more tightly (e.g. block any operation
-  whose argument was tainted, not just substring-scrub on output).
-  Decide which.
+  single biggest gating item.** The threat-model doc, the
+  bypass-assessment writeup, and the exfil probe's empirical
+  findings are bundled to give the reviewer a clear scope.
 
 #### Operational gates (block easy adoption)
 
@@ -350,8 +418,10 @@ operational items (◇) gate easy adoption.
 For today: use Aegis for experimental setups, in containers, on
 machines where the cost of an Aegis bug is "I have to recover a VM"
 not "my SSH key got exfiltrated." For default-on-everything use,
-the three ☐ items above (fuzzing, external review, IFC for
-local-only) are the real gating list.
+the external security review (the one ☐ item above) is the real
+gating list — every byte-level bypass the exfil probe could
+construct is now closed, and the regression sweeps run on every
+CI build.
 
 ## Project layout
 

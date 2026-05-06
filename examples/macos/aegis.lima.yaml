@@ -1,0 +1,89 @@
+# Lima VM template for running aegis-mcp under bubblewrap on macOS.
+#
+# Usage:
+#   brew install lima
+#   limactl start --name=aegis examples/macos/aegis.lima.yaml
+#   limactl shell aegis -- bash -lc 'cd ~/Projects/post-sigil && cargo build --release'
+#
+# Then point Claude Code (or any MCP-aware host) at:
+#   command = "limactl"
+#   args    = ["shell", "aegis", "<host-path-to>/target/release/aegis-mcp",
+#              "--policy", "<host-path-to>/aegis.toml"]
+#
+# The host's $HOME is mirrored at the same absolute path inside the VM,
+# so you write paths once and they resolve identically on both sides.
+# See docs/macos-deployment.md for the full walkthrough.
+
+# Ubuntu 24.04 LTS — recent kernel + bubblewrap available in apt.
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+# Modest defaults — bump cpus/memory if you run heavy local-executor
+# evals inside the VM.
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+
+# Mount the host home read-write. Lima mounts at the same absolute path
+# the host uses (`/Users/<you>/...` on macOS), so policy files written
+# on the Mac resolve to the same path inside the VM. The mount uses
+# virtiofs by default on Apple Silicon — fast enough that builds and
+# audit-log writes feel native.
+mounts:
+  - location: "~"
+    writable: true
+  # /tmp is the default scratch dir for the example harnesses; explicit
+  # mount keeps audit logs / fixtures persistent across VM restarts only
+  # if you care about it. Comment out for ephemeral /tmp.
+  - location: "/tmp/aegis_demo"
+    writable: true
+
+# System-level provisioning: bubblewrap + the build dependencies for
+# Aegis. Runs once on first boot.
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y \
+        bubblewrap \
+        ca-certificates \
+        curl \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        git
+      # Confirm bwrap can actually create user namespaces on this
+      # kernel — Ubuntu 24.04 enables them by default but Lima's
+      # default profile sometimes restricts them. Refuse to "succeed"
+      # the provision if bwrap is broken.
+      if ! bwrap --ro-bind / / --unshare-pid /bin/true; then
+        echo "FAIL: bubblewrap is installed but cannot create user namespaces." >&2
+        echo "Check kernel.unprivileged_userns_clone=1 and AppArmor settings." >&2
+        exit 1
+      fi
+  # User-level: install rustup if the user doesn't already have it (a
+  # mounted host home with rustup pre-installed is detected and reused).
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      if ! command -v cargo >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+          -y --default-toolchain stable --profile minimal --no-modify-path
+        echo 'source "$HOME/.cargo/env"' >> ~/.bashrc
+      fi
+
+# Network: NAT'd by default. Outbound HTTP works; inbound from the host
+# is via `limactl shell` (stdio bridge).
+networks: []
+
+# Shared-clipboard / shared-time / etc. defaults are fine for our use.
+# We don't need a GUI.
+video:
+  display: "none"

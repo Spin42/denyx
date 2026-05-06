@@ -25,29 +25,61 @@
 //!
 //! Each tool call goes through the same enforcement path the CLI uses:
 //! pre-execution verifier, policy checks at every capability builtin,
-//! audit log entry per attempt, confirm-per-call hook (in MCP MVP this
-//! is wired to `AllowAllConfirm` — Claude Code / opencode hosts that
-//! want interactive confirms should embed `aegis-host` in-process where
-//! they can plug their own UI in).
+//! audit log entry per attempt, requires-approval hook (see
+//! `--confirm-mode`).
+//!
+//! ## Bidirectional dispatch
+//!
+//! The transport carries both client → server tool calls AND server
+//! → client elicitation requests (when the configured `ConfirmHook`
+//! needs to ask the user something). A reader thread demuxes each
+//! incoming line: messages with a `method` field are dispatched to
+//! the main tool-call loop; messages with a `result` or `error`
+//! (i.e. responses to *our* outbound requests) are pushed to a
+//! channel the elicitation hook is blocking on. Stdout is shared
+//! via `Arc<Mutex<...>>` so the main loop and the elicitation hook
+//! can interleave writes safely.
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use aegis_host::{
-    AegisError, AllowAllConfirm, AuditSink, ConfirmHook, DenyAllConfirm, JsonlAuditSink, Runner,
+    AegisError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
+    DenyAllConfirm, JsonlAuditSink, Runner,
 };
 use aegis_policy::Policy;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// MCP protocol version we advertise. `2025-06-18` is the first
+/// version that includes `elicitation/create` in the spec; clients
+/// that speak that version may advertise the elicitation capability,
+/// in which case `--confirm-mode auto` (the default) routes
+/// `requires_approval`-listed capabilities through real user prompts
+/// instead of the auto-deny tag.
+const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "aegis-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How long an `ElicitConfirm` call waits for the user's response
+/// before degrading to Deny. The user is being asked to approve a
+/// real action; a generous timeout matches typical UI patterns. Past
+/// this, we assume the prompt was missed (or the client swallowed
+/// the elicitation in auto mode) and fail closed.
+const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Parser, Debug)]
-#[command(name = "aegis-mcp", version, about = "MCP server exposing the Aegis policy-gated runtime over stdio")]
+#[command(
+    name = "aegis-mcp",
+    version,
+    about = "MCP server exposing the Aegis policy-gated runtime over stdio"
+)]
 struct Cli {
     /// Path to the policy TOML file. If omitted, falls back to the
     /// built-in `secure-defaults` baseline (denies every effecting
@@ -59,39 +91,46 @@ struct Cli {
     #[arg(long)]
     audit_log: Option<PathBuf>,
 
-    /// How `confirm_per_call`-listed capabilities behave when invoked
+    /// How `requires_approval`-listed capabilities behave when invoked
     /// through this MCP server.
     ///
-    /// - `auto-allow` (default, backward-compatible): the
-    ///   confirm hook always allows. Same as before this flag
-    ///   existed. `confirm_per_call` is effectively ignored.
-    /// - `auto-deny`: the confirm hook always denies. Any call to a
-    ///   capability listed in `confirm_per_call` returns a tool
-    ///   result with `isError: true` and a `ConfirmDenied` message
-    ///   naming the capability. The orchestrator (Claude Code,
-    ///   opencode, ...) can interpret that error, present a prompt
-    ///   to the user, and re-issue the call from a sibling MCP
-    ///   server / tool that's NOT confirm-gated, or instruct the
-    ///   user to remove the entry from `confirm_per_call` for that
-    ///   session.
-    #[arg(long, default_value = "auto-allow")]
-    confirm_mode: ConfirmMode,
+    /// - `auto` (default): negotiate per-client. If the client
+    ///   advertises the MCP `elicitation` capability at initialize
+    ///   time, we route every approval-required call through a real
+    ///   user prompt via `elicitation/create`. If the client does
+    ///   not advertise elicitation, we fall back to `auto-deny`.
+    /// - `elicit`: force elicitation regardless of client capability
+    ///   advertisement. If the client doesn't actually support it,
+    ///   the elicitation request will time out (and the call denies
+    ///   safely).
+    /// - `auto-allow`: skip the approval check entirely. Every
+    ///   approval-required call passes. **Use only for tests and
+    ///   demos** — this defeats the purpose of `requires_approval`.
+    /// - `auto-deny`: every approval-required call returns a tool
+    ///   result with `isError: true` and an `aegis_error_kind:
+    ///   "confirm_denied"` tag. The orchestrator can interpret that,
+    ///   surface a UI prompt of its own, and edit the policy or
+    ///   re-issue the call from a non-gated context.
+    ///
+    /// Caveat for "auto" with `claude --permission-mode auto` or
+    /// opencode in unattended mode: those modes typically auto-
+    /// respond to elicitation prompts without surfacing them to the
+    /// user. In that configuration, `auto` effectively degrades to
+    /// whatever the client's auto-response is — Aegis's request
+    /// gets approved or declined without human review. See
+    /// docs/07-claude-code.md and docs/04-policy-file.md for the
+    /// honest deployment guidance.
+    #[arg(long, default_value = "auto")]
+    confirm_mode: ConfirmModeArg,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
-enum ConfirmMode {
+enum ConfirmModeArg {
+    Auto,
+    Elicit,
     AutoAllow,
     AutoDeny,
-}
-
-impl ConfirmMode {
-    fn into_hook(self) -> Arc<dyn ConfirmHook> {
-        match self {
-            ConfirmMode::AutoAllow => Arc::new(AllowAllConfirm),
-            ConfirmMode::AutoDeny => Arc::new(DenyAllConfirm),
-        }
-    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -111,51 +150,119 @@ until you launch with --policy <project.toml>. See examples/policies/ for templa
     };
     let audit: Arc<dyn AuditSink> = match &cli.audit_log {
         Some(path) => {
-            // Refuse to start if the audit log path is reachable
-            // to the agent. See guard_audit_log doc.
             let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            policy.guard_audit_log(&canon).map_err(|e| {
-                anyhow::anyhow!("audit-log path is reachable to the agent: {e}")
-            })?;
+            policy
+                .guard_audit_log(&canon)
+                .map_err(|e| anyhow::anyhow!("audit-log path is reachable to the agent: {e}"))?;
             Arc::new(JsonlAuditSink::file(path)?)
         }
         None => Arc::new(JsonlAuditSink::stderr()),
     };
-    // The confirm-mode flag chooses between auto-allow (default,
-    // backward-compatible) and auto-deny. Interactive hosts that
-    // want real prompt UI should embed aegis-host in-process and
-    // plug in their own ConfirmHook implementation; auto-deny is
-    // the closest-to-interactive option for MCP today (the
-    // orchestrator interprets the structured error and decides
-    // whether to prompt the user out-of-band).
+
+    // Shared stdout. The main dispatch loop and the elicitation hook
+    // both write to it; the mutex serialises lines so two concurrent
+    // writes can't interleave mid-message.
+    let stdout: Arc<Mutex<io::Stdout>> = Arc::new(Mutex::new(io::stdout()));
+
+    // Demux channel pair: the reader thread parses each incoming line
+    // and routes it to either the request channel (consumed by the
+    // main loop) or the elicitation-response channel (consumed by the
+    // hook).
+    let (req_tx, req_rx) = mpsc::channel::<Value>();
+    let (elicit_resp_tx, elicit_resp_rx) = mpsc::channel::<Value>();
+
+    thread::spawn(move || reader_thread(req_tx, elicit_resp_tx));
+
+    // Capability negotiation flag. Set to true at initialize-time if
+    // the client advertised the MCP `elicitation` capability. The
+    // `AutoConfirm` hook reads this on every confirm call to decide
+    // whether to elicit or fall back to deny.
+    let elicit_supported = Arc::new(AtomicBool::new(false));
+
+    // Build the confirm hook based on the CLI flag. `Auto` and
+    // `Elicit` both produce hooks that may send `elicitation/create`
+    // upstream; they need handles to stdout, the response channel,
+    // and (for `Auto`) the negotiation flag.
+    let elicit_machinery = Arc::new(ElicitMachinery {
+        stdout: stdout.clone(),
+        rx: Mutex::new(elicit_resp_rx),
+        next_id: AtomicU64::new(10_000),
+    });
+
+    let confirm_hook: Arc<dyn ConfirmHook> = match cli.confirm_mode {
+        ConfirmModeArg::AutoAllow => Arc::new(AllowAllConfirm),
+        ConfirmModeArg::AutoDeny => Arc::new(DenyAllConfirm),
+        ConfirmModeArg::Elicit => Arc::new(ElicitConfirm {
+            machinery: elicit_machinery.clone(),
+        }),
+        ConfirmModeArg::Auto => Arc::new(AutoConfirm {
+            elicit_supported: elicit_supported.clone(),
+            elicit: ElicitConfirm {
+                machinery: elicit_machinery.clone(),
+            },
+            fallback: DenyAllConfirm,
+        }),
+    };
+
     let runner = Runner::new(policy)
         .with_audit(audit)
-        .with_confirm_hook(cli.confirm_mode.into_hook());
+        .with_confirm_hook(confirm_hook);
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
     let mut counter: u64 = 0;
-    let mut buf = String::new();
+    while let Ok(value) = req_rx.recv() {
+        let resp = match serde_json::from_value::<Request>(value) {
+            Ok(req) => handle(&runner, &mut counter, &elicit_supported, req),
+            Err(e) => Response::error(Value::Null, -32700, format!("parse error: {e}"), None),
+        };
+        let line = serde_json::to_string(&resp)?;
+        let mut out = stdout.lock().unwrap();
+        writeln!(out, "{line}")?;
+        out.flush()?;
+    }
+    Ok(())
+}
 
+/// Reader thread body. Parses each line of stdin into a
+/// `serde_json::Value` and routes by structural shape: a `method`
+/// field means it's an inbound request (or notification) from the
+/// client; otherwise (the line has `result` or `error` and an `id`)
+/// it's a response to one of our outbound requests, which is
+/// currently always an elicitation.
+fn reader_thread(req_tx: Sender<Value>, elicit_resp_tx: Sender<Value>) {
+    let stdin = io::stdin();
+    let handle = stdin.lock();
+    let mut br = io::BufReader::new(handle);
+    let mut buf = String::new();
     loop {
         buf.clear();
-        let n = stdin.lock().read_line(&mut buf)?;
-        if n == 0 {
-            break;
+        match br.read_line(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
         }
         let trimmed = buf.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let resp = match serde_json::from_str::<Request>(trimmed) {
-            Ok(req) => handle(&runner, &mut counter, req),
-            Err(e) => Response::error(Value::Null, -32700, format!("parse error: {e}"), None),
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => {
+                // Forward malformed lines as request-shaped values
+                // so the main loop can produce a parse-error
+                // response; dropping silently would deadlock a
+                // client waiting on a reply.
+                let bogus = json!({ "jsonrpc": "2.0", "id": null, "method": "__parse_error__" });
+                let _ = req_tx.send(bogus);
+                continue;
+            }
         };
-        let line = serde_json::to_string(&resp)?;
-        writeln!(stdout, "{line}")?;
-        stdout.flush()?;
+        if value.get("method").is_some() {
+            let _ = req_tx.send(value);
+        } else if value.get("result").is_some() || value.get("error").is_some() {
+            let _ = elicit_resp_tx.send(value);
+        }
+        // Else: malformed — neither request nor response. Drop.
     }
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,7 +296,12 @@ struct RpcError {
 
 impl Response {
     fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
     fn error(id: Value, code: i32, message: String, data: Option<Value>) -> Self {
         Self {
@@ -201,33 +313,59 @@ impl Response {
     }
 }
 
-fn handle(runner: &Runner, counter: &mut u64, req: Request) -> Response {
+fn handle(
+    runner: &Runner,
+    counter: &mut u64,
+    elicit_supported: &Arc<AtomicBool>,
+    req: Request,
+) -> Response {
     let _ = req.jsonrpc; // not validated for MVP
     let id = req.id.clone();
     match req.method.as_str() {
-        "initialize" => Response::ok(
-            id,
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            }),
-        ),
-        "initialized" | "notifications/initialized" => {
-            // No response for notifications, but the loop still expects
-            // a line. Returning an empty success keeps the stream
-            // simple; clients ignore responses to notifications.
-            Response::ok(id, json!({}))
+        "initialize" => {
+            // Read and remember whether the client supports
+            // elicitation. The advertisement format is
+            // `params.capabilities.elicitation` set to any value
+            // (the spec uses an empty object today, leaving room for
+            // future sub-fields). Presence — not value — is what we
+            // check.
+            let advertised = req
+                .params
+                .get("capabilities")
+                .and_then(|c| c.get("elicitation"))
+                .is_some();
+            elicit_supported.store(advertised, Ordering::SeqCst);
+
+            // Respond with the client's requested protocol version
+            // when present (per MCP convention) so older clients
+            // that can't negotiate up to 2025-06-18 still get a
+            // usable session, falling back to our default if absent.
+            let proto = req
+                .params
+                .get("protocolVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or(PROTOCOL_VERSION)
+                .to_string();
+            Response::ok(
+                id,
+                json!({
+                    "protocolVersion": proto,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                }),
+            )
         }
+        "initialized" | "notifications/initialized" => Response::ok(id, json!({})),
         "tools/list" => Response::ok(id, json!({ "tools": tool_definitions() })),
         "tools/call" => handle_tools_call(runner, counter, id, req.params),
         "ping" => Response::ok(id, json!({})),
-        other => Response::error(
+        "__parse_error__" => Response::error(
             id,
-            -32601,
-            format!("method not found: {other}"),
+            -32700,
+            "parse error: incoming line was not valid JSON".into(),
             None,
         ),
+        other => Response::error(id, -32601, format!("method not found: {other}"), None),
     }
 }
 
@@ -242,9 +380,6 @@ fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Valu
     *counter += 1;
     let task_id = format!("mcp-{counter}");
 
-    // `aegis_tool_routing` is a read-only oracle that consults the
-    // policy without invoking the runner. It does not allocate a
-    // task ID, audit, or evaluate Starlark.
     if name == "aegis_tool_routing" {
         return handle_tool_routing(runner, id, &args);
     }
@@ -270,12 +405,6 @@ fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Valu
     }
 }
 
-/// Tag the error with a stable `aegis_error_kind` string so the
-/// orchestrator can branch on it programmatically without scraping
-/// the human-readable message. ConfirmDenied is the meaningful one
-/// for the confirm-mode plumbing: an orchestrator that sees
-/// `aegis_error_kind == "confirm_denied"` can prompt the user
-/// out-of-band and re-issue from a different code path.
 fn tool_error_response(id: Value, err: &AegisError) -> Response {
     let kind = match err {
         AegisError::ConfirmDenied(_) => "confirm_denied",
@@ -298,10 +427,6 @@ fn tool_error_response(id: Value, err: &AegisError) -> Response {
     )
 }
 
-/// Handle the `aegis_tool_routing` MCP tool. Read-only: consults the
-/// policy and returns either one named record or all of them, with an
-/// `allowed` flag computed from the same `Policy::check_tool` path
-/// the runner uses. No script is evaluated, no audit event written.
 fn handle_tool_routing(runner: &Runner, id: Value, args: &Value) -> Response {
     let policy = runner.policy();
     let name = args.get("name").and_then(|v| v.as_str());
@@ -351,16 +476,152 @@ fn handle_tool_routing(runner: &Runner, id: Value, args: &Value) -> Response {
     )
 }
 
+/// Shared state between `ElicitConfirm` and the main loop: stdout to
+/// write the outbound `elicitation/create` to, the channel we receive
+/// responses on (populated by the reader thread), and the id
+/// allocator for outbound requests.
+struct ElicitMachinery {
+    stdout: Arc<Mutex<io::Stdout>>,
+    rx: Mutex<Receiver<Value>>,
+    next_id: AtomicU64,
+}
+
+/// `ConfirmHook` impl that asks the client to surface a real
+/// approval prompt to the user via the MCP `elicitation/create`
+/// request. Blocks the runner thread until the response arrives,
+/// up to `ELICITATION_TIMEOUT`, then degrades to Deny if no
+/// response materialised.
+///
+/// **Important deployment caveat.** Some MCP clients (Claude Code in
+/// `--permission-mode auto` / `bypassPermissions`, opencode in
+/// unattended mode) auto-respond to elicitation requests without
+/// surfacing them to the user. In that configuration the user is
+/// *not* in the loop, even though the server faithfully sent the
+/// prompt. The honest framing is in docs/04-policy-file.md and
+/// docs/07-claude-code.md.
+struct ElicitConfirm {
+    machinery: Arc<ElicitMachinery>,
+}
+
+impl ConfirmHook for ElicitConfirm {
+    fn confirm(&self, request: &ConfirmRequest) -> ConfirmDecision {
+        let id = self.machinery.next_id.fetch_add(1, Ordering::SeqCst);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "elicitation/create",
+            "params": {
+                "message": format!(
+                    "Aegis: the agent is asking to perform `{cap}`.\n\nDetails: {summary}\nTask: {task}\n\nApprove this single call?",
+                    cap = request.capability,
+                    summary = request.summary,
+                    task = request.task_id,
+                ),
+                "requestedSchema": {
+                    "type": "object",
+                    "title": format!("Approve {}?", request.capability),
+                    "properties": {
+                        "approved": {
+                            "type": "boolean",
+                            "description": "Allow this capability for this single call.",
+                            "default": false
+                        }
+                    },
+                    "required": ["approved"]
+                }
+            }
+        });
+        // Write the request line.
+        {
+            let mut out = match self.machinery.stdout.lock() {
+                Ok(g) => g,
+                Err(_) => return ConfirmDecision::Deny,
+            };
+            let line = match serde_json::to_string(&req) {
+                Ok(s) => s,
+                Err(_) => return ConfirmDecision::Deny,
+            };
+            if writeln!(out, "{line}").is_err() {
+                return ConfirmDecision::Deny;
+            }
+            if out.flush().is_err() {
+                return ConfirmDecision::Deny;
+            }
+        }
+        // Wait for any response on the elicitation channel. We don't
+        // demultiplex by id because the runner is single-threaded —
+        // there is at most one outstanding outbound elicitation at
+        // any moment, so the next response is by construction ours.
+        let rx_guard = match self.machinery.rx.lock() {
+            Ok(g) => g,
+            Err(_) => return ConfirmDecision::Deny,
+        };
+        match rx_guard.recv_timeout(ELICITATION_TIMEOUT) {
+            Ok(value) => parse_elicit_response(&value, id),
+            Err(_) => ConfirmDecision::Deny,
+        }
+    }
+}
+
+/// Parse an MCP `elicitation/create` response payload into a confirm
+/// decision. The shape is `{action: "accept"|"decline"|"cancel",
+/// content: { ...user-supplied... }}`. We treat **only**
+/// `action == "accept" AND content.approved == true` as Allow.
+/// Everything else (including malformed responses, error replies,
+/// id mismatches, missing fields) is Deny.
+fn parse_elicit_response(value: &Value, expected_id: u64) -> ConfirmDecision {
+    if let Some(rid) = value.get("id").and_then(|v| v.as_u64()) {
+        if rid != expected_id {
+            return ConfirmDecision::Deny;
+        }
+    }
+    if value.get("error").is_some() {
+        return ConfirmDecision::Deny;
+    }
+    let result = match value.get("result") {
+        Some(r) => r,
+        None => return ConfirmDecision::Deny,
+    };
+    let action = result.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let approved = result
+        .get("content")
+        .and_then(|c| c.get("approved"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if action == "accept" && approved {
+        ConfirmDecision::Allow
+    } else {
+        ConfirmDecision::Deny
+    }
+}
+
+/// Default `--confirm-mode auto` hook: routes through `ElicitConfirm`
+/// when the client advertised elicitation at initialize time, and
+/// falls back to a plain Deny (matching `--confirm-mode auto-deny`)
+/// when the client doesn't support elicitation. The negotiation
+/// flag is shared with the main dispatch loop, which sets it on
+/// receiving the client's `initialize` message.
+struct AutoConfirm {
+    elicit_supported: Arc<AtomicBool>,
+    elicit: ElicitConfirm,
+    fallback: DenyAllConfirm,
+}
+
+impl ConfirmHook for AutoConfirm {
+    fn confirm(&self, request: &ConfirmRequest) -> ConfirmDecision {
+        if self.elicit_supported.load(Ordering::SeqCst) {
+            self.elicit.confirm(request)
+        } else {
+            self.fallback.confirm(request)
+        }
+    }
+}
+
 struct ScriptCall {
     script: String,
     script_name: String,
 }
 
-/// Build the Starlark program that the runner will execute for a given
-/// MCP tool call. For `aegis_run`, the agent's script is forwarded
-/// verbatim. For sugar tools, a small synthesized program calls the
-/// corresponding namespaced builtin and prints the result so the
-/// runner's `printed` capture surfaces it back to the caller.
 fn dispatch(name: &str, args: &Value, task_id: &str) -> Result<ScriptCall, String> {
     match name {
         "aegis_run" => {
@@ -460,10 +721,6 @@ fn require_argv(args: &Value) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Render a Rust string as a Starlark string literal. Starlark string
-/// literals are Python-compatible, so Rust's Debug formatter produces
-/// a valid Starlark literal (escaping `"`, `\`, control characters,
-/// and non-printables).
 fn starlark_str(s: &str) -> String {
     format!("{:?}", s)
 }
