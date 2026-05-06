@@ -1,4 +1,4 @@
-# Denyx — _previously known as Aegis_
+# Denyx
 
 **A safe-by-design local tooling layer for agentic AI, with deliberate
 control over permissions through a policy file.**
