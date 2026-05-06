@@ -3,7 +3,7 @@
 Paste **the contents of the fenced block below** as your first message in
 Claude Code or opencode, from the **project root directory** of the
 project you want to gate. The assistant will detect your stack, generate
-an `denyx.toml`, wire `denyx-mcp` into a project-local MCP config, and
+a `denyx.toml`, wire `denyx-mcp` into a project-local MCP config, and
 smoke-test it.
 
 The prompt is project-specific by design: every file it writes lands in
@@ -54,7 +54,8 @@ out below — don't guess.
        docs/windows-deployment.md, then restart this prompt.
 
 3. Find the denyx binaries. Ask the user:
-   "Where is your Denyx repo (the post-sigil clone)?"
+   "Where is your Denyx checkout? (The directory containing
+   `Cargo.toml` for the `denyx-*` workspace.)"
    Then verify `<repo>/target/release/denyx` and `denyx-mcp` exist.
    On macOS/Windows, the path is the *Linux-side* path inside the
    VM/WSL — it's the same as the host path because of the Lima/WSL

@@ -118,7 +118,7 @@ For each entry in `missed.txt`, decide:
    branch). Either is the right answer; "add a test that asserts
    dead code stays dead" is rarely useful.
 
-The acceptance bar for an Denyx PR is **no new surviving mutants in
+The acceptance bar for a Denyx PR is **no new surviving mutants in
 the policy-gate decision functions** (the boolean classifiers and
 the `check_*` methods on `Policy` — `requires_approval`,
 `*_is_local_only`, `check_subprocess_command`,

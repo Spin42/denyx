@@ -277,16 +277,22 @@ filename:
 
 ## Why "Denyx"?
 
-The denyx (αἰγίς) is the protective shield of Zeus and Athena in Greek
-mythology — Hephaestus-forged, sometimes described as a goatskin
-breastplate, occasionally bearing the head of the Gorgon Medusa to
-ward off threats. In English, "an denyx" still means a protective
-covering, sponsorship, or guarantee of safety ("under the denyx of...").
+The name puts the project's load-bearing posture up front: **deny by
+default**. Everything an agent can do has to be enumerated in the
+policy file — what's not in the policy doesn't happen, and that's
+not a matter of the model deciding to behave. The trailing `x` reads
+as a sigil rather than a phonetic continuation; "Denyx" is a coined
+wordmark, not an English word.
 
-That's the role this project plays for an agentic-AI workflow: a
-protective layer that sits between the model's intent and the system
-it can act on. The runtime is the shield; the policy file is what
-determines which arrows it stops.
+The project was originally called **Aegis**, after the protective
+shield of Zeus and Athena in Greek mythology — Hephaestus-forged,
+goatskin, occasionally bearing the head of the Gorgon Medusa to
+ward off threats. The mythology framing was load-bearing for the
+Aegis era. The rename to Denyx was a publishing decision (the
+`aegis-*` crate names were partially taken on crates.io) but it
+also gave the project a clearer signal of what it actually does:
+the policy denies; the runtime enforces; the agent operates inside
+exactly the surface that's been written down.
 
 ## Status
 
@@ -426,11 +432,11 @@ operational items (◇) gate easy adoption.
   pre-built tarballs. Build-from-source is fine for evaluation, not
   for "ship to three machines and standardize."
 - ◇ **Policy schema migration tool.** When the schema changes
-  pre-1.0, existing policies are hand-edited. An `denyx policy
+  pre-1.0, existing policies are hand-edited. A `denyx policy
   migrate` would smooth this.
 
 For today: use Denyx for experimental setups, in containers, on
-machines where the cost of an Denyx bug is "I have to recover a VM"
+machines where the cost of a Denyx bug is "I have to recover a VM"
 not "my SSH key got exfiltrated." For default-on-everything use,
 the external security review (the one ☐ item above) is the real
 gating list — every byte-level bypass the exfil probe could

@@ -52,7 +52,7 @@ load time Denyx refuses any policy whose `write_allow` or
 `delete_allow` matches the policy file — an agent that can rewrite the
 policy that controls it has nullified every other rule.
 
-Concretely, an Denyx-enforced agent run looks like this:
+Concretely, a Denyx-enforced agent run looks like this:
 
 1. Operator (or developer, or CI) writes a policy: `denyx.toml`.
 2. The agent host (Claude Code, opencode, custom orchestrator, ...) hands a
