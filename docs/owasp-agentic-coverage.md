@@ -24,11 +24,12 @@ scope by design.
 | ASI-09 | Human-Agent Trust Exploitation | **Partial** | `asi09_requires_approval_with_deny_decision_blocks_capability` |
 | ASI-10 | Rogue Agents | **Partial** | 2 tests (`asi10_*`) |
 
-Tally: **2 strong, 4 mitigated/partial, 4 out of scope.** Compare
-to Microsoft AGT's claimed "10/10 covered" — AGT is enterprise fleet
-governance with mesh, identity, SRE, and compliance plumbing.
-Denyx is a tight local gate. Different unit of analysis, different
-coverage profile.
+Tally: **2 strong, 4 mitigated/partial, 4 out of scope.** Denyx is
+a tight local gate; the out-of-scope items belong to other layers
+(agent mesh, identity, supply chain, SRE) that fleet-governance
+platforms address via multi-agent infrastructure Denyx deliberately
+doesn't include. Different unit of analysis, different coverage
+profile.
 
 ---
 
@@ -121,8 +122,9 @@ What Denyx does NOT have:
 - An agent-identity layer. Denyx does not validate or sign
   outbound credentials presented by the agent to upstream
   services.
-- Cryptographic agent credentials (the AGT Ed25519 / ML-DSA-65
-  layer).
+- Cryptographic agent credentials (an Ed25519- or ML-DSA-style
+  identity layer that signs outbound calls). This is what
+  fleet-governance platforms typically provide.
 - Inherited-permission boundary enforcement on tokens issued
   to the agent — once a credential is in env or filesystem, the
   policy gate is the only thing keeping it from leaking.

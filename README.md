@@ -47,8 +47,8 @@ not in a wrapper that asks the model nicely.
 >   full breakdown in
 >   [docs/owasp-agentic-coverage.md](docs/owasp-agentic-coverage.md).
 >   Honest framing: Denyx is a single-process capability gate, not a
->   fleet-governance platform — Microsoft AGT's "10/10 covered"
->   claim covers a different unit of analysis.
+>   fleet-governance platform — the four out-of-scope risks are by
+>   design, not gaps.
 > - **Threat-model scope.** Defends against prompt engineering — the
 >   policy is Rust-enforced; clever phrasing can't bypass it. The
 >   local-only IFC layer covers a documented transform set (reverse,
@@ -263,9 +263,10 @@ more tests in
 **2 strong / 4 mitigated or partial / 4 out of scope.** The
 out-of-scope items are positive design choices, not gaps: Denyx
 governs one process at a time and leaves agent-mesh, identity,
-supply chain, context, and SRE to other layers. Compare to
-Microsoft AGT's claimed "10/10 covered" — different unit of
-analysis (enterprise fleet governance vs. single-process gate).
+supply chain, context, and SRE to other layers. Frameworks
+targeting the full ten typically address those layers via
+multi-agent infrastructure (mesh, identity service, SRE plumbing)
+which Denyx deliberately doesn't include.
 
 Full per-ASI breakdown with quoted canonical text, reasoning, and
 test pointers:
