@@ -7,16 +7,6 @@ control over permissions through a policy file.**
 [![Mutation testing (weekly)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml)
 [![codecov](https://codecov.io/gh/Spin42/denyx/branch/main/graph/badge.svg)](https://codecov.io/gh/Spin42/denyx)
 
-> Badge meaning, since "passing" is doing a lot of work in those
-> labels: **CI** is the per-PR build + test + fmt + clippy +
-> 80%-line-coverage gate (everything green = the whole gate passed).
-> **Mutation testing** is a weekly cron — the badge reflects whether
-> the most recent scheduled run completed, not the kill rate (the
-> kill rate lives in [docs/mutation-testing.md](docs/mutation-testing.md)
-> and the workflow's Step Summary). **codecov** is the live line-
-> coverage percentage uploaded by the `coverage` CI job on every
-> push to `main`.
-
 Denyx embeds Starlark (Python's safe subset), exposes a small set of
 effecting builtins (`fs.read`, `net.http_get`, `subprocess.exec`,
 `env.read`, ...), and enforces a TOML-declared policy at every call.
@@ -47,6 +37,18 @@ not in a wrapper that asks the model nicely.
 >   the code with hostile intent yet** — that external review is the
 >   single biggest gating item between today and unattended
 >   production use.
+> - **OWASP Agentic Top 10 — empirical scoring with tests.** 2
+>   strong (ASI-02 Tool Misuse, ASI-05 Code Execution), 4
+>   mitigated/partial (ASI-01 Goal Hijacking, ASI-03 Identity,
+>   ASI-09 Human Trust, ASI-10 Rogue Agents), 4 out of scope by
+>   design (ASI-04 Supply Chain, ASI-06 Context/RAG, ASI-07
+>   Inter-Agent, ASI-08 Cascading Failures). 11 concrete tests in
+>   [`crates/host/tests/owasp_agentic.rs`](crates/host/tests/owasp_agentic.rs);
+>   full breakdown in
+>   [docs/owasp-agentic-coverage.md](docs/owasp-agentic-coverage.md).
+>   Honest framing: Denyx is a single-process capability gate, not a
+>   fleet-governance platform — Microsoft AGT's "10/10 covered"
+>   claim covers a different unit of analysis.
 > - **Threat-model scope.** Defends against prompt engineering — the
 >   policy is Rust-enforced; clever phrasing can't bypass it. The
 >   local-only IFC layer covers a documented transform set (reverse,
@@ -235,6 +237,39 @@ MCP-aware orchestrator.
   policy-gated Starlark in-process pulls this in.
 - **`denyx-mcp`** — MCP server. Wires Denyx into Claude Code,
   opencode, Cursor, custom orchestrators.
+
+## OWASP Agentic Top 10 coverage
+
+Denyx is scored against the
+[OWASP Top 10 for Agentic Applications](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/)
+(ASI-01 through ASI-10) with concrete tests behind each position.
+Empirical, not a claim table — every line below maps to one or
+more tests in
+[`crates/host/tests/owasp_agentic.rs`](crates/host/tests/owasp_agentic.rs).
+
+| ASI | Risk | Position |
+|-----|------|----------|
+| ASI-01 | Agent Goal Hijacking | **Mitigated** — gate fires regardless of agent intent |
+| ASI-02 | Tool Misuse and Exploitation | **Strong** — capability allowlist + arg-side denial + IFC |
+| ASI-03 | Identity and Privilege Abuse | **Partial** — reserved-var invariant + env allow/deny |
+| ASI-04 | Agentic Supply Chain Vulnerabilities | Out of scope |
+| ASI-05 | Unexpected Code Execution | **Strong** — subprocess gate + path canonicalisation + bwrap |
+| ASI-06 | Context Management and Retrieval Manipulation | Out of scope |
+| ASI-07 | Insecure Inter-Agent Communication | Out of scope |
+| ASI-08 | Cascading Failures | Out of scope |
+| ASI-09 | Human-Agent Trust Exploitation | **Partial** — `requires_approval` + `auto-deny` fallback |
+| ASI-10 | Rogue Agents | **Partial** — scope is immutable mid-script + audit log |
+
+**2 strong / 4 mitigated or partial / 4 out of scope.** The
+out-of-scope items are positive design choices, not gaps: Denyx
+governs one process at a time and leaves agent-mesh, identity,
+supply chain, context, and SRE to other layers. Compare to
+Microsoft AGT's claimed "10/10 covered" — different unit of
+analysis (enterprise fleet governance vs. single-process gate).
+
+Full per-ASI breakdown with quoted canonical text, reasoning, and
+test pointers:
+[docs/owasp-agentic-coverage.md](docs/owasp-agentic-coverage.md).
 
 ## Documentation
 
