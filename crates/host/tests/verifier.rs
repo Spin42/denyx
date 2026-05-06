@@ -88,6 +88,95 @@ y = 1
         .unwrap_or_else(|e| panic!("false positive on triple-quoted string: {e}"));
 }
 
+// Triple-quote-handling boundary tests.
+//
+// Mutation testing surfaced 22 surviving mutants in
+// `strip_strings_and_comments`'s triple-quote logic — the byte-by-
+// byte detection of `"""` and `'''` openers/closers. Some of those
+// mutations under-strip (real code outside strings keeps getting
+// scanned, capability uses get false-flagged → restrictive, no
+// security regression) but some OVER-strip (real code AFTER an
+// inner quote inside the triple-quoted region gets blanked,
+// hiding capability uses → BYPASS at the verifier).
+//
+// These tests exercise the boundary cases the previous coverage
+// missed: nested single-quote characters inside triple-quoted
+// strings, triple-quoted strings that span multiple lines, and a
+// triple-quoted string immediately followed by a real capability
+// call.
+
+#[test]
+fn triple_quoted_with_inner_single_quotes_does_not_close_early() {
+    // Inside a `"""...."""` Python/Starlark accepts any unbalanced
+    // single quotes. A buggy strip that exits the triple-quoted
+    // region on the first single quote would expose the inner
+    // `fs.read` to the scanner — false positive (restrictive) at
+    // best, real bypass (capability hidden by over-strip propagating
+    // into following real code) at worst.
+    let src = r#"x = """it's a docstring with fs.read('foo') as text"""
+y = 1
+"#;
+    verify(src, &empty_policy()).unwrap_or_else(|e| {
+        panic!("triple-quote with inner single quote false-positive: {e}")
+    });
+}
+
+#[test]
+fn triple_quoted_then_real_capability_call_flags_only_real_call() {
+    // A docstring containing `fs.read` followed by code that DOES
+    // call `fs.read`. The verifier MUST flag the real call (because
+    // policy denies fs.read) but MUST NOT flag the docstring
+    // mention. A mutation that mishandles the closing `"""` could
+    // either (a) keep stripping past the docstring into the real
+    // call, hiding it (BYPASS) or (b) close early, exposing the
+    // docstring's mention to the scanner (FALSE POSITIVE).
+    let src = r#"docstring = """this script will fs.read a file"""
+result = fs.read("path")
+"#;
+    let err = verify(src, &empty_policy())
+        .expect_err("real fs.read call must be flagged by verifier");
+    assert_eq!(err.capability, "fs.read");
+}
+
+#[test]
+fn unterminated_triple_quoted_string_does_not_panic() {
+    // A truncated `"""...` with no closer must not panic the
+    // verifier, regardless of how the strip's loop terminates.
+    // Mutation testing surfaced offset-arithmetic mutants
+    // (`i + 2 < len`, `i += 3` etc.) where wrong arithmetic could
+    // walk off the end. The verifier should robustly tolerate
+    // malformed input — the parser will reject it later anyway.
+    let src = "x = \"\"\"truncated and never closed... fs.read appears here\n";
+    let _ = verify(src, &empty_policy());
+}
+
+#[test]
+fn triple_single_quoted_string_strips_capability_name() {
+    // The strip handles both `"""..."""` AND `'''...'''`. Existing
+    // tests cover the double-quoted variant; this exercises the
+    // single-quoted path so a mutation that special-cases one quote
+    // type is caught.
+    let src = r#"x = '''this docstring uses fs.read and subprocess.exec'''
+y = 1
+"#;
+    verify(src, &empty_policy()).unwrap_or_else(|e| {
+        panic!("triple-single-quoted string false-positive: {e}")
+    });
+}
+
+#[test]
+fn capability_name_after_triple_quoted_string_is_still_flagged() {
+    // The verifier must resume scanning AFTER the triple-quoted
+    // closer. A mutation that fails to advance past the closing
+    // `"""` would silently consume the rest of the file as part of
+    // the string — and any capability call after the docstring
+    // would be hidden from the scanner. BYPASS.
+    let src = "doc = \"\"\"hello world\"\"\"\nresult = fs.read(\"path\")\n";
+    let err = verify(src, &empty_policy())
+        .expect_err("capability call after closing triple-quote must be flagged");
+    assert_eq!(err.capability, "fs.read");
+}
+
 #[test]
 fn allowed_capability_passes_verifier() {
     // Capabilities are now derived from populated resource sections.

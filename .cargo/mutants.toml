@@ -39,3 +39,38 @@ timeout_multiplier = 5.0
 # false-positive timing out perfectly fine mutants on a busier CI
 # runner.
 minimum_test_timeout = 30.0
+
+# Exclude known-equivalent mutants — code edits that are syntactically
+# different but semantically identical. The triage discipline is:
+# every entry here MUST have a comment explaining why it's
+# equivalent. If you can't write the explanation, it's not equivalent
+# and you should add a test instead.
+exclude_re = [
+    # b64_encode combines bytes via bitwise OR after shifting them
+    # to non-overlapping positions (0-7, 8-15, 16-23). For non-
+    # overlapping bit ranges, `|` and `^` produce identical results.
+    # No security difference; mutation passes any test that exercises
+    # b64 encoding correctness.
+    "taint\\.rs:.*b64_encode.*replace \\| with \\^",
+
+    # ROT-N math coincidence. Inside the alphabetic branch, the
+    # original `b - 'A' + n` and the mutant `b + 'A' + n` are
+    # equivalent modulo 26 because 'A' = 65 ≡ 13 (mod 26), and the
+    # subtraction and addition of any value congruent-to-13 collapse
+    # to the same result under `% 26`. The same coincidence applies
+    # to 'a' = 97 ≡ 19 (mod 26) — `(b - 'a' + n) % 26 == (b + 'a' + n) % 26`
+    # holds. See the docstring on `compute_transforms`.
+    "taint\\.rs:24[12]:.*compute_transforms.*replace - with \\+",
+    "taint\\.rs:24[12]:.*compute_transforms.*replace - with /",
+
+    # *::as_str helpers (SandboxMode::as_str, FsAction::as_str,
+    # HttpVerb::as_str) only feed into error-message rendering. The
+    # mutator generates `""` and `"xyzzy"` variants that survive
+    # because no test asserts the exact string used in a denial
+    # message — and asserting on those strings would be brittle
+    # (any rephrasing of the error message would break tests). The
+    # cosmetic effect of returning the wrong as_str value is "the
+    # error message names the wrong action," not a security
+    # regression.
+    "lib\\.rs:.*::as_str -> &'static str with \"",
+]

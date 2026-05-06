@@ -767,6 +767,81 @@ mod tests {
     }
 
     #[test]
+    fn redact_lines_density_calc_uses_division_not_modulo_or_multiplication() {
+        // Targets the mutation "/ with %" and "/ with *" in the
+        // density calculation inside redact_lines. If the operator
+        // were silently swapped, an attacker could tune their cover-
+        // text to land on a `density` value that's below threshold
+        // by accident — letting a chunked exfil slip through.
+        //
+        // Construct a case where division gives density above the
+        // threshold (so chunking IS detected and the lines clobber)
+        // but where modulo or multiplication would give something
+        // either much higher or much lower:
+        //
+        //   secret = "MNOP4321secret-token" (20 chars, > MIN_LEN=8)
+        //   joined output: per-character chunked print with one cover
+        //   char between each. So matches at positions 0, 2, 4, ..., 38.
+        //   span = 38, len = 20, density = 20/38 ≈ 0.526 — well above
+        //   the 0.05 threshold, MUST be detected as chunking.
+        //
+        //   modulo: 20 % 38 = 20 → still >> 0.05, "passes" the check
+        //   the other way (would still detect chunking) — so a `/→%`
+        //   mutation alone might not flip THIS case. But for longer
+        //   spans the modulo result drops to a small value.
+        //
+        // Use a longer span to make the modulo and multiplication
+        // mutations diverge from the real division behaviour.
+        let r = TaintRegistry::default();
+        r.add("MNOP4321zzzzMNOP4321"); // 20 chars, all unusual chars
+        // Print each char interleaved with 4 cover chars (a real
+        // chunking exfil pattern).
+        let chunks: Vec<String> = "MNOP4321zzzzMNOP4321"
+            .chars()
+            .map(|c| format!("aaaa{c}"))
+            .collect();
+        let out = redact_lines(chunks, &r);
+        // Every chunked line MUST be replaced with [REDACTED]. If the
+        // density calculation were `%` or `*`, the chunking would not
+        // be detected and the original chunked output would pass through.
+        for (i, line) in out.iter().enumerate() {
+            assert_eq!(
+                line, REDACTED,
+                "line {i} should be clobbered by chunking detection but got {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_lines_skips_chunking_for_short_taints() {
+        // Targets the mutation "< with == in CHUNKING_MIN_LEN check"
+        // and "< with <= in CHUNKING_MIN_LEN check". The check is
+        // `if taint.len() < CHUNKING_MIN_LEN { continue; }` — for a
+        // 4-char secret (below MIN_LEN=8), chunking detection MUST be
+        // skipped (otherwise prose with those four characters present
+        // gets falsely clobbered).
+        //
+        // If `<` becomes `==`, only a 7-char taint is skipped — every
+        // other length gets chunking-detected, including 4-char taints
+        // which would false-positive-clobber any prose with the four
+        // characters in order.
+        let r = TaintRegistry::default();
+        r.add("abcd"); // 4 chars: shorter than CHUNKING_MIN_LEN (=8)
+        // Prose that contains a, b, c, d in order — would be a chunking
+        // false positive if the length check is wrong.
+        let prose = vec![
+            "Here is a banana.".into(),
+            "And a cake of dates.".into(),
+        ];
+        let out = redact_lines(prose.clone(), &r);
+        // No clobbering: chunking detection MUST skip the short taint.
+        // (The lines may still get redacted by the substring scrub if
+        // "abcd" appears verbatim, but it doesn't, so the original
+        // lines pass through.)
+        assert_eq!(out, prose, "short taints must skip chunking detection");
+    }
+
+    #[test]
     fn redact_lines_does_not_clobber_prose_with_random_char_overlap() {
         // 40-char secret with rare chars; long English-ish prose
         // should NOT be mistaken for chunking.
