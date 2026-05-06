@@ -51,6 +51,7 @@ The index below lists everything in both groups in one place.
 |--------------------------------------------------------------|---------|
 | [agent-policy-spec](agent-policy-spec.md)                    | Portable spec for the policy format, **v1.0.0**. Tool-agnostic — consumable by any agentic system. Use this if you're implementing the policy format in a non-Denyx runtime. |
 | [server-protocol](server-protocol.md)                        | The HTTP wire spec a policy/audit server must implement, **v1**. Two endpoints, bearer auth, status-code semantics, conformance test vectors. Read after `11-denyx-for-teams`. |
+| [claude-code-permission-tests](claude-code-permission-tests.md) | Empirical test recipe verifying that Claude Code's built-in tools respect the project-local deny list, and that v2 additions (`Agent`, `Task*`, `Cron*`, …) inherit permissions rather than create independent bypass paths. Re-run after Claude Code version bumps. |
 | [security-audit](security-audit.md)                          | The 16-surface bypass-assessment writeup that triggered the recent security work. Findings + fixes + verified-safe surfaces. |
 | [security-pentest-report](security-pentest-report.md)        | AI-driven (Sonnet + Opus) penetration test against the local-only IFC layer. Findings categorised Critical/High/Medium/Low, mitigations, closure verification. |
 | [mutation-testing](mutation-testing.md)                      | How `cargo-mutants` runs against the security-critical core (policy gate, IFC, verifier). Triage workflow, schedule, honest limits. |
