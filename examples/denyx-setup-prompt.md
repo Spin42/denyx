@@ -35,11 +35,14 @@ you're running in). Denyx is a Rust runtime that gates an agent's
 filesystem / network / subprocess / env access through a TOML policy
 the operator (not the model) controls.
 
-Goal: a working `denyx.toml` plus a project-local MCP config wiring
-`denyx-mcp` to this project, so future runs of Claude Code or
-opencode in this directory have every effecting tool call
-policy-gated. **Project-specific. Don't write to $HOME or anywhere
-outside the cwd.**
+Goal: a working `denyx.toml` plus TWO project-local config
+changes — wiring `denyx-mcp` as an MCP server (Step 4a) AND
+disabling the host's built-in effecting tools so the model has no
+path to side-effects except through `denyx-mcp` (Step 4b). Both
+are required; wiring MCP without disabling built-ins gives the
+user a placebo sandbox the model will route around.
+**Project-specific. Don't write to $HOME or anywhere outside the
+cwd.**
 
 Use Edit/Write/Bash/Read freely. Ask the user every question called
 out below — don't guess.
@@ -237,6 +240,85 @@ Now write the config:
 If a config already exists, MERGE — don't clobber. Add the `denyx`
 server alongside whatever else is there.
 
+== Step 4b: Disable the host's built-in effecting tools ==
+
+**Critical step. Don't skip this.**
+
+Both Claude Code and opencode ship with built-in tools (`Bash`,
+`Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`,
+plus host-specific ones like `Monitor`/`NotebookEdit` for Claude
+Code) that touch the filesystem, network, and subprocess
+**directly** — they do NOT go through any MCP server. If you only
+wire `denyx-mcp` and leave the built-ins enabled, the model
+ignores `denyx-mcp` and uses the cheaper built-in path. Result:
+Denyx is installed, but the policy gate never fires. The user
+believes they have a sandbox; they actually have a placebo.
+
+To actually enforce the policy, you have to disable the built-in
+effecting tools so the model has no path to side-effects except
+via `denyx-mcp`. This is a different config file from Step 4a.
+
+  - **Claude Code**: write `./.claude/settings.json` (create the
+    `.claude/` directory if needed):
+      {
+        "permissions": {
+          "deny": [
+            "Bash",
+            "Edit",
+            "Write",
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+            "Monitor",
+            "NotebookEdit"
+          ]
+        }
+      }
+    Add `"PowerShell"` to the deny list on Windows. The bare
+    string form (`"Bash"` not `"Bash(*)"`) means "block all
+    invocations of this tool." Deny rules always win against
+    allow rules, so this is hard-deny.
+
+    If `./.claude/settings.json` already exists with other
+    permissions, MERGE the deny array — don't clobber existing
+    keys. Existing entries in `permissions.deny` are kept;
+    Denyx's entries are added.
+
+  - **opencode**: ADD a `tools` block to the same
+    `./opencode.json` you wrote in Step 4a:
+      {
+        "$schema": "https://opencode.ai/config.json",
+        "tools": {
+          "bash": false,
+          "read": false,
+          "write": false,
+          "edit": false,
+          "glob": false,
+          "grep": false,
+          "webfetch": false,
+          "websearch": false
+        },
+        "mcp": {
+          "denyx": { ...the entry from Step 4a... }
+        }
+      }
+    `tools: false` removes the built-in entirely so it doesn't
+    appear in the model's tool list. opencode also accepts a
+    `permission` block with `"*": "deny"` + `"denyx*": "allow"`
+    as a defence-in-depth wildcard, but the `tools` block is the
+    primary mechanism — don't skip it.
+
+After writing both configs, briefly tell the user what just
+happened: "I disabled the host's built-in `Bash` / `Read` /
+`Write` / `Edit` / `Glob` / `Grep` / `WebFetch` / `WebSearch`
+tools. From now on, every effecting operation in this project
+goes through Denyx's MCP tools and is gated by `denyx.toml`. If
+you want to re-enable a specific built-in tool (e.g. you trust
+`Read` to be unrestricted), edit `.claude/settings.json` (Claude
+Code) or `opencode.json` (opencode)."
+
 == Step 5: Smoke test ==
 
 After the config is in place, run a manual sanity check yourself
@@ -257,14 +339,19 @@ After the config is in place, run a manual sanity check yourself
 
 If the smoke test passes, tell the user:
 
-  - The host (Claude Code or opencode) usually picks up a new
-    project-local MCP config at the next session start. Tell them
-    to restart their host process.
-  - From there, every agent action that goes through `denyx_run`
-    or the per-capability sugar tools is policy-gated. Built-in
-    tools (Bash, Read, Write, …) bypass denyx-mcp; if those exist
-    in your host, the user has to disable them or rely on the host
-    to prefer the MCP-provided alternatives.
+  - The host (Claude Code or opencode) picks up the new
+    project-local config at the next session start. Tell them to
+    restart their host process.
+  - After the restart, the model sees the `denyx-mcp` tools but
+    NOT the host's built-in `Bash`/`Read`/`Write`/`Edit`/`Glob`/
+    `Grep`/`WebFetch`/`WebSearch` tools — those were disabled in
+    Step 4b. Every effecting operation in this project now goes
+    through Denyx and is gated by `denyx.toml`.
+  - If the model complains it can't read or run something it
+    needs, that's the policy doing its job. Either widen
+    `denyx.toml` to allow the operation through Denyx, or
+    re-enable a specific built-in in the host config — the user
+    decides; don't auto-loosen.
 
 == Step 6: What to commit, what not to ==
 
@@ -273,18 +360,24 @@ Tell the user:
   - **Commit `./denyx.toml`.** It's the policy contract for the
     project — everyone working on this codebase should see it,
     review it, and propose changes via PR.
-  - **Whether to commit `./.mcp.json` (or `./opencode.json`)
-    depends on which install path you used:**
-      * If the config invokes bare `denyx-mcp` (cargo-installed
-        path), it's portable across contributors who have also run
-        `cargo install denyx-mcp`. Safe to commit — and recommended,
-        so contributors don't each have to re-run this prompt.
-      * If the config embeds an absolute path to a local checkout
-        (`<repo>/target/release/denyx-mcp`), that path differs per
-        machine. Either gitignore it and have each contributor run
-        this prompt, or commit a templated version (e.g.
-        `.mcp.json.example`) with `${DENYX_MCP_BIN}` and document
-        the env var in the project README.
+  - **Whether to commit `./.mcp.json` / `./opencode.json` /
+    `./.claude/settings.json` depends on which install path you
+    used:**
+      * If the MCP config invokes bare `denyx-mcp` (cargo-
+        installed path), it's portable across contributors who
+        have also run `cargo install denyx-mcp`. Safe to commit
+        — and recommended, so contributors don't each have to
+        re-run this prompt. The `.claude/settings.json` deny
+        list and the `tools` block in `opencode.json` are also
+        portable; commit them.
+      * If the MCP config embeds an absolute path to a local
+        checkout (`<repo>/target/release/denyx-mcp`), that path
+        differs per machine. Either gitignore the MCP-config
+        file and have each contributor run this prompt, or commit
+        a templated version (e.g. `.mcp.json.example`) with
+        `${DENYX_MCP_BIN}` and document the env var in the project
+        README. Note: `.claude/settings.json` is still safe to
+        commit because it doesn't reference the binary path.
   - For Linux operators who want OS-level isolation: edit
     `denyx.toml` and add `sandbox = "bwrap"` under
     `[subprocess]` (after installing bubblewrap with
