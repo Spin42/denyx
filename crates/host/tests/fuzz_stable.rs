@@ -62,12 +62,34 @@ impl Rng {
 fn synthesize(rng: &mut Rng) -> String {
     let len = rng.gen_range(512);
     let parts: &[&str] = &[
-        "fs.read", "fs.write", "fs.delete", "_aegis_fs_read",
-        "_aegis_net_http_get", "subprocess.exec", "env.read",
-        "net.http_post", "obj.fs.read", "fs.readme",
-        "#", "\"", "'", "\"\"\"", "'''", "\\", "\n",
-        "  ", " = ", "(", ")", "[", "]", ",",
-        "x", "y", "abc", "0xFF",
+        "fs.read",
+        "fs.write",
+        "fs.delete",
+        "_aegis_fs_read",
+        "_aegis_net_http_get",
+        "subprocess.exec",
+        "env.read",
+        "net.http_post",
+        "obj.fs.read",
+        "fs.readme",
+        "#",
+        "\"",
+        "'",
+        "\"\"\"",
+        "'''",
+        "\\",
+        "\n",
+        "  ",
+        " = ",
+        "(",
+        ")",
+        "[",
+        "]",
+        ",",
+        "x",
+        "y",
+        "abc",
+        "0xFF",
     ];
     let mut s = String::with_capacity(len);
     while s.len() < len {
@@ -91,6 +113,9 @@ fn empty_policy() -> Policy {
 #[test]
 fn verifier_does_not_panic_on_random_inputs() {
     let policy = empty_policy();
+    // Seed has uneven digit groups on purpose (a memorable hex word
+    // — "AEGIS" + "SEED_DEAD"); the readability beats the lint.
+    #[allow(clippy::unusual_byte_groupings)]
     let mut rng = Rng::new(0xA51A_5_5EED_DEAD);
     for i in 0..100_000 {
         let src = synthesize(&mut rng);

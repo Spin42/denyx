@@ -50,13 +50,12 @@ fn http_get_aborts_within_timeout_against_unresponsive_backend() {
         }
     });
 
-    let toml = format!(
-        r#"
+    let toml = r#"
 [network]
 http_get_allow  = ["127.0.0.1"]
 timeout_seconds = 1
 "#
-    );
+    .to_string();
     let runner = runner_for(&toml);
     let src = format!(
         r#"net.http_get("http://127.0.0.1:{port}/never-responds")

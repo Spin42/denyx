@@ -53,7 +53,11 @@ fn audit_verify_clean_chain_succeeds() {
         .arg(&log)
         .output()
         .expect("spawn");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("OK:"));
     assert!(stdout.contains("2 entries"));

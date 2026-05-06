@@ -46,9 +46,7 @@ read_allow = ["/tmp/**"]
 "#;
     let runner = runner_for(toml);
     // Pure computation only — no capability call. Should succeed.
-    let outcome = runner
-        .run("t", "print('hello')", "test.star")
-        .unwrap();
+    let outcome = runner.run("t", "print('hello')", "test.star").unwrap();
     assert_eq!(outcome.printed, vec!["hello".to_string()]);
 }
 
@@ -106,10 +104,12 @@ allow_vars = ["PATH"]
     let _ = runner.run("t", r#"env.read("PATH")"#, "test.star");
     let events = cap.0.lock().unwrap();
     let found = events.iter().any(|e| {
-        e.capability == "env.read"
-            && matches!(e.status, aegis_host::audit::AuditStatus::Denied)
+        e.capability == "env.read" && matches!(e.status, aegis_host::audit::AuditStatus::Denied)
     });
-    assert!(found, "expected denied env.read audit event, got: {events:?}");
+    assert!(
+        found,
+        "expected denied env.read audit event, got: {events:?}"
+    );
 }
 
 #[test]
@@ -130,7 +130,10 @@ deep(0)
     // Starlark surfaces the cap as an eval error (not a typed
     // RuntimeLimit) because Starlark itself enforces it. Either way
     // the script does NOT succeed.
-    assert!(matches!(err, AegisError::Starlark(_) | AegisError::RuntimeLimit(_)));
+    assert!(matches!(
+        err,
+        AegisError::Starlark(_) | AegisError::RuntimeLimit(_)
+    ));
 }
 
 #[test]

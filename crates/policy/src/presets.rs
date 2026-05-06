@@ -32,6 +32,13 @@ deny = [
     "~/.ssh/**",
     "~/.config/gh/**",
     "~/.config/gcloud/**",
+    # Aegis's own per-user control-plane config (the dotenv file holding
+    # AEGIS_AUTH_TOKEN, AEGIS_POLICY_URL, AEGIS_AUDIT_URL). The
+    # variable names themselves are denied by the runtime's reserved-
+    # name list (see crates/policy/src/lib.rs); this is the parallel
+    # filesystem deny so an agent that tries to bypass the env-var
+    # check by reading the file directly is also blocked.
+    "~/.config/aegis/**",
     "~/.netrc",
     "~/.docker/config.json",
     "~/.gem/credentials",
@@ -93,6 +100,20 @@ deny_vars = [
     # Database creds
     "DATABASE_URL",
     "DATABASE_PASSWORD",
+    # Aegis's own server-mode credentials. When aegis-mcp is launched
+    # with --policy-url / --audit-url and an --auth-token, the token
+    # is in the process environment. An agent that could read these
+    # variables could fetch unauthorised policies, forge audit
+    # events, or impersonate the machine to the control plane. The
+    # token MUST never be readable by the model — even if a project
+    # policy adds AEGIS_AUTH_TOKEN to allow_vars (which it shouldn't),
+    # this deny wins. Same reasoning for the alternate names projects
+    # might use when wiring the token into a .env file.
+    "AEGIS_AUTH_TOKEN",
+    "AEGIS_TOKEN",
+    "AEGIS_SERVER_TOKEN",
+    "AEGIS_JWT",
+    "AEGIS_API_KEY",
 ]
 
 [subprocess]

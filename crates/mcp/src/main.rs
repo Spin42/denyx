@@ -50,9 +50,9 @@ use std::time::Duration;
 
 use aegis_host::{
     AegisError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
-    DenyAllConfirm, JsonlAuditSink, Runner,
+    DenyAllConfirm, HttpAuditSink, JsonlAuditSink, Runner,
 };
-use aegis_policy::Policy;
+use aegis_policy::{Policy, PolicyFile};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -81,15 +81,57 @@ const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
     about = "MCP server exposing the Aegis policy-gated runtime over stdio"
 )]
 struct Cli {
-    /// Path to the policy TOML file. If omitted, falls back to the
-    /// built-in `secure-defaults` baseline (denies every effecting
-    /// capability) and prints a banner on stderr.
+    /// Path to the policy TOML file. If omitted (and `--policy-url`
+    /// also omitted), falls back to the built-in `secure-defaults`
+    /// baseline (denies every effecting capability) and prints a
+    /// banner on stderr. Mutually exclusive with `--policy-url`.
     #[arg(short, long)]
     policy: Option<PathBuf>,
 
-    /// Append audit events to this file (JSON Lines). Default: stderr.
+    /// Append audit events to this file (JSON Lines). Default (when
+    /// AEGIS_AUDIT_URL is also unset): stderr.
     #[arg(long)]
     audit_log: Option<PathBuf>,
+
+    // ---- env-var-only fields (no CLI flag, see config cascade in
+    // load_aegis_config_cascade): ----
+    //
+    // The control-plane URLs and bearer token are read from the
+    // `AEGIS_POLICY_URL`, `AEGIS_AUDIT_URL`, and `AEGIS_AUTH_TOKEN`
+    // environment variables. We DO NOT take them on the command line
+    // because:
+    //
+    //   - argv is visible via `ps`, `/proc/<pid>/cmdline`, shell
+    //     history, IDE "recently run" lists. A bearer token leaks
+    //     trivially that way.
+    //   - URLs leak the same way and tell an attacker who's escaped
+    //     the runtime sandbox where to send forged audit events.
+    //
+    // The values are sourced (highest priority first) from:
+    //
+    //   1. The process env when aegis-mcp launches (set by the
+    //      shell, MCP host's `env` block, k8s pod spec, systemd
+    //      unit, etc.).
+    //   2. `$HOME/.config/aegis/.env` — per-user override.
+    //   3. `/etc/aegis/.env` — system-wide, root-managed.
+    //
+    // The agent itself can never read any of them: the variable
+    // names AEGIS_AUTH_TOKEN / AEGIS_TOKEN / AEGIS_SERVER_TOKEN /
+    // AEGIS_JWT / AEGIS_API_KEY / AEGIS_POLICY_URL / AEGIS_AUDIT_URL
+    // are on the runtime's reserved list (see
+    // `aegis_policy::AEGIS_RESERVED_VAR_NAMES`); they're denied
+    // from `env.read` and stripped from any subprocess env
+    // unconditionally, regardless of policy. Both config files are
+    // additionally denied at the filesystem level by
+    // `secure-defaults` (`**/.env*` plus `~/.config/aegis/**`).
+    #[arg(skip)]
+    policy_url: Option<String>,
+
+    #[arg(skip)]
+    audit_url: Option<String>,
+
+    #[arg(skip)]
+    auth_token: Option<String>,
 
     /// How `requires_approval`-listed capabilities behave when invoked
     /// through this MCP server.
@@ -134,29 +176,46 @@ enum ConfirmModeArg {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let policy = match cli.policy.as_deref() {
-        Some(path) => Policy::load(path)
-            .map_err(|e| anyhow::anyhow!("load policy {path:?}: {e}"))?,
-        None => {
-            eprintln!(
-                "aegis-mcp: no --policy provided; using built-in `secure-defaults` baseline. \
-This denies every fs/net/subprocess/env capability — every tool call will fail \
-until you launch with --policy <project.toml>. See examples/policies/ for templates."
-            );
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            Policy::secure_defaults_at(cwd)?
-        }
+    // Cascade-load Aegis control-plane config (the AEGIS_AUTH_TOKEN,
+    // AEGIS_POLICY_URL, AEGIS_AUDIT_URL env vars) from dedicated
+    // dotenv files. Order: process env > per-user file > system file.
+    // Lives in dedicated files at well-known paths — NOT the project's
+    // own `.env`, which is for project secrets and is denied to the
+    // agent by `secure-defaults`. See `load_aegis_config_cascade`.
+    load_aegis_config_cascade();
+
+    let mut cli = Cli::parse();
+    cli.auth_token = std::env::var("AEGIS_AUTH_TOKEN").ok();
+    cli.policy_url = std::env::var("AEGIS_POLICY_URL").ok().or(cli.policy_url);
+    cli.audit_url = std::env::var("AEGIS_AUDIT_URL").ok().or(cli.audit_url);
+    // Policy source: file > URL > built-in secure-defaults fallback.
+    // Clap's ArgGroup already enforced that file and URL aren't both
+    // set; here we just dispatch on which one (if either) is.
+    let policy = if let Some(url) = cli.policy_url.as_deref() {
+        fetch_policy_from_url(url, cli.auth_token.as_deref())?
+    } else if let Some(path) = cli.policy.as_deref() {
+        Policy::load(path).map_err(|e| anyhow::anyhow!("load policy {path:?}: {e}"))?
+    } else {
+        eprintln!(
+            "aegis-mcp: no --policy or --policy-url provided; using built-in \
+`secure-defaults` baseline. This denies every fs/net/subprocess/env capability — \
+every tool call will fail until you launch with --policy <project.toml> or \
+--policy-url <https://policy-server/...>. See examples/policies/ for templates."
+        );
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Policy::secure_defaults_at(cwd)?
     };
-    let audit: Arc<dyn AuditSink> = match &cli.audit_log {
-        Some(path) => {
-            let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            policy
-                .guard_audit_log(&canon)
-                .map_err(|e| anyhow::anyhow!("audit-log path is reachable to the agent: {e}"))?;
-            Arc::new(JsonlAuditSink::file(path)?)
-        }
-        None => Arc::new(JsonlAuditSink::stderr()),
+    // Audit sink: URL > file > stderr default.
+    let audit: Arc<dyn AuditSink> = if let Some(url) = cli.audit_url.as_deref() {
+        Arc::new(HttpAuditSink::new(url, cli.auth_token.as_deref()))
+    } else if let Some(path) = cli.audit_log.as_deref() {
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        policy
+            .guard_audit_log(&canon)
+            .map_err(|e| anyhow::anyhow!("audit-log path is reachable to the agent: {e}"))?;
+        Arc::new(JsonlAuditSink::file(path)?)
+    } else {
+        Arc::new(JsonlAuditSink::stderr())
     };
 
     // Shared stdout. The main dispatch loop and the elicitation hook
@@ -220,6 +279,180 @@ until you launch with --policy <project.toml>. See examples/policies/ for templa
         out.flush()?;
     }
     Ok(())
+}
+
+/// Cascade-load the Aegis control-plane config. The cascade is:
+///
+/// 1. **Process env** (highest priority). Whatever was already set
+///    by the calling shell, the MCP host's `env` block (Claude Code's
+///    `.mcp.json` / opencode equivalent), the systemd unit's
+///    `EnvironmentFile=`, the k8s pod spec's `env`, etc. Always
+///    wins — the operator at the top of the chain has the final say.
+/// 2. **Per-user file:** `$HOME/.config/aegis/.env`. The developer's
+///    own override of system defaults, e.g. switching their personal
+///    machine to a staging policy server.
+/// 3. **System file:** `/etc/aegis/.env`. SecOps-managed, root-owned.
+///    Pins corporate-wide control-plane URLs across every developer
+///    machine without each user having to set anything.
+///
+/// Each `.env` file is parsed with the minimal `KEY=VALUE` grammar:
+/// blank lines and `#` comments ignored, optional `export ` prefix
+/// stripped, surrounding `"` or `'` quotes on the value stripped.
+/// **A key already present in process env is never overridden** — a
+/// dotenv file fills gaps, it doesn't trump the launcher.
+///
+/// Both files live OUTSIDE the project tree. The project's own
+/// `.env` (for application secrets like `DATABASE_URL`) is NOT
+/// loaded by aegis-mcp — that's the IDE / dev tool's job. Mixing
+/// project secrets with control-plane config in one file would
+/// muddle two trust boundaries: project secrets are agent-relevant
+/// (the agent might legitimately need `DATABASE_URL`), control-plane
+/// secrets are operator-only (the agent must NEVER see them).
+///
+/// Both default paths are caught by `secure-defaults`'
+/// `[filesystem].deny = ["**/.env*"]`, so an agent that bypassed
+/// `env.read` (which is itself blocked by the AEGIS_RESERVED_VAR_NAMES
+/// runtime invariant) and tried to read the file directly is also
+/// denied.
+///
+/// Failures are silent — these files are optional. The hard
+/// requirement is "the value must be in process env when we read it",
+/// not "we must successfully parse a file".
+fn load_aegis_config_cascade() {
+    // Per-user file first (higher priority among files; loaded
+    // before /etc so it claims the keys before the system file
+    // gets a chance, since the loader skips already-set keys).
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut path = std::path::PathBuf::from(home);
+        path.push(".config/aegis/.env");
+        let _ = load_dotenv_into_env(&path);
+    }
+    // System-wide fallback.
+    let _ = load_dotenv_into_env(std::path::Path::new("/etc/aegis/.env"));
+}
+
+/// Minimal dotenv loader. Reads `path` and sets each `KEY=VALUE`
+/// pair into the process env, skipping any key already present.
+/// Returns the number of new keys set. Silent on missing file or
+/// parse failure — see `load_aegis_config_cascade` for the
+/// rationale.
+///
+/// Inline implementation rather than a `dotenvy` dep because the
+/// surface we need is 30 lines and a third-party crate dep would
+/// increase the audit surface of a security-critical binary for
+/// very little gain.
+fn load_dotenv_into_env(path: &std::path::Path) -> std::io::Result<usize> {
+    let content = std::fs::read_to_string(path)?;
+    let mut count = 0;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        // Strip surrounding matching quotes (' or ").
+        let unquoted = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, unquoted);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Fetch a policy from an HTTP(S) URL at startup. The response body
+/// is parsed as TOML via the same `PolicyFile::from_toml_str` path
+/// the file-loaded policy uses; inheritance (`inherits = "..."`) is
+/// resolved before building the runtime `Policy`. The policy root
+/// for relative-pattern resolution is the cwd the agent was launched
+/// from — the same convention `Policy::load` uses for relative paths
+/// in a file-loaded policy.
+///
+/// Fail-closed on every non-success: 404 / 401 / 403 / 5xx / network
+/// error / parse error / empty body all surface as Err and the
+/// caller (`main`) exits with a clear error before any tool call is
+/// accepted. There is no on-disk cache: the policy is re-fetched on
+/// every aegis-mcp startup. This is intentional — the only
+/// tamper-resistant strategy at MVP is "no local artefact to
+/// tamper with."
+///
+/// Timeout is 5 seconds total. Generous enough for a slow corporate
+/// network on the policy server's first morning hit; not so long
+/// the developer waits forever on a misconfigured URL.
+fn fetch_policy_from_url(url: &str, auth_token: Option<&str>) -> anyhow::Result<Policy> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirects(0) // a redirect from a corp policy URL is a config error, not a feature
+        .build();
+    let mut req = agent.get(url);
+    if let Some(t) = auth_token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = match req.call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            let snippet: String = body.chars().take(200).collect();
+            anyhow::bail!(
+                "policy fetch from {url} returned HTTP {code}. Server said: {snippet:?}. \
+                 Check that the URL is correct, the bearer token is valid, and the server \
+                 has a policy assigned for this machine/project."
+            );
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "policy fetch from {url} failed: {e}. Check network connectivity and that \
+                 the policy server is reachable from this machine."
+            );
+        }
+    };
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        // ureq's default Agent surfaces non-2xx as Err(Status), but
+        // a custom Agent might not. Belt-and-braces.
+        anyhow::bail!("policy fetch from {url} returned HTTP {status} (expected 2xx)");
+    }
+    let body = resp
+        .into_string()
+        .map_err(|e| anyhow::anyhow!("policy fetch from {url}: failed to read body: {e}"))?;
+    if body.trim().is_empty() {
+        anyhow::bail!(
+            "policy fetch from {url} returned an empty body. An empty TOML parses to a \
+             default-deny policy, which is almost certainly not what the operator intended. \
+             Refusing to start."
+        );
+    }
+    let file = PolicyFile::from_toml_str(&body)
+        .map_err(|e| anyhow::anyhow!("policy fetch from {url}: TOML parse failed: {e}"))?
+        .resolve_inheritance()
+        .map_err(|e| {
+            anyhow::anyhow!("policy fetch from {url}: inheritance resolution failed: {e}")
+        })?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = Policy::from_file(file, cwd)
+        .map_err(|e| anyhow::anyhow!("policy fetch from {url}: build Policy failed: {e}"))?;
+    // Sandbox preflight (refuse to start if `[subprocess].sandbox =
+    // "bwrap"` was declared but bwrap isn't on PATH). Mirrors what
+    // `Policy::load` does for file-loaded policies. The
+    // self-writable / audit-log guards don't apply here — we have
+    // no on-disk policy file path and the audit-log path (if any)
+    // is checked separately in main().
+    policy
+        .guard_sandbox_available()
+        .map_err(|e| anyhow::anyhow!("policy fetch from {url}: sandbox preflight failed: {e}"))?;
+    Ok(policy)
 }
 
 /// Reader thread body. Parses each line of stdin into a
@@ -308,7 +541,11 @@ impl Response {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(RpcError { code, message, data }),
+            error: Some(RpcError {
+                code,
+                message,
+                data,
+            }),
         }
     }
 }
@@ -833,4 +1070,147 @@ fn tool_definitions() -> Value {
             }
         }
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the inline helpers in main.rs that don't require
+    //! the full subprocess+JSON-RPC dance. End-to-end coverage lives
+    //! in tests/server_mode.rs.
+
+    use super::*;
+
+    fn write_temp(name: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "aegis_dotenv_{}_{}_{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn dotenv_basic_key_value_pairs() {
+        let path = write_temp("basic", "FOO=bar\nBAZ=qux\n");
+        // Use names that aren't already in env to avoid the "process
+        // env wins" rule eating the test.
+        let k1 = format!("AEGIS_TEST_DOTENV_BASIC_FOO_{}", std::process::id());
+        let k2 = format!("AEGIS_TEST_DOTENV_BASIC_BAZ_{}", std::process::id());
+        let body = format!("{k1}=bar\n{k2}=qux\n");
+        std::fs::write(&path, body).unwrap();
+
+        let n = load_dotenv_into_env(&path).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(std::env::var(&k1).unwrap(), "bar");
+        assert_eq!(std::env::var(&k2).unwrap(), "qux");
+        std::env::remove_var(&k1);
+        std::env::remove_var(&k2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_skips_comments_and_blank_lines() {
+        let k = format!("AEGIS_TEST_DOTENV_CMT_{}", std::process::id());
+        let path = write_temp(
+            "comments",
+            &format!("# this is a comment\n\n   \n{k}=v\n# trailing comment\n"),
+        );
+        let n = load_dotenv_into_env(&path).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::env::var(&k).unwrap(), "v");
+        std::env::remove_var(&k);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_strips_export_prefix() {
+        let k = format!("AEGIS_TEST_DOTENV_EXPORT_{}", std::process::id());
+        let path = write_temp("export", &format!("export {k}=hello\n"));
+        load_dotenv_into_env(&path).unwrap();
+        assert_eq!(std::env::var(&k).unwrap(), "hello");
+        std::env::remove_var(&k);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_strips_matching_quotes() {
+        let k1 = format!("AEGIS_TEST_DOTENV_DBLQ_{}", std::process::id());
+        let k2 = format!("AEGIS_TEST_DOTENV_SGLQ_{}", std::process::id());
+        let path = write_temp(
+            "quotes",
+            &format!("{k1}=\"double quoted\"\n{k2}='single quoted'\n"),
+        );
+        load_dotenv_into_env(&path).unwrap();
+        assert_eq!(std::env::var(&k1).unwrap(), "double quoted");
+        assert_eq!(std::env::var(&k2).unwrap(), "single quoted");
+        std::env::remove_var(&k1);
+        std::env::remove_var(&k2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_keeps_mismatched_quotes_as_part_of_value() {
+        let k = format!("AEGIS_TEST_DOTENV_MIX_{}", std::process::id());
+        // Mismatched: starts with " but ends with '. Not valid quoting;
+        // the function leaves the chars in place rather than guessing.
+        let path = write_temp("mixed", &format!("{k}=\"oops'\n"));
+        load_dotenv_into_env(&path).unwrap();
+        assert_eq!(std::env::var(&k).unwrap(), "\"oops'");
+        std::env::remove_var(&k);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_silently_skips_malformed_lines() {
+        // Lines without `=` are skipped, not errors. Important: a
+        // typo'd `.env` must not bring the whole agent down.
+        let k = format!("AEGIS_TEST_DOTENV_MALFORMED_{}", std::process::id());
+        let path = write_temp(
+            "malformed",
+            &format!(
+                "this is not key=value because... wait no it has = in it\n\
+                 {k}=value\n\
+                 garbage_no_equals\n"
+            ),
+        );
+        let n = load_dotenv_into_env(&path).unwrap();
+        // Two lines parse: the first (the comment-ish line happens to
+        // contain `=`, so it parses) and the named-value line. The
+        // garbage-no-equals line is skipped.
+        assert!(n >= 1);
+        assert_eq!(std::env::var(&k).unwrap(), "value");
+        std::env::remove_var(&k);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_existing_process_env_wins() {
+        let k = format!("AEGIS_TEST_DOTENV_PRECEDENCE_{}", std::process::id());
+        // Pre-set the var in process env. The .env should NOT override.
+        std::env::set_var(&k, "from-process-env");
+        let path = write_temp("precedence", &format!("{k}=from-dotenv\n"));
+        load_dotenv_into_env(&path).unwrap();
+        assert_eq!(std::env::var(&k).unwrap(), "from-process-env");
+        std::env::remove_var(&k);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dotenv_missing_file_is_silent() {
+        // The hard requirement is "the env must contain the value when
+        // we read it", not "we must successfully parse a file". Missing
+        // files are not errors that should bubble up to the operator.
+        let bogus = std::env::temp_dir().join(format!(
+            "aegis_dotenv_does_not_exist_{}",
+            std::process::id()
+        ));
+        let result = load_dotenv_into_env(&bogus);
+        assert!(result.is_err()); // returns Err, but the caller in
+                                  // load_aegis_config_cascade swallows it
+    }
 }

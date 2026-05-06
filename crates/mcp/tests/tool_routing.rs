@@ -122,7 +122,10 @@ fn named_lookup_marks_disallowed_tool_when_capability_missing() {
 #[test]
 fn unknown_tool_returns_error_field() {
     let policy = write_policy(POLICY_BODY);
-    let resp = drive_call(&policy, serde_json::json!({ "name": "DefinitelyNotDeclared" }));
+    let resp = drive_call(
+        &policy,
+        serde_json::json!({ "name": "DefinitelyNotDeclared" }),
+    );
     let body = &resp["result"]["structuredContent"];
     assert!(body["tool"].is_null());
     let err = body["error"].as_str().unwrap_or("");

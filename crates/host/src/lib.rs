@@ -21,10 +21,10 @@ pub use aegis_policy::PolicyError;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
-use starlark::syntax::{AstModule, Dialect};
 use starlark::starlark_module;
-use starlark::values::none::NoneType;
+use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::UnpackList;
+use starlark::values::none::NoneType;
 use thiserror::Error;
 
 pub mod audit;
@@ -67,8 +67,8 @@ fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
 }
 
 pub use audit::{
-    verify_chain, AuditEvent, AuditSink, JsonlAuditSink, NullAuditSink, VerifyFailure,
-    VerifyReport, GENESIS_PREV_HASH,
+    verify_chain, AuditEvent, AuditSink, HttpAuditSink, JsonlAuditSink, NullAuditSink,
+    VerifyFailure, VerifyReport, GENESIS_PREV_HASH,
 };
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
 pub use taint::{redact, redact_lines, TaintRegistry, REDACTED};
@@ -86,16 +86,46 @@ pub struct Capability {
 }
 
 pub const CAPABILITIES: &[Capability] = &[
-    Capability { name: "fs.read", raw: "_aegis_fs_read" },
-    Capability { name: "fs.write", raw: "_aegis_fs_write" },
-    Capability { name: "fs.delete", raw: "_aegis_fs_delete" },
-    Capability { name: "net.http_get", raw: "_aegis_net_http_get" },
-    Capability { name: "net.http_post", raw: "_aegis_net_http_post" },
-    Capability { name: "net.http_put", raw: "_aegis_net_http_put" },
-    Capability { name: "net.http_patch", raw: "_aegis_net_http_patch" },
-    Capability { name: "net.http_delete", raw: "_aegis_net_http_delete" },
-    Capability { name: "subprocess.exec", raw: "_aegis_subprocess_exec" },
-    Capability { name: "env.read", raw: "_aegis_env_read" },
+    Capability {
+        name: "fs.read",
+        raw: "_aegis_fs_read",
+    },
+    Capability {
+        name: "fs.write",
+        raw: "_aegis_fs_write",
+    },
+    Capability {
+        name: "fs.delete",
+        raw: "_aegis_fs_delete",
+    },
+    Capability {
+        name: "net.http_get",
+        raw: "_aegis_net_http_get",
+    },
+    Capability {
+        name: "net.http_post",
+        raw: "_aegis_net_http_post",
+    },
+    Capability {
+        name: "net.http_put",
+        raw: "_aegis_net_http_put",
+    },
+    Capability {
+        name: "net.http_patch",
+        raw: "_aegis_net_http_patch",
+    },
+    Capability {
+        name: "net.http_delete",
+        raw: "_aegis_net_http_delete",
+    },
+    Capability {
+        name: "subprocess.exec",
+        raw: "_aegis_subprocess_exec",
+    },
+    Capability {
+        name: "env.read",
+        raw: "_aegis_env_read",
+    },
 ];
 
 /// Starlark prelude evaluated before the user script. Binds the dotted
@@ -204,12 +234,17 @@ impl Runner {
 
     /// Parse, verify, and evaluate `source`. `task_id` lands in every
     /// audit event for provenance.
-    pub fn run(&self, task_id: &str, source: &str, script_name: &str) -> Result<RunOutcome, AegisError> {
-        verifier::verify(source, &self.policy)
-            .map_err(|e| AegisError::Verifier(e.to_string()))?;
+    pub fn run(
+        &self,
+        task_id: &str,
+        source: &str,
+        script_name: &str,
+    ) -> Result<RunOutcome, AegisError> {
+        verifier::verify(source, &self.policy).map_err(|e| AegisError::Verifier(e.to_string()))?;
 
-        let prelude_ast = AstModule::parse("__aegis_prelude__", PRELUDE.to_string(), &Dialect::Standard)
-            .map_err(|e| AegisError::Other(format!("prelude parse failed: {e}")))?;
+        let prelude_ast =
+            AstModule::parse("__aegis_prelude__", PRELUDE.to_string(), &Dialect::Standard)
+                .map_err(|e| AegisError::Other(format!("prelude parse failed: {e}")))?;
         let ast = AstModule::parse(script_name, source.to_string(), &Dialect::Standard)
             .map_err(|e| AegisError::Starlark(e.to_string()))?;
 
@@ -605,12 +640,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 // tainted bytes is a covert exfil channel (the
                 // attacker observes filesystem mutations to recover
                 // the secret). Refuse.
-                ctx.enforce_outbound_taint(
-                    "fs.delete",
-                    step,
-                    &summary,
-                    &[("path", path)],
-                )?;
+                ctx.enforce_outbound_taint("fs.delete", step, &summary, &[("path", path)])?;
                 ctx.require_confirm("fs.delete", summary)?;
                 let result = std::fs::remove_file(&resolved);
                 ctx.emit(AuditEvent::fs(
@@ -1147,10 +1177,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_env_read<'v>(
-        name: &str,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<String> {
+    fn _aegis_env_read<'v>(name: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("env.read")?;
         match ctx.policy.check_env_read(name) {
@@ -1181,4 +1208,3 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
 
 /// Re-export the path type used by [`AuditEvent`] helpers.
 pub use std::path::Path as AuditPath;
-

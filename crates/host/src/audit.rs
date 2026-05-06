@@ -106,13 +106,7 @@ impl AuditEvent {
         }
     }
 
-    pub fn env(
-        task_id: &str,
-        step: u32,
-        var_name: &str,
-        ok: bool,
-        err: Option<String>,
-    ) -> Self {
+    pub fn env(task_id: &str, step: u32, var_name: &str, ok: bool, err: Option<String>) -> Self {
         Self {
             ts: now_iso(),
             task_id: task_id.into(),
@@ -204,10 +198,7 @@ impl JsonlAuditSink {
     pub fn file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
         let (next_seq, last_hash) = resume_from_tail(&path);
-        let f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let f = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path: Some(path),
             inner: Mutex::new(ChainState {
@@ -253,10 +244,7 @@ impl AuditSink for JsonlAuditSink {
             return;
         };
         obj.insert("aegis_seq".into(), serde_json::json!(state.next_seq));
-        obj.insert(
-            "aegis_prev_hash".into(),
-            serde_json::json!(state.last_hash),
-        );
+        obj.insert("aegis_prev_hash".into(), serde_json::json!(state.last_hash));
         let Ok(line) = serde_json::to_string(&serde_json::Value::Object(obj)) else {
             return;
         };
@@ -314,6 +302,113 @@ impl VerifyReport {
     }
 }
 
+/// `AuditSink` that POSTs each event as a single JSON object to a
+/// configured HTTP endpoint. Used by `aegis-mcp --audit-url ...` so a
+/// fleet of agents emits its audit trail to a central server the
+/// developer's account can't write to.
+///
+/// Wire format: each `emit` does an HTTP `POST <url>` with
+/// `Content-Type: application/json` and body = `serde_json::to_string(&event)`.
+/// If `auth_token` is set it's sent as `Authorization: Bearer <token>`.
+///
+/// Failure mode (MVP): one retry on network / 5xx, then `eprintln!`
+/// and continue. Audit gaps ARE possible if the server is unreachable
+/// — documented honestly. Strict mode (block effecting calls when
+/// audit is unavailable) and offline buffering with a signed local
+/// queue are step-2 work.
+pub struct HttpAuditSink {
+    url: String,
+    agent: ureq::Agent,
+    auth_header: Option<String>,
+}
+
+impl HttpAuditSink {
+    /// `url` is the absolute audit endpoint. `auth_token` (when
+    /// present) is sent as a Bearer token. Each `emit` has a 2-second
+    /// total timeout — short on purpose, since this blocks the
+    /// effecting capability call. Aggressively timing out means a
+    /// stuck network only adds a few seconds to each affected call,
+    /// not a half-minute hang.
+    pub fn new(url: impl Into<String>, auth_token: Option<&str>) -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(2))
+            .build();
+        Self {
+            url: url.into(),
+            agent,
+            auth_header: auth_token.map(|t| format!("Bearer {t}")),
+        }
+    }
+
+    /// Send the event once; retry once on transient failure (5xx /
+    /// network). Returns Err if both attempts fail. Used by `emit`,
+    /// which converts the Err into a stderr log and continues.
+    fn try_post(&self, body: &str) -> Result<(), String> {
+        for attempt in 0..2 {
+            let mut req = self
+                .agent
+                .post(&self.url)
+                .set("Content-Type", "application/json");
+            if let Some(h) = &self.auth_header {
+                req = req.set("Authorization", h);
+            }
+            match req.send_string(body) {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if (200..300).contains(&status) {
+                        return Ok(());
+                    }
+                    // 4xx is operator misconfiguration (auth, wrong
+                    // URL, server doesn't accept this project) —
+                    // retrying won't fix it. Surface immediately.
+                    if (400..500).contains(&status) {
+                        return Err(format!(
+                            "audit POST {} returned {} on attempt {}",
+                            self.url,
+                            status,
+                            attempt + 1
+                        ));
+                    }
+                    // 5xx: retry once.
+                }
+                Err(ureq::Error::Status(code, _)) => {
+                    if (400..500).contains(&code) {
+                        return Err(format!(
+                            "audit POST {} returned {} on attempt {}",
+                            self.url,
+                            code,
+                            attempt + 1
+                        ));
+                    }
+                    // 5xx via Status(); retry.
+                }
+                Err(e) => {
+                    if attempt == 1 {
+                        return Err(format!("audit POST {} transport error: {}", self.url, e));
+                    }
+                    // First attempt: fall through to retry.
+                }
+            }
+        }
+        Err(format!("audit POST {} failed after retry", self.url))
+    }
+}
+
+impl AuditSink for HttpAuditSink {
+    fn emit(&self, event: AuditEvent) {
+        let Ok(body) = serde_json::to_string(&event) else {
+            eprintln!("aegis-mcp: audit event failed to serialise; dropping");
+            return;
+        };
+        if let Err(msg) = self.try_post(&body) {
+            // Audit gap. Log to stderr (which the host typically
+            // surfaces to the developer) so the failure is visible.
+            // Strict mode (refuse the call) is step-2 work.
+            eprintln!("aegis-mcp: {msg}; AUDIT GAP for this event");
+        }
+    }
+}
+
 /// Walk a JSONL audit log, recompute the SHA-256 chain, and report
 /// any line whose `aegis_prev_hash` doesn't match the SHA-256 of
 /// the previous line (or whose `aegis_seq` isn't monotonic +1).
@@ -359,10 +454,7 @@ pub fn verify_chain(path: &Path) -> std::io::Result<VerifyReport> {
                 continue;
             }
         };
-        let seq = value
-            .get("aegis_seq")
-            .and_then(|s| s.as_u64())
-            .unwrap_or(0);
+        let seq = value.get("aegis_seq").and_then(|s| s.as_u64()).unwrap_or(0);
         let claimed_prev = value
             .get("aegis_prev_hash")
             .and_then(|s| s.as_str())
@@ -371,9 +463,7 @@ pub fn verify_chain(path: &Path) -> std::io::Result<VerifyReport> {
             failures.push(VerifyFailure {
                 line_number,
                 seq: Some(seq),
-                reason: format!(
-                    "aegis_seq jump: expected {expected_seq}, got {seq}"
-                ),
+                reason: format!("aegis_seq jump: expected {expected_seq}, got {seq}"),
             });
         }
         if claimed_prev != prev_hash {

@@ -94,7 +94,10 @@ fn python_template_allows_python_toolchain() {
     let file = parse_and_resolve(&body);
     let allow = &file.subprocess.allow_commands;
     for required in ["python3", "pip", "pytest", "ruff"] {
-        assert!(allow.iter().any(|c| c == required), "python missing {required}");
+        assert!(
+            allow.iter().any(|c| c == required),
+            "python missing {required}"
+        );
     }
 }
 
@@ -104,7 +107,10 @@ fn node_template_allows_node_toolchain_and_blocks_publish() {
     let file = parse_and_resolve(&body);
     let allow = &file.subprocess.allow_commands;
     for required in ["node", "npm", "tsc", "eslint"] {
-        assert!(allow.iter().any(|c| c == required), "node missing {required}");
+        assert!(
+            allow.iter().any(|c| c == required),
+            "node missing {required}"
+        );
     }
     // npm publish should be blocked by default.
     let npm_args = file.subprocess.deny_args.get("npm").expect("npm deny_args");

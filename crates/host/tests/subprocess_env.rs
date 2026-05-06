@@ -18,12 +18,7 @@ fn runner_for(toml: &str) -> Runner {
 fn unique_var(prefix: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "AEGIS_SUBPROC_TEST_{}_{}_{}",
-        prefix,
-        std::process::id(),
-        n
-    )
+    format!("AEGIS_SUBPROC_TEST_{}_{}_{}", prefix, std::process::id(), n)
 }
 
 #[test]
@@ -191,7 +186,9 @@ print(out)
     // HOME would have a real value if the parent's env leaked
     // through; it should be empty.
     assert!(
-        joined.contains("HOME=\n") || joined.contains("HOME= ") || joined.trim_end().ends_with("HOME="),
+        joined.contains("HOME=\n")
+            || joined.contains("HOME= ")
+            || joined.trim_end().ends_with("HOME="),
         "HOME should be unset in the child (empty allow_vars), got: {joined:?}"
     );
 }
@@ -240,10 +237,10 @@ local_only_commands = ["secret-tool"]
     assert!(!secret.contains_key(&var_deny));
 
     // basename match works for absolute paths too.
-    let secret_abs: std::collections::HashMap<_, _> =
-        p.subprocess_env("/usr/local/bin/secret-tool")
-            .into_iter()
-            .collect();
+    let secret_abs: std::collections::HashMap<_, _> = p
+        .subprocess_env("/usr/local/bin/secret-tool")
+        .into_iter()
+        .collect();
     assert!(secret_abs.contains_key(&var_lo));
 
     for v in [&var_a, &var_b, &var_lo, &var_deny] {

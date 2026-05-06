@@ -5,9 +5,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use aegis_host::{
-    AegisError, ConfirmDecision, ConfirmHook, ConfirmRequest, Runner,
-};
+use aegis_host::{AegisError, ConfirmDecision, ConfirmHook, ConfirmRequest, Runner};
 use aegis_policy::{Policy, PolicyFile};
 
 struct Recording {
@@ -89,7 +87,11 @@ delete_allow = ["/tmp/aegis_confirm_test/**"]
     std::fs::write("/tmp/aegis_confirm_test/z", "").unwrap();
 
     let err = runner
-        .run("t", r#"fs.delete("/tmp/aegis_confirm_test/z")"#, "test.star")
+        .run(
+            "t",
+            r#"fs.delete("/tmp/aegis_confirm_test/z")"#,
+            "test.star",
+        )
         .unwrap_err();
     match err {
         AegisError::ConfirmDenied(cap) => assert_eq!(cap, "fs.delete"),
@@ -117,7 +119,11 @@ allow_commands = ["true"]
     let seen = hook.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0, "subprocess.exec");
-    assert!(seen[0].1.contains("true"), "summary should name the command: {:?}", seen[0]);
+    assert!(
+        seen[0].1.contains("true"),
+        "summary should name the command: {:?}",
+        seen[0]
+    );
 }
 
 #[test]

@@ -12,7 +12,6 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::thread;
 
 use aegis_host::Runner;
@@ -46,12 +45,11 @@ fn spawn_redirect_server(redirect_to: &'static str) -> u16 {
 #[test]
 fn redirect_to_internal_ip_does_not_silently_follow() {
     let port = spawn_redirect_server("http://10.0.0.1/internal");
-    let toml = format!(
-        r#"
+    let toml = r#"
 [network]
 http_get_allow = ["127.0.0.1"]
 "#
-    );
+    .to_string();
     let runner = runner_for(&toml);
     let src = format!(
         r#"out = net.http_get("http://127.0.0.1:{port}/maybe-redirect")
@@ -81,12 +79,11 @@ fn pure_policy_finalize_redirect_returns_error() {
     // We can't easily synthesize a ureq::Response without an actual
     // HTTP roundtrip, so this test goes through a local server.
     let port = spawn_redirect_server("https://elsewhere.example.com/x");
-    let toml = format!(
-        r#"
+    let toml = r#"
 [network]
 http_get_allow = ["127.0.0.1"]
 "#
-    );
+    .to_string();
     let runner = runner_for(&toml);
     let src = format!(r#"net.http_get("http://127.0.0.1:{port}/")"#);
     let err = runner.run("t", &src, "test.star").unwrap_err();

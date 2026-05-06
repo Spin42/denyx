@@ -18,6 +18,40 @@ use url::Url;
 
 pub mod presets;
 
+/// Environment-variable names reserved by the Aegis runtime itself
+/// for control-plane configuration (the bearer token used to fetch
+/// policies and post audit events; the policy and audit URLs).
+///
+/// These are denied to agent scripts **unconditionally** — no policy
+/// can grant `env.read` of any of these, and no `allow_vars` /
+/// `local_only_vars` entry can put any of them in a child process's
+/// environment. The deny lives in `Policy::check_env_read` and
+/// `Policy::subprocess_env`, so it applies regardless of inheritance,
+/// negation (e.g. `!AEGIS_AUTH_TOKEN`), or directly-authored allow
+/// lists.
+///
+/// The list is an explicit set rather than a prefix (`AEGIS_*`)
+/// because well-formed test fixtures, examples, and operator scripts
+/// legitimately use `AEGIS_*`-prefixed env var names that are NOT
+/// runtime credentials (e.g. `AEGIS_DEMO_SECRET` in the exfil probe).
+/// Restricting to a curated list keeps those flows working while
+/// closing the credential-exfiltration surface.
+pub const AEGIS_RESERVED_VAR_NAMES: &[&str] = &[
+    "AEGIS_AUTH_TOKEN",
+    "AEGIS_TOKEN",
+    "AEGIS_SERVER_TOKEN",
+    "AEGIS_JWT",
+    "AEGIS_API_KEY",
+    "AEGIS_POLICY_URL",
+    "AEGIS_AUDIT_URL",
+];
+
+/// Whether the given env var name is on the reserved list. See
+/// [`AEGIS_RESERVED_VAR_NAMES`] for the rationale.
+pub fn is_aegis_reserved_var(name: &str) -> bool {
+    AEGIS_RESERVED_VAR_NAMES.contains(&name)
+}
+
 #[derive(Debug, Error)]
 pub enum PolicyError {
     #[error("policy denies {action} on path {path:?}: {reason}")]
@@ -261,9 +295,7 @@ impl ToolRecord {
     /// Convenience: HTTP method as an uppercase &str, defaulting to
     /// "GET" when not declared.
     pub fn method(&self) -> &str {
-        self.backend_method
-            .as_deref()
-            .unwrap_or("GET")
+        self.backend_method.as_deref().unwrap_or("GET")
     }
 }
 
@@ -365,7 +397,6 @@ impl SandboxMode {
         }
     }
 }
-
 
 impl PolicyFile {
     pub fn from_toml_str(s: &str) -> Result<Self> {
@@ -518,18 +549,9 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
         name: over.name.or(base.name),
         description: over.description.or(base.description),
         filesystem: FilesystemPolicy {
-            read_allow: concat_dedup(
-                base.filesystem.read_allow,
-                over.filesystem.read_allow,
-            ),
-            write_allow: concat_dedup(
-                base.filesystem.write_allow,
-                over.filesystem.write_allow,
-            ),
-            delete_allow: concat_dedup(
-                base.filesystem.delete_allow,
-                over.filesystem.delete_allow,
-            ),
+            read_allow: concat_dedup(base.filesystem.read_allow, over.filesystem.read_allow),
+            write_allow: concat_dedup(base.filesystem.write_allow, over.filesystem.write_allow),
+            delete_allow: concat_dedup(base.filesystem.delete_allow, over.filesystem.delete_allow),
             local_only_read: concat_dedup(
                 base.filesystem.local_only_read,
                 over.filesystem.local_only_read,
@@ -537,18 +559,12 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
             deny: concat_dedup(base.filesystem.deny, over.filesystem.deny),
         },
         network: NetworkPolicy {
-            http_get_allow: concat_dedup(
-                base.network.http_get_allow,
-                over.network.http_get_allow,
-            ),
+            http_get_allow: concat_dedup(base.network.http_get_allow, over.network.http_get_allow),
             http_post_allow: concat_dedup(
                 base.network.http_post_allow,
                 over.network.http_post_allow,
             ),
-            http_put_allow: concat_dedup(
-                base.network.http_put_allow,
-                over.network.http_put_allow,
-            ),
+            http_put_allow: concat_dedup(base.network.http_put_allow, over.network.http_put_allow),
             http_patch_allow: concat_dedup(
                 base.network.http_patch_allow,
                 over.network.http_patch_allow,
@@ -563,17 +579,14 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
                 base.network.local_only_hosts,
                 over.network.local_only_hosts,
             ),
-            timeout_seconds: over.network.timeout_seconds.or(base.network.timeout_seconds),
+            timeout_seconds: over
+                .network
+                .timeout_seconds
+                .or(base.network.timeout_seconds),
         },
         environment: EnvironmentPolicy {
-            allow_vars: concat_dedup(
-                base.environment.allow_vars,
-                over.environment.allow_vars,
-            ),
-            deny_vars: concat_dedup(
-                base.environment.deny_vars,
-                over.environment.deny_vars,
-            ),
+            allow_vars: concat_dedup(base.environment.allow_vars, over.environment.allow_vars),
+            deny_vars: concat_dedup(base.environment.deny_vars, over.environment.deny_vars),
             local_only_vars: concat_dedup(
                 base.environment.local_only_vars,
                 over.environment.local_only_vars,
@@ -691,8 +704,8 @@ impl Policy {
     /// pattern resolution. `root` is also where relative path
     /// arguments at runtime are resolved against.
     pub fn load_with_root(path: &Path, root: PathBuf) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("read policy file {path:?}"))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("read policy file {path:?}"))?;
         let file = PolicyFile::from_toml_str(&raw)?.resolve_inheritance()?;
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         let policy = Self::from_file(file, root)?;
@@ -839,8 +852,7 @@ impl Policy {
 
     pub fn from_file(file: PolicyFile, root: PathBuf) -> Result<Self> {
         let fs_read = PathMatcher::build(&root, &file.filesystem.read_allow)?;
-        let fs_local_only_read =
-            PathMatcher::build(&root, &file.filesystem.local_only_read)?;
+        let fs_local_only_read = PathMatcher::build(&root, &file.filesystem.local_only_read)?;
         let fs_write = PathMatcher::build(&root, &file.filesystem.write_allow)?;
         let fs_delete = PathMatcher::build(&root, &file.filesystem.delete_allow)?;
         let fs_deny = PathMatcher::build(&root, &file.filesystem.deny)?;
@@ -917,15 +929,19 @@ impl Policy {
     /// Edit, WebFetch, WebSearch...) and want a yes/no plus the full
     /// [`ToolRecord`] (capabilities + routing hints) to act on.
     pub fn check_tool(&self, name: &str) -> Result<&ToolRecord, PolicyError> {
-        let record = self.tools.get(name).ok_or_else(|| PolicyError::ToolDenied {
-            name: name.to_string(),
-            reason: "tool not declared in [tools]".into(),
-        })?;
-        for cap in &record.capabilities {
-            self.check_function(cap).map_err(|e| PolicyError::ToolDenied {
+        let record = self
+            .tools
+            .get(name)
+            .ok_or_else(|| PolicyError::ToolDenied {
                 name: name.to_string(),
-                reason: format!("required capability {cap:?} not allowed: {e}"),
+                reason: "tool not declared in [tools]".into(),
             })?;
+        for cap in &record.capabilities {
+            self.check_function(cap)
+                .map_err(|e| PolicyError::ToolDenied {
+                    name: name.to_string(),
+                    reason: format!("required capability {cap:?} not allowed: {e}"),
+                })?;
         }
         Ok(record)
     }
@@ -956,7 +972,7 @@ impl Policy {
     /// allowlist; populating a resource section is the declaration of
     /// intent.
     pub fn check_function(&self, name: &str) -> Result<(), PolicyError> {
-        if self.fn_derived.iter().any(|f| *f == name) {
+        if self.fn_derived.contains(&name) {
             return Ok(());
         }
         Err(PolicyError::FunctionDenied {
@@ -977,7 +993,7 @@ impl Policy {
     /// ("what can my agent actually do?") and for hosts that want to
     /// surface the effective permission set.
     pub fn effective_functions(&self) -> Vec<&str> {
-        self.fn_derived.iter().copied().collect()
+        self.fn_derived.to_vec()
     }
 
     pub fn check_fs_read(&self, path: &Path) -> Result<PathBuf, PolicyError> {
@@ -1008,8 +1024,7 @@ impl Policy {
         // is readable but the value will be tainted). Writes and
         // deletes have no local-only equivalent.
         let permitted = allow.is_match(&resolved)
-            || (matches!(action, FsAction::Read)
-                && self.fs_local_only_read.is_match(&resolved));
+            || (matches!(action, FsAction::Read) && self.fs_local_only_read.is_match(&resolved));
         if !permitted {
             return Err(PolicyError::PathDenied {
                 action: action.as_str(),
@@ -1106,6 +1121,25 @@ impl Policy {
     }
 
     pub fn check_env_read(&self, name: &str) -> Result<(), PolicyError> {
+        // Runtime invariant: a fixed list of variable names is
+        // reserved for the runtime itself (AEGIS_AUTH_TOKEN,
+        // AEGIS_POLICY_URL, AEGIS_AUDIT_URL, and a few aliases for
+        // the bearer token). These MUST NOT be readable by an agent
+        // script under any policy. The check fires BEFORE any
+        // allow_vars / local_only_vars / negation logic — there is no
+        // way for an inherited or user-authored policy to undo this.
+        // A `!AEGIS_AUTH_TOKEN` negation in a user file removes the
+        // entry from `deny_vars` but cannot reach this hard-coded
+        // gate. See [`AEGIS_RESERVED_VAR_NAMES`].
+        if is_aegis_reserved_var(name) {
+            return Err(PolicyError::EnvDenied {
+                name: name.to_string(),
+                reason: "name is on the reserved-variable list (Aegis runtime \
+                         control-plane credentials); cannot be read by agent \
+                         scripts under any policy"
+                    .into(),
+            });
+        }
         if self.env_deny.iter().any(|n| n == name) {
             return Err(PolicyError::EnvDenied {
                 name: name.to_string(),
@@ -1207,6 +1241,13 @@ impl Policy {
         }
         let mut out = Vec::with_capacity(names.len());
         for name in names {
+            // Runtime invariant: same as check_env_read — reserved
+            // names are never propagated to children, even if a
+            // policy somehow lists them in allow_vars / local_only_vars.
+            // See [`AEGIS_RESERVED_VAR_NAMES`].
+            if is_aegis_reserved_var(name) {
+                continue;
+            }
             if self.env_deny.iter().any(|d| d == name) {
                 continue;
             }
@@ -1254,11 +1295,7 @@ impl Policy {
     /// - `--clearenv` then `--setenv` per declared var (mirrors the
     ///   existing env_clear() filter — the bwrap pass is also
     ///   responsible for env scoping when this mode is on).
-    pub fn bwrap_argv(
-        &self,
-        user_argv: &[String],
-        env: &[(String, String)],
-    ) -> Vec<String> {
+    pub fn bwrap_argv(&self, user_argv: &[String], env: &[(String, String)]) -> Vec<String> {
         let mut a: Vec<String> = vec!["bwrap".into()];
 
         // System dirs needed for the child to exec at all.
@@ -1287,14 +1324,10 @@ impl Policy {
         a.push("/dev".into());
 
         // Read-side bind mounts derived from policy patterns.
-        let read_paths = collect_concrete_prefixes(
-            &self.root,
-            &self.file.filesystem.read_allow,
-        );
-        for p in read_paths.iter().chain(collect_concrete_prefixes(
-            &self.root,
-            &self.file.filesystem.local_only_read,
-        ).iter()) {
+        let read_paths = collect_concrete_prefixes(&self.root, &self.file.filesystem.read_allow);
+        for p in read_paths.iter().chain(
+            collect_concrete_prefixes(&self.root, &self.file.filesystem.local_only_read).iter(),
+        ) {
             if let Some(s) = p.to_str() {
                 a.push("--ro-bind-try".into());
                 a.push(s.into());
@@ -1303,14 +1336,11 @@ impl Policy {
         }
 
         // Write-side: write_allow + delete_allow.
-        let write_paths = collect_concrete_prefixes(
-            &self.root,
-            &self.file.filesystem.write_allow,
-        );
-        for p in write_paths.iter().chain(collect_concrete_prefixes(
-            &self.root,
-            &self.file.filesystem.delete_allow,
-        ).iter()) {
+        let write_paths = collect_concrete_prefixes(&self.root, &self.file.filesystem.write_allow);
+        for p in write_paths
+            .iter()
+            .chain(collect_concrete_prefixes(&self.root, &self.file.filesystem.delete_allow).iter())
+        {
             if let Some(s) = p.to_str() {
                 a.push("--bind-try".into());
                 a.push(s.into());
@@ -1473,10 +1503,7 @@ impl Policy {
     ///   access to those env vars (`[environment].allow_vars`
     ///   filtering already covers env; stdin is the operator's
     ///   problem).
-    pub fn check_subprocess_argv_paths(
-        &self,
-        argv: &[String],
-    ) -> Result<(), PolicyError> {
+    pub fn check_subprocess_argv_paths(&self, argv: &[String]) -> Result<(), PolicyError> {
         if argv.len() < 2 {
             return Ok(());
         }
@@ -1607,8 +1634,7 @@ impl PathMatcher {
         let mut builder = GlobSetBuilder::new();
         for raw in patterns {
             let translated = translate_pattern(root, raw);
-            let glob = Glob::new(&translated)
-                .with_context(|| format!("policy pattern {raw:?}"))?;
+            let glob = Glob::new(&translated).with_context(|| format!("policy pattern {raw:?}"))?;
             builder.add(glob);
         }
         Ok(Self {
@@ -1629,8 +1655,7 @@ impl HostMatcher {
     fn build(patterns: &[String]) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
         for raw in patterns {
-            let glob = Glob::new(raw)
-                .with_context(|| format!("policy host pattern {raw:?}"))?;
+            let glob = Glob::new(raw).with_context(|| format!("policy host pattern {raw:?}"))?;
             builder.add(glob);
         }
         Ok(Self {
@@ -1809,7 +1834,7 @@ fn concrete_prefix_of(raw: &str) -> Option<&str> {
     // the time this runs, merge has already consumed them, but if
     // someone calls with a raw list, behave sensibly).
     let raw = raw.strip_prefix('!').unwrap_or(raw);
-    let glob_at = raw.find(|c: char| matches!(c, '*' | '?' | '[' | '{'));
+    let glob_at = raw.find(['*', '?', '[', '{']);
     let head = match glob_at {
         Some(p) => &raw[..p],
         None => raw,
@@ -1942,4 +1967,3 @@ fn canonicalize_with_unresolved_tail(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
-

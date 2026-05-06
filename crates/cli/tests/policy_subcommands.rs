@@ -38,10 +38,17 @@ read_allow = ["src/**"]
         .arg(&path)
         .output()
         .expect("spawn aegis");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("OK:"), "{stdout}");
-    assert!(stdout.contains("1 capability"), "expected derivation count: {stdout}");
+    assert!(
+        stdout.contains("1 capability"),
+        "expected derivation count: {stdout}"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -113,7 +120,11 @@ max_seconds = 30
         .arg(&path)
         .output()
         .expect("spawn aegis");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     // Effective capabilities derived from populated sections.
@@ -177,9 +188,16 @@ inherits = "secure-defaults"
         .arg(&path)
         .output()
         .expect("spawn aegis");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     // No effective capabilities (preset has only deny lists).
-    assert!(stdout.contains("(none"), "expected empty-cap notice: {stdout}");
+    assert!(
+        stdout.contains("(none"),
+        "expected empty-cap notice: {stdout}"
+    );
     let _ = std::fs::remove_file(&path);
 }

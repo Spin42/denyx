@@ -33,10 +33,32 @@ impl Rng {
 
 fn synthesize_glob(rng: &mut Rng) -> String {
     let parts: &[&str] = &[
-        "**", "*", "?", "[a-z]", "[!a-z]", "[]", "{a,b}", "{,}",
-        "src", "tests", "lib", "x", "..", ".",
-        "/", "/**/", "**/*.rs", ".env", "/tmp/", "deeply/nested/path",
-        "\\", "/\\/", "[", "]", "{", "}",
+        "**",
+        "*",
+        "?",
+        "[a-z]",
+        "[!a-z]",
+        "[]",
+        "{a,b}",
+        "{,}",
+        "src",
+        "tests",
+        "lib",
+        "x",
+        "..",
+        ".",
+        "/",
+        "/**/",
+        "**/*.rs",
+        ".env",
+        "/tmp/",
+        "deeply/nested/path",
+        "\\",
+        "/\\/",
+        "[",
+        "]",
+        "{",
+        "}",
     ];
     let mut s = String::new();
     let n = rng.gen_range(8) + 1;
@@ -51,8 +73,8 @@ fn synthesize_glob(rng: &mut Rng) -> String {
 
 fn synthesize_path(rng: &mut Rng) -> String {
     let parts: &[&str] = &[
-        "src", "tests", "lib", ".env", "secret",
-        "..", ".", "/", "tmp", "rs", "py", "deeply", "nested",
+        "src", "tests", "lib", ".env", "secret", "..", ".", "/", "tmp", "rs", "py", "deeply",
+        "nested",
     ];
     let mut s = String::new();
     let n = rng.gen_range(6) + 1;
@@ -89,6 +111,8 @@ fn synthesize_toml(rng: &mut Rng) -> String {
 
 #[test]
 fn parser_and_matchers_do_not_panic_on_random_input() {
+    // Seeds use memorable hex words; uneven digit groups are intentional.
+    #[allow(clippy::unusual_byte_groupings)]
     let mut rng = Rng::new(0xC0FF_EE_DEAD_BEEF);
     for i in 0..50_000 {
         let toml = synthesize_toml(&mut rng);
@@ -112,9 +136,7 @@ fn parser_and_matchers_do_not_panic_on_random_input() {
         // Also re-resolve idempotently: parsing + resolution twice on
         // the same input yields the same allow/deny decision.
         let file2 = PolicyFile::from_toml_str(&toml).unwrap();
-        if let Ok(policy2) =
-            Policy::from_file(file2, PathBuf::from("/tmp/aegis_fuzz_stable"))
-        {
+        if let Ok(policy2) = Policy::from_file(file2, PathBuf::from("/tmp/aegis_fuzz_stable")) {
             let r1 = policy.check_fs_read(p).is_ok();
             let r2 = policy2.check_fs_read(p).is_ok();
             assert_eq!(
@@ -129,6 +151,7 @@ fn parser_and_matchers_do_not_panic_on_random_input() {
 fn parser_does_not_panic_on_random_bytes() {
     // Byte-level: feed mostly-junk to the TOML parser. We expect most
     // of these to fail to parse, but no panic must occur.
+    #[allow(clippy::unusual_byte_groupings)]
     let mut rng = Rng::new(0xFEED_BAD_C0DE);
     for _ in 0..50_000 {
         let len = rng.gen_range(512);

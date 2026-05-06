@@ -90,7 +90,10 @@ read_allow = ["{abs}/src/**"]
 "#
     );
     let runner = runner_for(&toml, root.clone());
-    let path_lit = root.join("src/link.txt").to_string_lossy().replace('\\', "/");
+    let path_lit = root
+        .join("src/link.txt")
+        .to_string_lossy()
+        .replace('\\', "/");
     let src = format!(
         r#"x = fs.read("{path_lit}")
 print(x)
@@ -146,7 +149,10 @@ write_allow = ["{abs}/build/**"]
     );
     // Confirm the outside file wasn't actually overwritten.
     let outside_content = std::fs::read_to_string(&outside_target).unwrap();
-    assert_eq!(outside_content, "", "outside file should not have been touched");
+    assert_eq!(
+        outside_content, "",
+        "outside file should not have been touched"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside_dir);
@@ -169,7 +175,10 @@ write_allow = ["{abs}/build/**"]
 "#
     );
     let runner = runner_for(&toml, root.clone());
-    let path_lit = root.join("build/new.txt").to_string_lossy().replace('\\', "/");
+    let path_lit = root
+        .join("build/new.txt")
+        .to_string_lossy()
+        .replace('\\', "/");
     let src = format!(
         r#"fs.write("{path_lit}", "ok")
 "#

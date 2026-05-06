@@ -16,6 +16,39 @@ permissions:
   contents: read
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Cosmetic gates. Cheap; run in parallel with build+test. Either
+  # blocks the merge when broken — drift here is mechanically fixable
+  # (`cargo fmt --all`, `cargo clippy --fix --workspace --all-targets`)
+  # so keeping them tight is low-cost.
+  # ─────────────────────────────────────────────────────────────────
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `-D warnings` makes any new clippy warning a build failure.
+      # The current tree is clippy-clean as of the introduction of
+      # this gate; new warnings should fail loud rather than rot.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # ─────────────────────────────────────────────────────────────────
   # Build + test the Rust workspace. Scope: pure-cargo work that runs
   # in process (the 4 crates' unit + integration tests, plus the
   # stable randomized fuzz sweep). Out of scope by design: the Python
@@ -23,6 +56,7 @@ jobs:
   # `claude` and Ollama and would burn budget / require a local
   # model server) and anything else that depends on cloud-API
   # credentials.
+  # ─────────────────────────────────────────────────────────────────
   test:
     name: Build & test (cargo)
     runs-on: ubuntu-latest
@@ -51,3 +85,59 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked --no-fail-fast --verbose
+
+  # ─────────────────────────────────────────────────────────────────
+  # Coverage. Same shape as the test job but instrumented; runs only
+  # if test passed (no point measuring coverage on a broken tree).
+  # The threshold is a configurable floor — if it drops below the
+  # minimum, the job fails and surfaces the regression at PR time.
+  # Currently set at 80% lines; the v0.1 baseline is 83%, leaving a
+  # bit of headroom for refactors.
+  # ─────────────────────────────────────────────────────────────────
+  coverage:
+    name: cargo llvm-cov
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bubblewrap
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage (LCOV + summary)
+        run: |
+          cargo llvm-cov --workspace --locked --no-fail-fast --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only --json > coverage.json
+      - name: Enforce minimum coverage
+        # Fail the job if total line coverage drops below the floor.
+        # Adjust LINE_COV_FLOOR up over time as the project matures.
+        env:
+          LINE_COV_FLOOR: "80"
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          floor = float(os.environ["LINE_COV_FLOOR"])
+          with open("coverage.json") as f:
+              data = json.load(f)
+          total = data["data"][0]["totals"]["lines"]["percent"]
+          print(f"Total line coverage: {total:.2f}% (floor: {floor:.2f}%)")
+          if total < floor:
+              print(f"::error::Coverage {total:.2f}% is below the {floor}% floor", file=sys.stderr)
+              sys.exit(1)
+          PY
+      - name: Upload coverage artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: |
+            lcov.info
+            coverage.json
+          retention-days: 14

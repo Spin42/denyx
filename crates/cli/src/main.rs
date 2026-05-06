@@ -33,7 +33,11 @@ use clap::{Parser, Subcommand};
 use crate::init::Lang;
 
 #[derive(Parser, Debug)]
-#[command(name = "aegis", version, about = "Run Starlark agent scripts under capability-typed policy")]
+#[command(
+    name = "aegis",
+    version,
+    about = "Run Starlark agent scripts under capability-typed policy"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -256,7 +260,10 @@ fn policy_show(args: PolicyTargetArgs) -> Result<(), CliError> {
     println!();
 
     print_section_list("[filesystem].read_allow", &file.filesystem.read_allow);
-    print_section_list("[filesystem].local_only_read", &file.filesystem.local_only_read);
+    print_section_list(
+        "[filesystem].local_only_read",
+        &file.filesystem.local_only_read,
+    );
     print_section_list("[filesystem].write_allow", &file.filesystem.write_allow);
     print_section_list("[filesystem].delete_allow", &file.filesystem.delete_allow);
     print_section_list("[filesystem].deny", &file.filesystem.deny);
@@ -265,7 +272,10 @@ fn policy_show(args: PolicyTargetArgs) -> Result<(), CliError> {
     print_section_list("[network].http_post_allow", &file.network.http_post_allow);
     print_section_list("[network].http_put_allow", &file.network.http_put_allow);
     print_section_list("[network].http_patch_allow", &file.network.http_patch_allow);
-    print_section_list("[network].http_delete_allow", &file.network.http_delete_allow);
+    print_section_list(
+        "[network].http_delete_allow",
+        &file.network.http_delete_allow,
+    );
     print_section_list("[network].local_only_hosts", &file.network.local_only_hosts);
     print_section_list("[network].deny_hosts", &file.network.deny_hosts);
     print_section_list("[network].deny_ips", &file.network.deny_ips);
@@ -277,7 +287,10 @@ fn policy_show(args: PolicyTargetArgs) -> Result<(), CliError> {
     );
     print_section_list("[environment].deny_vars", &file.environment.deny_vars);
 
-    print_section_list("[subprocess].allow_commands", &file.subprocess.allow_commands);
+    print_section_list(
+        "[subprocess].allow_commands",
+        &file.subprocess.allow_commands,
+    );
     print_section_list(
         "[subprocess].local_only_commands",
         &file.subprocess.local_only_commands,
@@ -362,8 +375,9 @@ fn init_cmd(args: InitArgs) -> Result<(), CliError> {
 
 fn run(args: RunArgs) -> Result<(), CliError> {
     let policy = match args.policy.as_deref() {
-        Some(path) => Policy::load(path)
-            .map_err(|e| CliError::Other(format!("load policy {path:?}: {e}")))?,
+        Some(path) => {
+            Policy::load(path).map_err(|e| CliError::Other(format!("load policy {path:?}: {e}")))?
+        }
         None => {
             print_no_policy_banner();
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -372,15 +386,13 @@ fn run(args: RunArgs) -> Result<(), CliError> {
         }
     };
     let script = std::fs::read_to_string(&args.script)?;
-    let task_id = args
-        .task_id
-        .unwrap_or_else(|| {
-            args.script
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("script.star")
-                .to_string()
-        });
+    let task_id = args.task_id.unwrap_or_else(|| {
+        args.script
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("script.star")
+            .to_string()
+    });
 
     let audit: Arc<dyn AuditSink> = match &args.audit_log {
         Some(path) => {
@@ -390,9 +402,9 @@ fn run(args: RunArgs) -> Result<(), CliError> {
             // hash-chain prev_hash values for forged appends. The
             // self-writable guard's audit-log sibling.
             let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            policy
-                .guard_audit_log(&canon)
-                .map_err(|e| CliError::Other(format!("audit-log path is reachable to the agent: {e}")))?;
+            policy.guard_audit_log(&canon).map_err(|e| {
+                CliError::Other(format!("audit-log path is reachable to the agent: {e}"))
+            })?;
             Arc::new(JsonlAuditSink::file(path)?)
         }
         None => Arc::new(JsonlAuditSink::stderr()),

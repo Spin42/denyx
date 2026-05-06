@@ -123,7 +123,10 @@ print("PREFIX[" + k + "]SUFFIX")
     );
     let outcome = runner.run("t-concat", &src, "test.star").unwrap();
     let joined = outcome.printed.join("\n");
-    assert!(!joined.contains(secret_value), "leaked via concat: {joined}");
+    assert!(
+        !joined.contains(secret_value),
+        "leaked via concat: {joined}"
+    );
     assert!(joined.contains("PREFIX["));
     assert!(joined.contains("]SUFFIX"));
     assert!(joined.contains("[REDACTED]"));
@@ -170,9 +173,9 @@ fs.write("{path_lit}", k)
 print("after_write")
 "#
     );
-    let err = runner.run("t-rt", &src, "test.star").expect_err(
-        "fs.write of tainted content to a non-local-only path must be denied",
-    );
+    let err = runner
+        .run("t-rt", &src, "test.star")
+        .expect_err("fs.write of tainted content to a non-local-only path must be denied");
     let msg = format!("{err}");
     assert!(msg.contains("tainted"), "error should mention taint: {msg}");
     assert!(
@@ -193,15 +196,14 @@ fn subprocess_local_only_command_redacts_stdout() {
     // `printf` is a portable subprocess. We mark it local-only and
     // assert its stdout is redacted in the printed output.
     let secret_value = "subproc-stdout-secret-token-MNOP4321";
-    let toml = format!(
-        r#"
+    let toml = r#"
 [subprocess]
 local_only_commands = ["printf"]
 
 [functions]
 allow = ["subprocess.exec"]
 "#
-    );
+    .to_string();
     let runner = runner_for(&toml, std::env::temp_dir());
     // printf "%s" "<secret>" — bare printf doesn't add a trailing
     // newline, so stdout is exactly the secret.
@@ -245,7 +247,10 @@ print("v=", k)
     );
     let outcome = runner.run("t-plain", &src, "test.star").unwrap();
     let joined = outcome.printed.join(" ");
-    assert!(joined.contains(value), "plain value should pass through: {joined}");
+    assert!(
+        joined.contains(value),
+        "plain value should pass through: {joined}"
+    );
     assert!(!joined.contains("[REDACTED]"));
 
     std::env::remove_var(var);

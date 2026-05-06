@@ -138,7 +138,10 @@ fn cidr_blocks_rfc1918_range() {
     for ip in ["10.0.0.1", "10.0.0.255", "10.255.255.255"] {
         let url = format!("https://{ip}/admin");
         let err = p.check_http_get(&url).unwrap_err().to_string();
-        assert!(err.contains("deny_ips"), "expected CIDR rejection for {ip}, got: {err}");
+        assert!(
+            err.contains("deny_ips"),
+            "expected CIDR rejection for {ip}, got: {err}"
+        );
     }
 }
 
@@ -273,17 +276,13 @@ fn deny_args_single_token_pattern() {
     assert!(p
         .check_subprocess_args(&argv(&["rails", "db:drop"]))
         .is_err());
-    assert!(p
-        .check_subprocess_args(&argv(&["rails", "server"]))
-        .is_ok());
+    assert!(p.check_subprocess_args(&argv(&["rails", "server"])).is_ok());
 }
 
 #[test]
 fn deny_args_command_with_no_entry_is_allowed() {
     let p = deny_args_policy();
-    assert!(p
-        .check_subprocess_args(&argv(&["npm", "publish"]))
-        .is_ok());
+    assert!(p.check_subprocess_args(&argv(&["npm", "publish"])).is_ok());
 }
 
 #[test]
@@ -400,11 +399,7 @@ allow = ["net.http_get"]
         .resolve_inheritance()
         .unwrap();
     assert!(!file.network.deny_ips.iter().any(|p| p == "127.0.0.0/8"));
-    assert!(file
-        .network
-        .deny_ips
-        .iter()
-        .any(|p| p == "169.254.0.0/16"));
+    assert!(file.network.deny_ips.iter().any(|p| p == "169.254.0.0/16"));
     let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
     assert!(p.check_resolved_ip("http_get", "localhost", ip).is_ok());
@@ -430,11 +425,7 @@ allow = ["fs.read"]
         .unwrap()
         .resolve_inheritance()
         .unwrap();
-    assert!(!file
-        .filesystem
-        .deny
-        .iter()
-        .any(|p| p.starts_with('!')));
+    assert!(!file.filesystem.deny.iter().any(|p| p.starts_with('!')));
 }
 
 #[test]
@@ -566,7 +557,10 @@ backend_url  = "https://api.duckduckgo.com/?format=json&q="
     assert_eq!(read.capabilities, vec!["fs.read".to_string()]);
     assert!(read.backend_url.is_none());
     let ws = p.check_tool("WebSearch").unwrap();
-    assert_eq!(ws.backend_url.as_deref(), Some("https://api.duckduckgo.com/?format=json&q="));
+    assert_eq!(
+        ws.backend_url.as_deref(),
+        Some("https://api.duckduckgo.com/?format=json&q=")
+    );
 }
 
 #[test]
@@ -628,7 +622,10 @@ backend_url  = "https://api.duckduckgo.com/?format=json&q="
     assert!(p.check_tool("WebSearch").is_err());
     // tool_routing still returns the record.
     let ws = p.tool_routing("WebSearch").unwrap();
-    assert_eq!(ws.backend_url.as_deref(), Some("https://api.duckduckgo.com/?format=json&q="));
+    assert_eq!(
+        ws.backend_url.as_deref(),
+        Some("https://api.duckduckgo.com/?format=json&q=")
+    );
 }
 
 #[test]
@@ -698,7 +695,10 @@ read_allow = ["src/**", "/tmp/**"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
-    assert!(p.check_function("fs.read").is_ok(), "fs.read should auto-derive");
+    assert!(
+        p.check_function("fs.read").is_ok(),
+        "fs.read should auto-derive"
+    );
     // Other capabilities NOT auto-derived because their sections are empty.
     assert!(p.check_function("fs.write").is_err());
     assert!(p.check_function("subprocess.exec").is_err());
@@ -880,10 +880,7 @@ fn explicit_deny_on_policy_file_satisfies_the_guard() {
     // file is a sound pattern — runtime enforcement honors deny-wins,
     // and the guard probes via the real check_fs_* methods, so it
     // sees the file as not writable and lets the policy load.
-    let path = write_temp_policy(
-        "aegis.toml",
-        "PLACEHOLDER",
-    );
+    let path = write_temp_policy("aegis.toml", "PLACEHOLDER");
     // Substitute the actual path into the deny entry so the match is
     // exact regardless of where the temp directory lives.
     let abs = path.to_string_lossy().replace('\\', "/");
@@ -947,15 +944,22 @@ allow = ["fs.read", "fs.write"]
     // Relative `src/**` resolves under the policy's own dir.
     let rel_hit = policy_dir.join("src/main.rs");
     assert!(policy.check_fs_read(&rel_hit).is_ok(), "relative src/**");
-    assert!(policy.check_fs_write(&rel_hit).is_ok(), "relative src/** writable");
+    assert!(
+        policy.check_fs_write(&rel_hit).is_ok(),
+        "relative src/** writable"
+    );
 
     // Absolute `/tmp/**` works regardless of policy location.
-    assert!(policy
-        .check_fs_read(Path::new("/tmp/anything"))
-        .is_ok(), "absolute /tmp/**");
-    assert!(policy
-        .check_fs_write(Path::new("/tmp/aegis_demo/out.txt"))
-        .is_ok(), "absolute write");
+    assert!(
+        policy.check_fs_read(Path::new("/tmp/anything")).is_ok(),
+        "absolute /tmp/**"
+    );
+    assert!(
+        policy
+            .check_fs_write(Path::new("/tmp/aegis_demo/out.txt"))
+            .is_ok(),
+        "absolute write"
+    );
 
     // Non-allowed paths still fail.
     assert!(policy

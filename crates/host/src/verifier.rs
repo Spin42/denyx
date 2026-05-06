@@ -118,4 +118,3 @@ fn strip_strings_and_comments(src: &str) -> String {
     }
     String::from_utf8(out).unwrap_or_default()
 }
-

@@ -83,10 +83,8 @@ fn drive_aegis_run(policy: &PathBuf, confirm_mode: &str, script: &str) -> serde_
 
 #[test]
 fn auto_allow_lets_confirm_gated_call_through() {
-    let dir_for_writes = std::env::temp_dir().join(format!(
-        "aegis_mcp_writes_{}_a",
-        std::process::id()
-    ));
+    let dir_for_writes =
+        std::env::temp_dir().join(format!("aegis_mcp_writes_{}_a", std::process::id()));
     std::fs::create_dir_all(&dir_for_writes).unwrap();
     let abs = dir_for_writes.to_string_lossy().replace('\\', "/");
     let body = format!(
@@ -114,10 +112,8 @@ write_allow = ["{abs}/**"]
 
 #[test]
 fn auto_deny_blocks_confirm_gated_call_with_tagged_error() {
-    let dir_for_writes = std::env::temp_dir().join(format!(
-        "aegis_mcp_writes_{}_d",
-        std::process::id()
-    ));
+    let dir_for_writes =
+        std::env::temp_dir().join(format!("aegis_mcp_writes_{}_d", std::process::id()));
     std::fs::create_dir_all(&dir_for_writes).unwrap();
     let abs = dir_for_writes.to_string_lossy().replace('\\', "/");
     let body = format!(

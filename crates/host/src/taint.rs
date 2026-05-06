@@ -112,8 +112,11 @@ impl TaintEntry {
     /// arg-side check fires so the operator can see *how* the
     /// value was disguised.
     fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        std::iter::once(("original", self.original.as_str()))
-            .chain(self.transforms.iter().map(|(n, v)| (n.as_str(), v.as_str())))
+        std::iter::once(("original", self.original.as_str())).chain(
+            self.transforms
+                .iter()
+                .map(|(n, v)| (n.as_str(), v.as_str())),
+        )
     }
 }
 
@@ -201,14 +204,8 @@ fn compute_transforms(value: &str) -> Vec<(String, String)> {
                     out.push((format!("xor_0x{:02x}", k), s));
                 }
             }
-            out.push((
-                format!("xor_0x{:02x}_hex_lower", k),
-                hex_lower_of(&xored),
-            ));
-            out.push((
-                format!("xor_0x{:02x}_hex_upper", k),
-                hex_upper_of(&xored),
-            ));
+            out.push((format!("xor_0x{:02x}_hex_lower", k), hex_lower_of(&xored)));
+            out.push((format!("xor_0x{:02x}_hex_upper", k), hex_upper_of(&xored)));
         }
     }
 
@@ -259,7 +256,7 @@ const B64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 const B64_URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 fn b64_encode(input: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
         let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
@@ -336,7 +333,11 @@ impl TaintRegistry {
     /// module — call sites should use `redaction_snapshot()`.
     #[cfg(test)]
     pub(crate) fn originals_snapshot(&self) -> Vec<String> {
-        self.inner.borrow().iter().map(|e| e.original.clone()).collect()
+        self.inner
+            .borrow()
+            .iter()
+            .map(|e| e.original.clone())
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -443,7 +444,12 @@ pub fn redact_lines(lines: Vec<String>, registry: &TaintRegistry) -> Vec<String>
     // the transforms (reverse, hex, xor) are caught by per-line
     // substring; chunking specifically targets char-by-char prints
     // of the unmodified secret.
-    let originals: Vec<String> = registry.inner.borrow().iter().map(|e| e.original.clone()).collect();
+    let originals: Vec<String> = registry
+        .inner
+        .borrow()
+        .iter()
+        .map(|e| e.original.clone())
+        .collect();
 
     // Precompute line spans in the joined buffer so we can map matched
     // byte indexes back to line indexes without rescanning.
@@ -465,7 +471,11 @@ pub fn redact_lines(lines: Vec<String>, registry: &TaintRegistry) -> Vec<String>
         let Some(matches) = subsequence_match(&joined, taint) else {
             continue;
         };
-        let span = matches.last().unwrap().saturating_sub(*matches.first().unwrap()).max(1);
+        let span = matches
+            .last()
+            .unwrap()
+            .saturating_sub(*matches.first().unwrap())
+            .max(1);
         let density = matches.len() as f64 / span as f64;
         if density < CHUNKING_MIN_DENSITY {
             continue;
@@ -487,7 +497,13 @@ pub fn redact_lines(lines: Vec<String>, registry: &TaintRegistry) -> Vec<String>
     scrubbed
         .into_iter()
         .enumerate()
-        .map(|(i, line)| if clobber[i] { REDACTED.to_string() } else { line })
+        .map(|(i, line)| {
+            if clobber[i] {
+                REDACTED.to_string()
+            } else {
+                line
+            }
+        })
         .collect()
 }
 
@@ -529,7 +545,10 @@ mod tests {
 
     #[test]
     fn redact_handles_overlapping_taints_longest_first() {
-        let s = redact("found supersecret here", &["secret".into(), "supersecret".into()]);
+        let s = redact(
+            "found supersecret here",
+            &["secret".into(), "supersecret".into()],
+        );
         assert_eq!(s, "found [REDACTED] here");
     }
 
@@ -595,21 +614,30 @@ mod tests {
     fn arg_taint_reason_detects_original() {
         let r = TaintRegistry::default();
         r.add("supersecret");
-        assert_eq!(r.arg_taint_reason("xx supersecret yy"), Some("original".into()));
+        assert_eq!(
+            r.arg_taint_reason("xx supersecret yy"),
+            Some("original".into())
+        );
     }
 
     #[test]
     fn arg_taint_reason_detects_reversed() {
         let r = TaintRegistry::default();
         r.add("supersecret");
-        assert_eq!(r.arg_taint_reason("xx tercesrepus yy"), Some("reverse".into()));
+        assert_eq!(
+            r.arg_taint_reason("xx tercesrepus yy"),
+            Some("reverse".into())
+        );
     }
 
     #[test]
     fn arg_taint_reason_detects_hex() {
         let r = TaintRegistry::default();
         r.add("ABCD");
-        assert_eq!(r.arg_taint_reason("dump=41424344"), Some("hex_lower".into()));
+        assert_eq!(
+            r.arg_taint_reason("dump=41424344"),
+            Some("hex_lower".into())
+        );
     }
 
     #[test]
@@ -631,7 +659,10 @@ mod tests {
         let r = TaintRegistry::default();
         r.add("password");
         // base64("password") = "cGFzc3dvcmQ="
-        assert_eq!(r.arg_taint_reason("blob=cGFzc3dvcmQ="), Some("base64_std".into()));
+        assert_eq!(
+            r.arg_taint_reason("blob=cGFzc3dvcmQ="),
+            Some("base64_std".into())
+        );
     }
 
     #[test]
@@ -657,7 +688,10 @@ mod tests {
         let r = TaintRegistry::default();
         r.add("HelloWorld");
         // ROT13("HelloWorld") = "UryybJbeyq"
-        assert_eq!(r.arg_taint_reason("greeting=UryybJbeyq"), Some("rot13".into()));
+        assert_eq!(
+            r.arg_taint_reason("greeting=UryybJbeyq"),
+            Some("rot13".into())
+        );
     }
 
     #[test]
@@ -697,10 +731,7 @@ mod tests {
     fn redact_lines_redacts_substring() {
         let r = TaintRegistry::default();
         r.add("super-secret-value");
-        let out = redact_lines(
-            vec!["got: super-secret-value".into(), "done".into()],
-            &r,
-        );
+        let out = redact_lines(vec!["got: super-secret-value".into(), "done".into()], &r);
         assert_eq!(out[0], "got: [REDACTED]");
         assert_eq!(out[1], "done");
     }
@@ -715,7 +746,10 @@ mod tests {
             .collect();
         let out = redact_lines(chunks, &r);
         for line in out.iter() {
-            assert_eq!(line, REDACTED, "expected every chunked line to be clobbered");
+            assert_eq!(
+                line, REDACTED,
+                "expected every chunked line to be clobbered"
+            );
         }
     }
 

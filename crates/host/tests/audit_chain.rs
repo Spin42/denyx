@@ -5,9 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aegis_host::{
-    verify_chain, AuditEvent, AuditSink, JsonlAuditSink, Runner, GENESIS_PREV_HASH,
-};
+use aegis_host::{verify_chain, AuditEvent, AuditSink, JsonlAuditSink, Runner, GENESIS_PREV_HASH};
 use aegis_policy::{Policy, PolicyFile};
 
 fn fresh_log(prefix: &str) -> PathBuf {
@@ -42,10 +40,7 @@ fn first_emit_uses_genesis_prev_hash_and_seq_one() {
     assert_eq!(lines.len(), 1);
     let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(v["aegis_seq"].as_u64(), Some(1));
-    assert_eq!(
-        v["aegis_prev_hash"].as_str(),
-        Some(GENESIS_PREV_HASH)
-    );
+    assert_eq!(v["aegis_prev_hash"].as_str(), Some(GENESIS_PREV_HASH));
 }
 
 #[test]
@@ -60,7 +55,11 @@ fn each_subsequent_emit_chains_to_previous_line_hash() {
     let report = verify_chain(&path).unwrap();
     assert_eq!(report.total_lines, 5);
     assert_eq!(report.last_seq, 5);
-    assert!(report.ok(), "fresh chain should verify clean: {:?}", report.failures);
+    assert!(
+        report.ok(),
+        "fresh chain should verify clean: {:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -78,7 +77,9 @@ fn verify_detects_in_place_mutation() {
     let lines = read_lines(&path);
     let mut mutated = lines.clone();
     let mut v: serde_json::Value = serde_json::from_str(&mutated[1]).unwrap();
-    v.as_object_mut().unwrap().insert("ts".into(), serde_json::json!("TAMPERED"));
+    v.as_object_mut()
+        .unwrap()
+        .insert("ts".into(), serde_json::json!("TAMPERED"));
     mutated[1] = serde_json::to_string(&v).unwrap();
     std::fs::write(&path, mutated.join("\n") + "\n").unwrap();
 

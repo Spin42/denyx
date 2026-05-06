@@ -71,8 +71,7 @@ allow_commands = ["cat"]
     let msg = err.to_string();
     assert!(matches!(err, AegisError::Policy(_)), "got: {err:?}");
     assert!(
-        msg.contains("not in any [filesystem] allow list")
-            || msg.contains("allow_list"),
+        msg.contains("not in any [filesystem] allow list") || msg.contains("allow_list"),
         "error should explain the missing allow: {msg}"
     );
 }
@@ -120,10 +119,7 @@ allow_commands = ["cp"]
 #[test]
 fn cat_file_inside_allow_succeeds() {
     // Sanity: cat'ing a file in read_allow should still work.
-    let dir = std::env::temp_dir().join(format!(
-        "aegis_path_gate_ok_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("aegis_path_gate_ok_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let target = dir.join("hello.txt");
     std::fs::write(&target, "hello world").unwrap();
@@ -142,9 +138,12 @@ allow_commands = ["cat"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
-    let src = format!(r#"out = subprocess.exec(["cat", "{}/hello.txt"])
+    let src = format!(
+        r#"out = subprocess.exec(["cat", "{}/hello.txt"])
 print(out)
-"#, abs);
+"#,
+        abs
+    );
     let outcome = runner.run("t", &src, "test.star").unwrap();
     assert!(
         outcome.printed.iter().any(|l| l.contains("hello world")),

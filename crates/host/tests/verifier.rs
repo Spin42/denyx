@@ -36,8 +36,7 @@ fn ignores_substring_match_with_extra_prefix_or_suffix() {
         r#"x = _aegis_fs_read_safe("x")"#,
     ];
     for src in safe_sources {
-        verify(src, &empty_policy())
-            .unwrap_or_else(|e| panic!("false positive on {src:?}: {e}"));
+        verify(src, &empty_policy()).unwrap_or_else(|e| panic!("false positive on {src:?}: {e}"));
     }
 }
 
@@ -58,8 +57,7 @@ fn ignores_attribute_access_that_only_ends_in_capability_name() {
 
     // `fs.readme(...)` is similarly not fs.read.
     let src = r#"x = fs.readme("x")"#;
-    verify(src, &empty_policy())
-        .unwrap_or_else(|e| panic!("false positive on extended name: {e}"));
+    verify(src, &empty_policy()).unwrap_or_else(|e| panic!("false positive on extended name: {e}"));
 }
 
 #[test]
@@ -76,8 +74,7 @@ y = "_aegis_fs_read"
 #[test]
 fn ignores_capability_name_inside_line_comment() {
     let src = "# fs.read is dangerous\nx = 1\n";
-    verify(src, &empty_policy())
-        .unwrap_or_else(|e| panic!("false positive on line comment: {e}"));
+    verify(src, &empty_policy()).unwrap_or_else(|e| panic!("false positive on line comment: {e}"));
 }
 
 #[test]
