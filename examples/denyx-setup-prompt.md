@@ -117,6 +117,36 @@ inherits `secure-defaults`, allows the typical toolchain commands,
 denies destructive git operations, leaves `[network]` empty so any
 HTTP target is an explicit opt-in).
 
+**Add the host's memory files to the policy.** Because Step 4b
+will disable the host's built-in `Read`/`Write`/`Edit` tools, the
+model has to use Denyx's `denyx_fs_*` MCP tools for everything,
+including updating its own memory. Those calls go through the
+policy gate, so the memory paths must be listed in `read_allow`
+and `write_allow`. Append the following to `[filesystem]` in
+`./denyx.toml` (only the paths relevant to the host you detected
+in Step 0; both is fine for a project that gets used from either):
+
+```toml
+[filesystem]
+# ... existing read_allow / write_allow entries from `denyx init` ...
+read_allow  = [..., "./CLAUDE.md", "./AGENTS.md", "./.claude/CLAUDE.md"]
+write_allow = [..., "./CLAUDE.md", "./AGENTS.md", "./.claude/CLAUDE.md"]
+```
+
+Do NOT add `./.claude/settings.json`, `./opencode.json`,
+`./.mcp.json`, or `./denyx.toml` itself to `write_allow` — those
+files control whether the lockdown is in effect, and an agent
+that can rewrite them can disable Denyx. They remain
+write-blocked by the runtime's self-writable guard.
+
+For Claude Code's auto-memory at `~/.claude/projects/<encoded>/memory/`
+(outside the project tree): if you want to allow it, add the
+specific path under that directory to `read_allow`/`write_allow`.
+Allowing the broad `~/.claude/projects/**` lets one project's
+agent overwrite another project's memory, so prefer the
+specific-encoded-project path the user can show you. **If unsure,
+ask the user; don't auto-add ~/.claude paths.**
+
 == Step 3: Customize for this project ==
 
 Walk through these four questions. Edit `./denyx.toml` after each
@@ -313,11 +343,17 @@ via `denyx-mcp`. This is a different config file from Step 4a.
 After writing both configs, briefly tell the user what just
 happened: "I disabled the host's built-in `Bash` / `Read` /
 `Write` / `Edit` / `Glob` / `Grep` / `WebFetch` / `WebSearch`
-tools. From now on, every effecting operation in this project
-goes through Denyx's MCP tools and is gated by `denyx.toml`. If
-you want to re-enable a specific built-in tool (e.g. you trust
-`Read` to be unrestricted), edit `.claude/settings.json` (Claude
-Code) or `opencode.json` (opencode)."
+tools. Every effecting operation in this project now goes
+through Denyx's MCP tools and is gated by `denyx.toml`. The
+agent's own memory files (`CLAUDE.md`, `AGENTS.md`,
+`.claude/CLAUDE.md`) are listed in `denyx.toml`'s
+`read_allow`/`write_allow` from Step 2, so memory updates still
+work — they just go through the policy gate now. If the model
+later complains it can't read or write something it needs, the
+choice is: widen `denyx.toml` to allow the operation (preferred
+— keeps the policy under git review), or re-enable a specific
+built-in in `.claude/settings.json` / `opencode.json` (faster but
+breaks the gate for that operation)."
 
 == Step 5: Smoke test ==
 
