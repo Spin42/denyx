@@ -1,0 +1,110 @@
+name: Mutation testing
+
+on:
+  # Run weekly. Mutation testing is too slow to gate every PR; it's
+  # a periodic audit signal, not a merge prerequisite.
+  schedule:
+    - cron: "0 6 * * 1" # Mondays at 06:00 UTC
+  # Allow manual triggers from the Actions tab — useful right after
+  # a security-critical change to want immediate feedback rather
+  # than waiting for the weekly cycle.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Surviving mutants are reported as a CI artefact + (optionally)
+  # an issue comment. We don't need write to repo.
+  issues: write
+
+concurrency:
+  # Only one mutation run at a time. A second trigger while one's in
+  # flight (e.g. weekly cron arriving during a manual run) cancels
+  # the older to keep the runner queue tidy.
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: cargo-mutants (security core)
+    runs-on: ubuntu-latest
+    # Mutation runs are slow; give them headroom but cap so a stuck
+    # job doesn't burn CI minutes for an entire day.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # bubblewrap for the sandbox tests — same as the regular CI
+      # job. cargo-mutants runs the full test suite per mutant, so
+      # any test that needs bwrap needs it here too.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bubblewrap
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # Sanity check: the unmodified tree must pass tests before we
+      # run the baseline. Any failure here would otherwise look like
+      # a "killed mutant" for every mutant — a confusing false signal.
+      - name: cargo test (baseline)
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Run mutation tests
+        # `-j 4` parallelism; the runner has 4 cores and we want
+        # decent throughput without burying ourselves in cache
+        # contention. The config in .cargo/mutants.toml scopes to
+        # the three security-critical files.
+        run: |
+          cargo mutants --workspace --no-shuffle --jobs 4 \
+            --output mutants-output \
+            || echo "mutants-exit-code=$?" >> "$GITHUB_OUTPUT"
+        id: mutants
+        continue-on-error: true
+
+      # Always upload the report so triage can happen even when the
+      # job's exit code is non-zero (which it will be whenever any
+      # mutant survives — that's expected output, not a workflow
+      # failure).
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants-output/
+          retention-days: 30
+
+      - name: Summarise surviving mutants
+        if: always()
+        run: |
+          echo "## Mutation testing summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f mutants-output/missed.txt ] && [ -s mutants-output/missed.txt ]; then
+            n=$(wc -l < mutants-output/missed.txt)
+            echo "**$n surviving mutant(s)** — tests did not catch these mutations." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "<details><summary>Show surviving mutants</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat mutants-output/missed.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ No surviving mutants." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f mutants-output/timeout.txt ] && [ -s mutants-output/timeout.txt ]; then
+            t=$(wc -l < mutants-output/timeout.txt)
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "$t mutant(s) timed out (likely an infinite-loop mutation)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f mutants-output/unviable.txt ] && [ -s mutants-output/unviable.txt ]; then
+            u=$(wc -l < mutants-output/unviable.txt)
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "$u mutant(s) failed to compile (uninteresting; type-system or borrow-check rejected)." >> "$GITHUB_STEP_SUMMARY"
+          fi

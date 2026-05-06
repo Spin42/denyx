@@ -50,6 +50,7 @@ The index below lists everything in both groups in one place.
 | [security-threat-model](security-threat-model.md)            | One-page review companion. What Aegis claims to defend against, what it explicitly does *not* defend against, the trust boundaries, the assumptions. **Read first if you're auditing with hostile intent.** |
 | [security-audit](security-audit.md)                          | The 16-surface bypass-assessment writeup that triggered the recent security work. Findings + fixes + verified-safe surfaces. |
 | [security-pentest-report](security-pentest-report.md)        | AI-driven (Sonnet + Opus) penetration test against the local-only IFC layer. Findings categorised Critical/High/Medium/Low, mitigations, closure verification. |
+| [mutation-testing](mutation-testing.md)                      | How `cargo-mutants` runs against the security-critical core (policy gate, IFC, verifier). Triage workflow, schedule, honest limits. |
 | [conclusions](conclusions.md)                                | The Sigil retrospective notes Aegis was built from. Background reading for `02-from-sigil.md`. |
 | [project-plan](project-plan.md)                              | Initial design plan, kept as a historical artifact. |
 | [macos-deployment](macos-deployment.md)                      | Run `aegis-mcp` on macOS via Lima + bubblewrap inside a Linux VM. Setup, MCP wiring, verification, alternatives. |

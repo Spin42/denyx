@@ -1,0 +1,41 @@
+# cargo-mutants configuration for Aegis.
+#
+# Mutation testing measures whether the test suite *actually verifies*
+# the behaviour of each line, not just whether the line was executed.
+# For most code that's redundant with line coverage; for security gates
+# it's load-bearing — a flipped operator inside `Policy::check_fs_read`
+# is the kind of one-character change the tests must catch and the
+# reason this tool is wired in at all.
+#
+# Scope is intentionally narrow. Mutating the whole workspace would
+# generate ~1000+ mutants, take many hours, and produce mostly
+# uninteresting noise from dispatch glue and CLI arg-parsing. The
+# files listed here are the ones where a wrong operator equals a
+# real security bug:
+#
+#   - crates/policy/src/lib.rs    — the policy gate (~207 mutants)
+#   - crates/host/src/taint.rs    — the IFC layer  (~137 mutants)
+#   - crates/host/src/verifier.rs — the capability scanner (~112 mutants)
+#
+# Total: ~450 mutants. With -j 4 on a typical laptop, roughly a
+# 30-60 minute run.
+
+# Only mutate the security-critical files. cargo-mutants applies
+# globs to source paths.
+examine_globs = [
+    "crates/policy/src/lib.rs",
+    "crates/host/src/taint.rs",
+    "crates/host/src/verifier.rs",
+]
+
+# Pad the auto-detected per-mutant test timeout. cargo-mutants
+# measures the unmutated test suite's run time and multiplies by
+# this. 5x is generous enough to absorb mutants that incidentally
+# run a few tests slower without producing false-positive timeouts.
+timeout_multiplier = 5.0
+
+# Lower bound on the per-mutant timeout (seconds). Without this the
+# tool can pick a tiny base time on a warm machine and start
+# false-positive timing out perfectly fine mutants on a busier CI
+# runner.
+minimum_test_timeout = 30.0

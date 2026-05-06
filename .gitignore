@@ -37,3 +37,8 @@ audit.jsonl
 # Coverage / profiling
 *.profraw
 *.profdata
+
+# cargo-mutants output. The tool writes per-mutant build trees and
+# verdict files here; they're regeneratable artefacts, not source.
+mutants.out/
+mutants.out.old/
