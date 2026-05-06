@@ -1,0 +1,34 @@
+[package]
+name = "aegis-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+aegis-policy = { path = "../crates/policy" }
+aegis-host   = { path = "../crates/host" }
+
+[[bin]]
+name = "verifier"
+path = "fuzz_targets/verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_toml"
+path = "fuzz_targets/policy_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_globs"
+path = "fuzz_targets/policy_globs.rs"
+test = false
+doc = false
+bench = false

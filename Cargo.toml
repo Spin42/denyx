@@ -6,6 +6,10 @@ members = [
     "crates/cli",
     "crates/mcp",
 ]
+# Fuzz targets are a libFuzzer + nightly setup with their own
+# Cargo.toml. They share the workspace dependency graph but are not
+# built or tested by `cargo build --workspace` / `cargo test`.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
