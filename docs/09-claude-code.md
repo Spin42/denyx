@@ -174,6 +174,63 @@ project — every `claude` invocation needs the same flags.
 `.claude/settings.json` is the project-local equivalent and the
 shape Claude Code reads on every session start in that directory.
 
+### What this lockdown can't catch: other MCP servers
+
+The deny list above blocks Claude Code's **own** built-in tools
+(`Bash`, `Read`, etc.). It does **not** block tools exposed by
+other MCP servers. If you have a separate MCP server configured
+that exposes equivalent capabilities — e.g. an
+`mcp__filesystem__read_file` tool from a generic-filesystem MCP
+server, or `mcp__shell__run_command` from a shell-runner — the
+model can use those and bypass Denyx the same way the built-ins
+were bypassing it before the lockdown.
+
+Claude Code's permission system is **deny-list-shaped** in v1: it
+doesn't support a clean "deny everything except `mcp__denyx__*`"
+whitelist (deny rules always win, so `"deny": ["*"]` would block
+Denyx's tools too). What you can do:
+
+1. **Audit `.mcp.json` before locking down.** If the project has
+   other MCP servers configured, decide for each: is this server
+   trusted enough that you're willing to accept the path it
+   creates around Denyx? If yes, leave it; if no, remove it from
+   `.mcp.json`.
+
+2. **Explicitly deny known competing servers** by adding their
+   tool-name patterns to the deny list:
+
+   ```json
+   {
+     "permissions": {
+       "deny": [
+         "Bash", "Edit", "Write", "Read", "Glob", "Grep",
+         "WebFetch", "WebSearch", "Monitor", "NotebookEdit",
+         "mcp__filesystem__*",
+         "mcp__shell__*",
+         "mcp__github__create_or_update_file"
+       ]
+     }
+   }
+   ```
+
+   Each `mcp__<server>__*` line denies all tools from that
+   server. This requires knowing the names of the servers the
+   project might add, which is a real maintenance burden.
+
+3. **Treat adding a new MCP server as a security review event.**
+   When a developer wants to add a new `mcpServers` entry,
+   require them to either (a) accept that the server creates an
+   ungated path and document that in the project README, or
+   (b) add the server's tool-name pattern to the deny list.
+
+The honest framing: **Claude Code doesn't currently expose a
+mechanism for "Denyx is the only MCP server this project trusts;
+anything else is denied by default."** If that property is
+load-bearing for your threat model, opencode's `permission:
+{ "*": "deny", "denyx*": "allow" }` shape (see
+[10-opencode.md](10-opencode.md)) gets you closer — opencode
+supports the whitelist semantics Claude Code currently doesn't.
+
 ### Audit log
 
 To collect audit events to a file:

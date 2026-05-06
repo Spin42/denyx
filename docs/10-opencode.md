@@ -143,28 +143,81 @@ machine are unaffected. If you have a global
 global config is unchanged; opencode merges the project-local
 shape over it for sessions in this directory.
 
-### Defence-in-depth: also use the `permission` block
+### The whitelist shape (recommended for full lockdown)
 
-If you want a belt-and-braces shape that survives opencode adding
-new built-in tools in a future version (which `tools: { …: false }`
-would silently miss), combine the explicit `tools` denies with a
-`permission` wildcard:
+The `tools: { …: false }` block above explicitly denies the
+built-ins opencode ships *today*. It does NOT survive:
+
+- **Future opencode versions adding new built-in tools** —
+  `tools: false` only catches the names you've listed.
+- **Other MCP servers exposing equivalent capabilities** — if
+  the project has a second MCP server configured (e.g.
+  `filesystem-mcp` with a `read_file` tool, or `shell-mcp` with
+  `run_command`), the model can use those tools and bypass
+  Denyx the same way it would have bypassed via the built-ins.
+
+opencode's `permission` block supports a clean **deny-by-default
+whitelist** that closes both holes. Combine it with the explicit
+`tools` denies for belt-and-braces:
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "permission": {
     "*": "deny",
     "denyx*": "allow"
   },
-  "tools": { … as above … },
-  "mcp": { … }
+  "tools": {
+    "bash": false,
+    "read": false,
+    "write": false,
+    "edit": false,
+    "glob": false,
+    "grep": false,
+    "webfetch": false,
+    "websearch": false
+  },
+  "mcp": {
+    "denyx": {
+      "type": "local",
+      "command": [
+        "denyx-mcp",
+        "--policy", "/absolute/path/to/your/denyx.toml",
+        "--audit-log", "/absolute/path/to/audit.jsonl"
+      ],
+      "enabled": true
+    }
+  }
 }
 ```
 
-`permission` wildcards match against the underlying tool name, so
-`denyx*` allows all Denyx-prefixed MCP tools and `*` denies
-anything else — including any future built-in opencode adds in a
-version bump.
+`permission` wildcards match against the underlying tool name:
+
+- `"*": "deny"` — every tool denied by default. Future built-ins
+  added by opencode are caught. Tools from other MCP servers
+  are caught.
+- `"denyx*": "allow"` — anything starting with `denyx` (i.e. all
+  tools exposed by your `denyx-mcp` server) is allowed.
+
+This is the strongest shape: **Denyx is the only path the model
+has to side-effects, period.** New tools — whether shipped by
+opencode itself, or exposed by an MCP server you didn't audit —
+are denied by default until you add an explicit `allow` for them.
+
+If you want to also use a *different* MCP server alongside Denyx
+(e.g. a read-only documentation lookup that doesn't side-effect
+anything), add its tool-name prefix to `permission`:
+
+```json
+"permission": {
+  "*": "deny",
+  "denyx*": "allow",
+  "docs-lookup*": "allow"
+}
+```
+
+That makes adding a new MCP server a deliberate decision —
+exactly the property you want for a security-critical setup.
 
 ## Add opencode's memory files to the policy
 
