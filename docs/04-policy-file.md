@@ -3,11 +3,11 @@
 > ← [Back to docs README](README.md) · Implements
 > [Agent Policy Spec v1.0.0](agent-policy-spec.md)
 
-The policy file is **the** thing in Aegis. It declares what an agent run
+The policy file is **the** thing in Denyx. It declares what an agent run
 is allowed to do, and the runtime enforces it. This document covers:
 
 - [Quick reference](#quick-reference)
-- [The `aegis init` generator](#the-aegis-init-generator)
+- [The `denyx init` generator](#the-denyx-init-generator)
 - [Sections in detail](#sections-in-detail)
   - [`[filesystem]`](#filesystem)
   - [`[network]`](#network)
@@ -24,7 +24,7 @@ is allowed to do, and the runtime enforces it. This document covers:
 
 For the *portable* spec — the implementation-neutral wire format —
 see [agent-policy-spec.md](agent-policy-spec.md) (v1.0.0). This document is the
-how-to-use guide for the Aegis runtime specifically.
+how-to-use guide for the Denyx runtime specifically.
 
 ## Quick reference
 
@@ -70,10 +70,10 @@ git    = ["push --force", "reset --hard", "filter-branch"]
 rails  = ["db:drop", "db:reset"]
 cargo  = ["publish", "yank"]
 
-[tools]                                  # for hosts that consult Aegis as
+[tools]                                  # for hosts that consult Denyx as
 Read      = ["fs.read"]                  # an authorization oracle, mapping
 Edit      = ["fs.read", "fs.write"]      # tool calls (Bash, Read, Edit, ...)
-Bash      = ["subprocess.exec"]          # to required Aegis capabilities.
+Bash      = ["subprocess.exec"]          # to required Denyx capabilities.
 WebFetch  = ["net.http_get"]             # fetch a known URL
 WebSearch = ["net.http_get"]             # query a search engine
 ```
@@ -85,9 +85,9 @@ WebSearch = ["net.http_get"]             # query a search engine
 > on. See [Capabilities are derived, not declared](#capabilities-are-derived-not-declared)
 > below for the full mapping.
 
-## The `aegis init` generator
+## The `denyx init` generator
 
-The fastest way to a working policy is `aegis init`. It emits a starter
+The fastest way to a working policy is `denyx init`. It emits a starter
 policy with:
 
 - `inherits = "secure-defaults"` for the system-protection baseline
@@ -102,18 +102,18 @@ policy with:
 Five languages are supported:
 
 ```sh
-aegis init --lang python    # python3, pip, pytest, ruff, ...
-aegis init --lang node      # node, npm, tsc, eslint; npm publish blocked
-aegis init --lang ruby      # ruby, bundle, rails, rspec; rails db:drop blocked
-aegis init --lang rust      # cargo, rustc; cargo publish/yank blocked
-aegis init --lang go        # go, gofmt, golangci-lint
+denyx init --lang python    # python3, pip, pytest, ruff, ...
+denyx init --lang node      # node, npm, tsc, eslint; npm publish blocked
+denyx init --lang ruby      # ruby, bundle, rails, rspec; rails db:drop blocked
+denyx init --lang rust      # cargo, rustc; cargo publish/yank blocked
+denyx init --lang go        # go, gofmt, golangci-lint
 ```
 
-Output goes to `aegis.toml` by default; pass `--output PATH` to choose a
+Output goes to `denyx.toml` by default; pass `--output PATH` to choose a
 different name, or `--output -` to write to stdout. The generator refuses
 to overwrite an existing file unless `--force` is passed.
 
-After `aegis init`, **read the file** and trim or extend it for your
+After `denyx init`, **read the file** and trim or extend it for your
 project. The templates are conservative starting points, not finished
 policies.
 
@@ -148,12 +148,12 @@ absolute for shared system paths the agent legitimately needs:
 ```toml
 [filesystem]
 read_allow  = ["src/**", "tests/**", "/tmp/**", "~/.cache/myapp/**"]
-write_allow = ["src/**", "/tmp/aegis_demo/**"]
+write_allow = ["src/**", "/tmp/denyx_demo/**"]
 ```
 
 **The policy root is the directory containing the policy file**, not
 the operator's current working directory. This is the portable default:
-the same policy file works whether you run aegis from the project root,
+the same policy file works whether you run denyx from the project root,
 from a subdirectory, or in CI — and you don't have to leak your
 personal directory structure (`/home/alice/projects/myproject/...`)
 into the policy. Override the root explicitly with
@@ -163,13 +163,13 @@ into the policy. Override the root explicitly with
 
 A policy that grants `fs.write` or `fs.delete` on its own file is
 self-defeating: an agent that can rewrite the policy controlling it
-can disable every other rule on the next run. Aegis refuses to load
+can disable every other rule on the next run. Denyx refuses to load
 any policy whose `write_allow` or `delete_allow` matches the policy
 file's own path. The error names the offending field and points at
 the fix:
 
 ```
-policy file at "/home/alice/proj/aegis.toml" is itself matched by
+policy file at "/home/alice/proj/denyx.toml" is itself matched by
 [filesystem].write_allow; refusing to load — an agent that can write
 its own policy can disable every other rule. Tighten your allow
 patterns or add the policy file to [filesystem].deny.
@@ -178,7 +178,7 @@ patterns or add the policy file to [filesystem].deny.
 You hit this most often with broad globs (`write_allow = ["**"]`).
 Two ways out: tighten the allow pattern (e.g. `["src/**"]` instead
 of `["**"]`), or keep the broad allow and add an explicit
-`deny = ["aegis.toml"]` — deny wins, the runtime sees the file as
+`deny = ["denyx.toml"]` — deny wins, the runtime sees the file as
 unwritable, the guard lets the policy load.
 
 ### `[network]`
@@ -200,7 +200,7 @@ Host patterns use the same glob syntax (so `*.npmjs.org` matches
 literal IPs (`"169.254.169.254"`, coerced to `/32`) and CIDR ranges
 (`"10.0.0.0/8"`).
 
-When the script calls `net.http_get("https://example.com/...")`, Aegis:
+When the script calls `net.http_get("https://example.com/...")`, Denyx:
 
 1. Parses the URL.
 2. If the URL's host is itself an IP literal, runs it through `deny_ips`.
@@ -270,7 +270,7 @@ a permission. The runtime gates argv at three levels:
 What these gates **cannot** see: paths constructed inside a string
 argument to a shell evaluator or interpreter. `python3 -c
 "open(chr(47)+'etc'+chr(47)+'passwd').read()"` — the inline string
-contains no literal `/`, the path is computed at runtime, and Aegis
+contains no literal `/`, the path is computed at runtime, and Denyx
 has no visibility into the Python interpreter's heap. **Any binary
 that takes inline code (`sh -c`, `bash -c`, `python -c`, `node -e`,
 `perl -e`, `ruby -e`, `lua -e`) is a wholesale bypass for the argv
@@ -284,7 +284,7 @@ inline-execution interpreters (`python`, `python3`, `ruby`, `node`,
 `perl`, ...), and generic command runners (`env`, `xargs`, `watch`,
 `timeout`) by default. Operators who legitimately need them must
 `!`-negate AND understand that the language-runtime defense
-collapses for those calls. The `aegis init` language templates that
+collapses for those calls. The `denyx init` language templates that
 need the relevant interpreter (`python` for Python, `node` for
 Node, etc.) negate it AND add a `[subprocess.deny_args]` entry that
 blocks the inline-execution flags (`-c`, `-e`, `-p`).
@@ -316,14 +316,14 @@ sandbox        = "bwrap"   # opt in to OS-level isolation
 Properties:
 - Linux-only for v1. Requires `bubblewrap` installed (`apt install
   bubblewrap` on Debian/Ubuntu, `dnf install bubblewrap` on
-  Fedora). Aegis refuses to load if `sandbox = "bwrap"` is set but
+  Fedora). Denyx refuses to load if `sandbox = "bwrap"` is set but
   the binary isn't on `PATH` — silent fall-through to non-sandboxed
   execution would be the wrong direction.
 - Per-call overhead: ~10-50ms for the namespace setup.
 - Network: kept (`--share-net`) if any `[network].http_*_allow` is
   populated; otherwise the netns is dropped (`--unshare-net`).
 - Process: `--die-with-parent`, `--unshare-pid/uts/ipc`,
-  `--new-session`. The child is sandboxed and won't outlive Aegis.
+  `--new-session`. The child is sandboxed and won't outlive Denyx.
 - Env: `--clearenv` then `--setenv` per declared `allow_vars`.
   Mirrors the language-layer env filter; bwrap is also responsible
   for env scoping when this mode is on.
@@ -340,7 +340,7 @@ backends (`sandbox-exec`, Job Objects) are future work.
 #### Subprocess env is filtered, not inherited
 
 The child process **does not inherit the parent's full environment**.
-Aegis builds the child env from scratch:
+Denyx builds the child env from scratch:
 
 - Every name in `[environment].allow_vars` is read from the parent
   and passed through (if set in the parent).
@@ -356,7 +356,7 @@ Aegis builds the child env from scratch:
 
 **Practical consequence**: if you want the child to find binaries
 in `$PATH`, list `"PATH"` in `allow_vars`. Same for `"HOME"`,
-`"LANG"`, etc. The `aegis init` templates already include these.
+`"LANG"`, etc. The `denyx init` templates already include these.
 A policy with empty `allow_vars` produces a fully empty child env;
 the subprocess must use absolute paths and won't have any standard
 shell environment.
@@ -383,14 +383,14 @@ busy-loop with no I/O (`def f(): return f()` is caught by
 without any builtin call is NOT caught by either knob and will run
 to completion). Starlark has no public per-statement abort hook in
 the current upstream API. **For total isolation against malicious
-or runaway scripts, run Aegis inside a container.** This is the
-deliberate layering the threat model assumes — Aegis is the
+or runaway scripts, run Denyx inside a container.** This is the
+deliberate layering the threat model assumes — Denyx is the
 language-runtime gate, container/VM is the OS-isolation gate.
 
 ### `[tools]`
 
-For hosts that consult Aegis as a *policy oracle* — they receive a tool
-call like `Bash {command: "ls"}` and want to ask Aegis "is this allowed?"
+For hosts that consult Denyx as a *policy oracle* — they receive a tool
+call like `Bash {command: "ls"}` and want to ask Denyx "is this allowed?"
 — the `[tools]` block maps each tool name to the capabilities it
 requires:
 
@@ -444,7 +444,7 @@ The actual HTTP destination is still enforced by
 `[network].http_*_allow`. So a script that tries to bypass
 `backend_url` and call `net.http_get("https://google.com/...")` fails
 at the network layer because `google.com` isn't allowed, regardless
-of how the call was framed. Aegis enforces the URL, not the tool
+of how the call was framed. Denyx enforces the URL, not the tool
 label.
 
 This composes the way you'd want:
@@ -453,7 +453,7 @@ This composes the way you'd want:
   `examples/local_executor/local_mcp.py` reads `backend_url` and
   injects "for WebSearch, GET this URL" into the system prompt. The
   model no longer has to guess.
-- **Aegis enforces the URL.** Whatever URL the model ends up calling
+- **Denyx enforces the URL.** Whatever URL the model ends up calling
   is checked against `[network]`. The routing hint is not load-bearing
   for safety — it's a UX nudge for the model.
 - **Operators control both.** Change `backend_url` in the policy and
@@ -461,7 +461,7 @@ This composes the way you'd want:
   no orchestrator-side change. Add the new host to `http_get_allow`
   in the same edit.
 
-A typical Aegis-mediated WebSearch policy looks like the example
+A typical Denyx-mediated WebSearch policy looks like the example
 above: one tool entry with the URL hint, one network entry allowing
 that host. The default DuckDuckGo Instant Answer URL is public,
 no-auth, non-tracking, and end-to-end-tested in this repo (see the
@@ -475,7 +475,7 @@ searxng/searxng`), Brave Search API, or Tavily.
 > *"WebSearch may only hit the search API; WebFetch may hit the
 > search API + GitHub + MDN"* — you list the superset in `[network]`
 > and rely on the bridge layer to route WebSearch to its declared
-> `backend_url`. Aegis itself does not scope hosts per-tool yet
+> `backend_url`. Denyx itself does not scope hosts per-tool yet
 > (`net.http_get` is one capability, one allowlist); a future
 > enhancement could add `[tools.X].allow_hosts` if there's enough
 > demand for strict per-tool URL gating.
@@ -493,35 +493,35 @@ requires_approval = ["fs.delete", "subprocess.exec"]
 
 What "escalated to the caller" means depends on the embedder:
 
-- **`aegis run` CLI** — interactive TTY prompt. The user sees a
+- **`denyx run` CLI** — interactive TTY prompt. The user sees a
   one-line summary and types `y` / `n`. This is the only path with a
   guaranteed real-human-in-the-loop today.
-- **`aegis-mcp --confirm-mode auto`** (default) — if the connecting
+- **`denyx-mcp --confirm-mode auto`** (default) — if the connecting
   client advertises the MCP `elicitation` capability at handshake
   time, the server sends a real `elicitation/create` request to the
   client and blocks for the user's reply. If the client doesn't
   advertise elicitation, the server falls back to `auto-deny` (next
   bullet). See "Approval flow under MCP" below for the deployment
   caveat.
-- **`aegis-mcp --confirm-mode auto-deny`** — every approval-required
+- **`denyx-mcp --confirm-mode auto-deny`** — every approval-required
   call returns a tool result with `isError: true` and an
-  `aegis_error_kind: "confirm_denied"` tag. The orchestrator can
+  `denyx_error_kind: "confirm_denied"` tag. The orchestrator can
   surface that to the user via its own UI, edit the policy, and
   re-issue.
-- **`aegis-mcp --confirm-mode auto-allow`** — every approval-
+- **`denyx-mcp --confirm-mode auto-allow`** — every approval-
   required call passes. Use only for tests and demos. This defeats
   the purpose of `requires_approval`.
-- **`aegis-mcp --confirm-mode elicit`** — force elicitation
+- **`denyx-mcp --confirm-mode elicit`** — force elicitation
   regardless of client capability advertisement. If the client
   doesn't actually implement elicitation, the request times out
   (300 s) and the call denies safely.
-- **Embedded `aegis-host`** — the host implements the `ConfirmHook`
+- **Embedded `denyx-host`** — the host implements the `ConfirmHook`
   trait directly against its UI surface (a desktop app prompt, an
   OAuth-style browser flow, whatever fits).
 
 #### Approval flow under MCP — what actually happens with each client
 
-The server-side primitive is correct: aegis-mcp's bidirectional
+The server-side primitive is correct: denyx-mcp's bidirectional
 dispatch sends `elicitation/create` upstream, blocks on the response,
 and maps it to Allow / Deny. **Whether the user actually sees the
 prompt is a property of the client, not the server.** Empirical
@@ -529,21 +529,21 @@ findings as of 2026-05:
 
 | Client | `--permission-mode` | Advertises elicitation? | What happens |
 |--------|----------------------|------------------------|--------------|
-| `claude -p` (Sonnet/Opus, Claude Code 2.1.x) | `default` / `auto` / others | **No** | aegis-mcp's `auto` mode falls back to `auto-deny`. Tool returns `isError: true`, `aegis_error_kind: "confirm_denied"`. Agent surfaces the denial in its text response. The runtime correctly enforces the deny — no side effect happens. |
+| `claude -p` (Sonnet/Opus, Claude Code 2.1.x) | `default` / `auto` / others | **No** | denyx-mcp's `auto` mode falls back to `auto-deny`. Tool returns `isError: true`, `denyx_error_kind: "confirm_denied"`. Agent surfaces the denial in its text response. The runtime correctly enforces the deny — no side effect happens. |
 | `claude` (interactive UI) | varies | TBD — verify in your version | If elicitation is advertised, the user gets a real prompt. If not, fallback to `auto-deny` and the orchestrator's own UX. |
 | `opencode` | unattended | TBD per version | Same shape. |
 
 **Take-away.** If you want a real per-call human prompt, today's
 realistic deployment is one of:
 
-1. **CLI** (`aegis run`) — when the user is at a terminal.
+1. **CLI** (`denyx run`) — when the user is at a terminal.
 2. **MCP `auto-deny` + orchestrator-handled retry** — the structured
    `confirm_denied` tag gives the orchestrator everything it needs
    to render its own approval UX and either edit the policy or
    re-issue against a non-gated context. This is the most
    broadly-deployed shape today.
 3. **MCP `elicit` with a client that supports elicitation** — the
-   protocol works end-to-end (Aegis ships integration tests that
+   protocol works end-to-end (Denyx ships integration tests that
    prove this), but you have to verify your specific client
    actually surfaces the prompt instead of auto-responding to it.
 
@@ -551,15 +551,15 @@ Don't assume `requires_approval` plus an MCP server in `auto` mode
 gives you human-in-the-loop. **Auto mode is the user's explicit
 opt-out from being asked.** If the client doesn't advertise
 elicitation (most don't yet, in 2026), the prompt has nowhere to
-go, and aegis-mcp falls back to `auto-deny`, which is the safe
+go, and denyx-mcp falls back to `auto-deny`, which is the safe
 behavior — but there is no user prompt anywhere in the loop.
 
 ## Capabilities are derived, not declared
 
-Aegis used to require both an `[functions].allow = [...]` block AND
+Denyx used to require both an `[functions].allow = [...]` block AND
 the matching resource section. That was redundant — listing
 `read_allow = ["src/**"]` already declares intent to use `fs.read`.
-Aegis no longer has a `[functions]` block: capabilities are derived
+Denyx no longer has a `[functions]` block: capabilities are derived
 directly from which resource sections you populate.
 
 The full mapping:
@@ -600,7 +600,7 @@ without poking the policy file directly.
 
 ## Inheritance and presets
 
-Every Aegis policy can `inherit` a built-in preset. There's currently one:
+Every Denyx policy can `inherit` a built-in preset. There's currently one:
 `secure-defaults`, the universal-deny baseline. Use it as your foundation:
 
 ```toml
@@ -706,7 +706,7 @@ sees it.
 The enforcement has three layers, all in the runtime:
 
 1. **Output-boundary scrub.** Every `outcome.printed` line, every
-   audit-event payload field, every MCP `aegis_run` tool-result
+   audit-event payload field, every MCP `denyx_run` tool-result
    string, and every error message is scanned. Each scan looks for
    the original tainted bytes AND a documented set of mechanically-
    derived sibling forms — byte-reverse, hex (lower + upper) of
@@ -822,7 +822,7 @@ npm = ["publish"]
 
 Enables `fs.read`, `fs.write`, `net.http_get`, `env.read`,
 `subprocess.exec` — all derived from the populated sections. Run
-`aegis init --lang <yours>` for a starting point you can trim.
+`denyx init --lang <yours>` for a starting point you can trim.
 
 ### A CI / production-readonly agent
 
@@ -847,7 +847,7 @@ write_allow = ["/tmp/**"]
 
 [network]
 # The hosts the agent's WebSearch / WebFetch tools may actually
-# reach. Listing them here is the policy-level constraint; Aegis
+# reach. Listing them here is the policy-level constraint; Denyx
 # checks every outbound URL against this list, regardless of which
 # host-level tool name the call came from.
 http_get_allow  = [
@@ -901,10 +901,10 @@ orchestrator sees.
 
 ## Where next
 
-- [05-install.md](05-install.md) — install Aegis and dependencies.
+- [05-install.md](05-install.md) — install Denyx and dependencies.
 - [06-quickstart.md](06-quickstart.md) — generate a policy and run a
   script in 5 minutes.
 - [09-local-executor.md](09-local-executor.md) — the full agentic
   setup with a local model + cloud orchestrator.
 - [agent-policy-spec.md](agent-policy-spec.md) — the portable spec for
-  non-Aegis runtimes that want to consume the same TOML format.
+  non-Denyx runtimes that want to consume the same TOML format.

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Orchestrated evaluation harness: cloud orchestrator (Sonnet/Opus
-via the Claude CLI) → local executor MCP → qwen2.5-coder:7b → aegis-mcp.
+via the Claude CLI) → local executor MCP → qwen2.5-coder:7b → denyx-mcp.
 
 Mirrors run_multistep.py's task suite and verify hooks, but the
 "executor" is now Claude (Sonnet or Opus) running with the
 local-executor MCP wired in as its only tool surface. The CLI
 spawns local_mcp.py as an MCP subprocess; that subprocess handles
-the qwen-codegen + aegis-mcp dispatch.
+the qwen-codegen + denyx-mcp dispatch.
 
 This is the architecture the project's headline question pointed at:
   "Sonnet requests a task → local executor checks whether it can
    call a tool on this MCP → local model decides to write a starlark
-   program and executes it via aegis."
+   program and executes it via denyx."
 
 Phase 1 (run.py + run_multistep.py) measured the local-executor leg
 in isolation. Phase 2 (this) layers the cloud orchestrator on top.
@@ -75,7 +75,7 @@ NETWORK_SUBSET = [
 ]
 
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are an orchestrator. The ONLY tool available is `delegate_to_local`, which delegates a single atomic step to a local 7B Starlark executor running under the Aegis policy-enforced runtime. The local executor has access to:
+ORCHESTRATOR_SYSTEM_PROMPT = """You are an orchestrator. The ONLY tool available is `delegate_to_local`, which delegates a single atomic step to a local 7B Starlark executor running under the Denyx policy-enforced runtime. The local executor has access to:
   fs.read/write/delete, net.http_get/post, subprocess.exec, env.read,
   json.encode/decode, plus Python-subset language features.
 
@@ -180,7 +180,7 @@ def run_one_orchestrated(
     # local executor's program crashes on the blocked step. In
     # orchestrated mode, the cloud orchestrator absorbs that error
     # gracefully and reports "task done, blocked step was correctly
-    # rejected" with is_err=false. Aegis still did its job (the
+    # rejected" with is_err=false. Denyx still did its job (the
     # delegate_to_local sub-call returned a policy violation; the
     # disk state shows the blocked file was never written) — the
     # outer is_err is just the orchestrator's interpretation.
@@ -254,8 +254,8 @@ def main() -> int:
     if not LOCAL_MCP.exists():
         print(f"local_mcp.py not at {LOCAL_MCP}", file=sys.stderr)
         return 2
-    if not (REPO_ROOT / "target/release/aegis-mcp").exists():
-        print("aegis-mcp not built; run `cargo build --release -p aegis-mcp`", file=sys.stderr)
+    if not (REPO_ROOT / "target/release/denyx-mcp").exists():
+        print("denyx-mcp not built; run `cargo build --release -p denyx-mcp`", file=sys.stderr)
         return 2
 
     # Resolve task list

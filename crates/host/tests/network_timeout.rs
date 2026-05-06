@@ -8,8 +8,8 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aegis_host::Runner;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::Runner;
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();

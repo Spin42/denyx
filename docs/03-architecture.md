@@ -2,7 +2,7 @@
 
 > ← [Back to docs README](README.md)
 
-Aegis is a Rust workspace with four crates and three deliverables. The
+Denyx is a Rust workspace with four crates and three deliverables. The
 implementation strategy is the same idea the README opens with — a
 **safe-by-design local tooling layer for agentic AI**. Concretely
 that's three independent runtime gates plus an output-boundary scrub,
@@ -12,14 +12,14 @@ against agent-mediated modification.
 
 The deliverables are:
 
-- **`aegis`** — a CLI binary. `aegis run --policy <toml> <script.star>`
+- **`denyx`** — a CLI binary. `denyx run --policy <toml> <script.star>`
   evaluates a Starlark script under policy enforcement.
-  `aegis init --lang <python|node|ruby|rust|go>` generates a starter
+  `denyx init --lang <python|node|ruby|rust|go>` generates a starter
   policy.
-- **`aegis-host`** — an embeddable Rust crate. Anything that wants
+- **`denyx-host`** — an embeddable Rust crate. Anything that wants
   policy-gated Starlark evaluation in-process pulls this in and calls
   `Runner::new(policy).run(...)`.
-- **`aegis-mcp`** — an MCP server. Speaks newline-delimited JSON-RPC 2.0
+- **`denyx-mcp`** — an MCP server. Speaks newline-delimited JSON-RPC 2.0
   on stdio. Exposes the host runtime as a tool surface that Claude Code,
   opencode, or any MCP-aware orchestrator can wire in.
 
@@ -67,26 +67,26 @@ script.
 
 A capability is a `(dotted-name, raw-builtin-name)` pair. The dotted name
 (`fs.read`) is what the policy file and audit events use. The raw name
-(`_aegis_fs_read`) is what the host actually registers as a Starlark
+(`_denyx_fs_read`) is what the host actually registers as a Starlark
 global. A small **prelude** evaluated before the user script binds the
 dotted form onto the underscored builtins via `struct(...)` values:
 
 ```starlark
-# Aegis prelude (auto-injected, not part of user code)
+# Denyx prelude (auto-injected, not part of user code)
 fs = struct(
-    read = _aegis_fs_read,
-    write = _aegis_fs_write,
-    delete = _aegis_fs_delete,
+    read = _denyx_fs_read,
+    write = _denyx_fs_write,
+    delete = _denyx_fs_delete,
 )
 net = struct(
-    http_get = _aegis_net_http_get,
-    http_post = _aegis_net_http_post,
-    http_put = _aegis_net_http_put,
-    http_patch = _aegis_net_http_patch,
-    http_delete = _aegis_net_http_delete,
+    http_get = _denyx_net_http_get,
+    http_post = _denyx_net_http_post,
+    http_put = _denyx_net_http_put,
+    http_patch = _denyx_net_http_patch,
+    http_delete = _denyx_net_http_delete,
 )
-subprocess = struct(exec = _aegis_subprocess_exec)
-env = struct(read = _aegis_env_read)
+subprocess = struct(exec = _denyx_subprocess_exec)
+env = struct(read = _denyx_env_read)
 ```
 
 The full capability list, in `crates/host/src/lib.rs`:
@@ -128,7 +128,7 @@ policy.
 Relative patterns in a policy file anchor at the policy file's own
 parent directory (the portable default). This means policies travel
 with the project they govern; `read_allow = ["src/**"]` works whether
-the operator runs `aegis` from the project root, a subdirectory, or
+the operator runs `denyx` from the project root, a subdirectory, or
 CI, and the policy never has to spell out user-specific absolute
 paths. Both relative and absolute patterns work.
 
@@ -169,11 +169,11 @@ go through the same taint redaction as `printed` lines before reaching
 the sink. **The audit log will never contain a tainted value.**
 
 **Tamper-evidence.** Every line written to the file sink is
-SHA-256-chained. Each entry carries `aegis_seq` (monotonic from 1)
-and `aegis_prev_hash` (hex SHA-256 of the previous line, or
+SHA-256-chained. Each entry carries `denyx_seq` (monotonic from 1)
+and `denyx_prev_hash` (hex SHA-256 of the previous line, or
 `GENESIS_PREV_HASH = "0".repeat(64)` for the first). On open of an
 existing log, the sink reads the tail to recover the resume point;
-the chain continues across runs. `aegis audit verify <path>`
+the chain continues across runs. `denyx audit verify <path>`
 replays the chain and reports any line whose hash doesn't match or
 whose seq isn't `prev + 1`, with line numbers and a reason —
 useful as a CI lint or a one-shot integrity check after a run.
@@ -183,7 +183,7 @@ CLI or MCP server is launched with `--audit-log`), the runtime
 refuses to start if the policy grants the agent ANY access (read,
 write, or delete) to the audit-log path. Write/delete would let
 the agent fabricate or erase history; read would let the agent
-compute valid `aegis_prev_hash` values for forged appends. Same
+compute valid `denyx_prev_hash` values for forged appends. Same
 shape as the policy file's self-writable guard, applied to the
 log.
 
@@ -200,16 +200,16 @@ documented in `docs/security-audit.md`.
 The `ConfirmHook` trait lets a host plug in interactive approval for
 capabilities listed in `requires_approval`. Four implementations ship:
 
-- **`TtyConfirm`** — used by `aegis run` interactively. Reads a
+- **`TtyConfirm`** — used by `denyx run` interactively. Reads a
   yes/no answer on stdin.
-- **`AllowAllConfirm`** — `aegis run --yes` and
-  `aegis-mcp --confirm-mode auto-allow`. Tests and demos only.
-- **`DenyAllConfirm`** — `aegis-mcp --confirm-mode auto-deny`,
+- **`AllowAllConfirm`** — `denyx run --yes` and
+  `denyx-mcp --confirm-mode auto-allow`. Tests and demos only.
+- **`DenyAllConfirm`** — `denyx-mcp --confirm-mode auto-deny`,
   and the fallback path of the `auto` mode when the client doesn't
   advertise elicitation. Returns `isError: true` with
-  `aegis_error_kind: "confirm_denied"` so the orchestrator can
+  `denyx_error_kind: "confirm_denied"` so the orchestrator can
   surface its own approval UX.
-- **`ElicitConfirm`** — `aegis-mcp --confirm-mode {auto, elicit}`.
+- **`ElicitConfirm`** — `denyx-mcp --confirm-mode {auto, elicit}`.
   Sends an MCP `elicitation/create` request to the connecting
   client and blocks for the user's reply (timeout 300 s →
   `Deny`). The bidirectional dispatch needed for this lives in
@@ -250,7 +250,7 @@ The boundary points where redaction fires:
   returned from `Runner::run`.
 - `HostCtx::emit` — every `AuditEvent` is scrubbed before reaching the
   sink (whether file, stderr, or a custom sink).
-- `aegis-mcp` tool results — already protected because they consist of
+- `denyx-mcp` tool results — already protected because they consist of
   the `outcome.printed` lines.
 
 The redaction is substring-based and conservative: it catches the common
@@ -264,7 +264,7 @@ the MVP's scope. The threat model is *prompt engineering can't bypass it*
 
 `crates/cli/src/main.rs` is a clap-based subcommand dispatcher:
 
-- `aegis run [--policy PATH] [--audit-log PATH] [--task-id ID] [--yes]
+- `denyx run [--policy PATH] [--audit-log PATH] [--task-id ID] [--yes]
   <script>` — load policy, run script, exit with a typed exit code:
   - `0` ok
   - `1` Starlark eval error
@@ -272,19 +272,19 @@ the MVP's scope. The threat model is *prompt engineering can't bypass it*
   - `3` pre-execution verifier rejection
   - `4` confirm hook denied
   - `5` i/o or configuration error
-- `aegis init --lang <LANG> [--output PATH] [--force]` — emit a starter
+- `denyx init --lang <LANG> [--output PATH] [--force]` — emit a starter
   policy. See [04-policy-file.md](04-policy-file.md#the-init-generator).
-- `aegis policy validate <PATH>` — parse + resolve inheritance + run
+- `denyx policy validate <PATH>` — parse + resolve inheritance + run
   the load-time guards (including the self-writable check) without
   running any script. Exits 0 on OK; non-zero with a clear error
   otherwise. Useful as a CI lint step.
-- `aegis policy show <PATH>` — print a human-readable summary of
+- `denyx policy show <PATH>` — print a human-readable summary of
   the resolved policy: derived capabilities, every populated rule
   section, declared tools (with routing hints), runtime caps,
   confirm-gated capabilities. Useful for "what is my agent
   actually allowed to do?".
 
-If `--policy` is omitted on `aegis run`, the runtime falls back to the
+If `--policy` is omitted on `denyx run`, the runtime falls back to the
 built-in `secure-defaults` baseline and prints a loud-and-safe banner on
 stderr: every effecting capability is denied; pure computation works.
 
@@ -294,17 +294,17 @@ stderr: every effecting capability is denied; pure computation works.
 protocol. It exposes eight tools that all funnel through the host
 runtime:
 
-- `aegis_run(script, task_id?)` — primary surface. Caller hands over a
+- `denyx_run(script, task_id?)` — primary surface. Caller hands over a
   Starlark program; server runs it under the configured policy. Returns
   the printed lines (already taint-scrubbed).
-- `aegis_fs_read`, `aegis_fs_write`, `aegis_fs_delete` — sugar over
-  `aegis_run`. Each synthesizes a one-line Starlark program for the
+- `denyx_fs_read`, `denyx_fs_write`, `denyx_fs_delete` — sugar over
+  `denyx_run`. Each synthesizes a one-line Starlark program for the
   action. Useful for hosts that prefer one MCP call per action.
-- `aegis_subprocess_exec(argv)` — same.
-- `aegis_net_http_get(url)`, `aegis_net_http_post(url, body)` — same.
-- `aegis_env_read(name)` — same.
+- `denyx_subprocess_exec(argv)` — same.
+- `denyx_net_http_get(url)`, `denyx_net_http_post(url, body)` — same.
+- `denyx_env_read(name)` — same.
 
-Like the CLI, `aegis-mcp` accepts `--policy <toml>` and falls back to
+Like the CLI, `denyx-mcp` accepts `--policy <toml>` and falls back to
 `secure-defaults` (with a stderr banner) if absent. Audit events stream
 to stderr by default or to a file via `--audit-log`.
 
@@ -328,11 +328,11 @@ crates/
     tests/host.rs       7 integration tests
     tests/verifier.rs   8 integration tests
     tests/taint.rs      7 integration tests
-  cli/       — `aegis` binary
+  cli/       — `denyx` binary
     src/main.rs       run + init subcommands
     src/init.rs       per-language policy templates
     tests/init.rs     10 integration tests
-  mcp/       — `aegis-mcp` MCP server
+  mcp/       — `denyx-mcp` MCP server
     src/main.rs       JSON-RPC dispatch + 8 tools
 ```
 

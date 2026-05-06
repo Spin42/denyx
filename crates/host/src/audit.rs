@@ -179,7 +179,7 @@ pub struct JsonlAuditSink {
 }
 
 /// Per-sink chain state: writer + monotonic seq + the SHA-256 of
-/// the last line written. The next line embeds `aegis_prev_hash =
+/// the last line written. The next line embeds `denyx_prev_hash =
 /// last_hash`; after writing, last_hash advances to SHA-256 of the
 /// line we just wrote. Same logic across run boundaries — see
 /// `resume_from_tail`.
@@ -192,8 +192,8 @@ struct ChainState {
 impl JsonlAuditSink {
     /// Append to a file (creating if needed), opening in append
     /// mode. If the file already exists and contains a prior chain,
-    /// the chain is resumed: `aegis_seq` continues from the
-    /// existing tail's next value and `aegis_prev_hash` of the next
+    /// the chain is resumed: `denyx_seq` continues from the
+    /// existing tail's next value and `denyx_prev_hash` of the next
     /// emit chains to the SHA-256 of the existing last line.
     pub fn file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
@@ -233,8 +233,8 @@ impl AuditSink for JsonlAuditSink {
     fn emit(&self, event: AuditEvent) {
         let mut state = self.inner.lock().expect("audit lock");
         // Build the line by serializing the event JSON, then
-        // splicing in the chain fields (`aegis_seq`,
-        // `aegis_prev_hash`). The two fields are part of the
+        // splicing in the chain fields (`denyx_seq`,
+        // `denyx_prev_hash`). The two fields are part of the
         // hashed line so a verifier sees them as load-bearing data,
         // not provenance metadata it can ignore.
         let Ok(value) = serde_json::to_value(&event) else {
@@ -243,8 +243,8 @@ impl AuditSink for JsonlAuditSink {
         let serde_json::Value::Object(mut obj) = value else {
             return;
         };
-        obj.insert("aegis_seq".into(), serde_json::json!(state.next_seq));
-        obj.insert("aegis_prev_hash".into(), serde_json::json!(state.last_hash));
+        obj.insert("denyx_seq".into(), serde_json::json!(state.next_seq));
+        obj.insert("denyx_prev_hash".into(), serde_json::json!(state.last_hash));
         let Ok(line) = serde_json::to_string(&serde_json::Value::Object(obj)) else {
             return;
         };
@@ -275,7 +275,7 @@ fn resume_from_tail(path: &Path) -> (u64, String) {
     };
     let last_seq = serde_json::from_str::<serde_json::Value>(last_line)
         .ok()
-        .and_then(|v| v.get("aegis_seq").and_then(|s| s.as_u64()))
+        .and_then(|v| v.get("denyx_seq").and_then(|s| s.as_u64()))
         .unwrap_or(0);
     (last_seq.saturating_add(1), sha256_hex(last_line))
 }
@@ -303,7 +303,7 @@ impl VerifyReport {
 }
 
 /// `AuditSink` that POSTs each event as a single JSON object to a
-/// configured HTTP endpoint. Used by `aegis-mcp --audit-url ...` so a
+/// configured HTTP endpoint. Used by `denyx-mcp --audit-url ...` so a
 /// fleet of agents emits its audit trail to a central server the
 /// developer's account can't write to.
 ///
@@ -397,21 +397,21 @@ impl HttpAuditSink {
 impl AuditSink for HttpAuditSink {
     fn emit(&self, event: AuditEvent) {
         let Ok(body) = serde_json::to_string(&event) else {
-            eprintln!("aegis-mcp: audit event failed to serialise; dropping");
+            eprintln!("denyx-mcp: audit event failed to serialise; dropping");
             return;
         };
         if let Err(msg) = self.try_post(&body) {
             // Audit gap. Log to stderr (which the host typically
             // surfaces to the developer) so the failure is visible.
             // Strict mode (refuse the call) is step-2 work.
-            eprintln!("aegis-mcp: {msg}; AUDIT GAP for this event");
+            eprintln!("denyx-mcp: {msg}; AUDIT GAP for this event");
         }
     }
 }
 
 /// Walk a JSONL audit log, recompute the SHA-256 chain, and report
-/// any line whose `aegis_prev_hash` doesn't match the SHA-256 of
-/// the previous line (or whose `aegis_seq` isn't monotonic +1).
+/// any line whose `denyx_prev_hash` doesn't match the SHA-256 of
+/// the previous line (or whose `denyx_seq` isn't monotonic +1).
 ///
 /// What this catches:
 /// - In-place mutation of any line ⇒ chain breaks at the next line.
@@ -454,16 +454,16 @@ pub fn verify_chain(path: &Path) -> std::io::Result<VerifyReport> {
                 continue;
             }
         };
-        let seq = value.get("aegis_seq").and_then(|s| s.as_u64()).unwrap_or(0);
+        let seq = value.get("denyx_seq").and_then(|s| s.as_u64()).unwrap_or(0);
         let claimed_prev = value
-            .get("aegis_prev_hash")
+            .get("denyx_prev_hash")
             .and_then(|s| s.as_str())
             .unwrap_or("");
         if seq != expected_seq {
             failures.push(VerifyFailure {
                 line_number,
                 seq: Some(seq),
-                reason: format!("aegis_seq jump: expected {expected_seq}, got {seq}"),
+                reason: format!("denyx_seq jump: expected {expected_seq}, got {seq}"),
             });
         }
         if claimed_prev != prev_hash {
@@ -471,7 +471,7 @@ pub fn verify_chain(path: &Path) -> std::io::Result<VerifyReport> {
                 line_number,
                 seq: Some(seq),
                 reason: format!(
-                    "aegis_prev_hash mismatch: chain expected {prev_hash}, line declared {claimed_prev}"
+                    "denyx_prev_hash mismatch: chain expected {prev_hash}, line declared {claimed_prev}"
                 ),
             });
         }

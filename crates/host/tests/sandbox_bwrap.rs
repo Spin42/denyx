@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use aegis_host::Runner;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::Runner;
+use denyx_policy::{Policy, PolicyFile};
 
 fn bwrap_available() -> bool {
     Command::new("bwrap")
@@ -43,7 +43,7 @@ allow_commands = ["echo"]
 sandbox = "bwrap"
 "#;
     let dir = std::env::temp_dir().join(format!(
-        "aegis_sandbox_missing_{}_{}",
+        "denyx_sandbox_missing_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -51,7 +51,7 @@ sandbox = "bwrap"
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("aegis.toml");
+    let path = dir.join("denyx.toml");
     std::fs::write(&path, toml).unwrap();
 
     // Save & clear PATH so `which_on_path("bwrap")` returns None.
@@ -78,7 +78,7 @@ fn pure_policy_bwrap_argv_includes_minimal_system_mounts() {
     let toml = r#"
 [filesystem]
 read_allow  = ["src/**"]
-write_allow = ["/tmp/aegis_sandbox_test/**"]
+write_allow = ["/tmp/denyx_sandbox_test/**"]
 
 [subprocess]
 allow_commands = ["echo"]
@@ -104,9 +104,9 @@ sandbox = "bwrap"
         "expected src/ prefix in bwrap argv: {s}"
     );
 
-    // Should bind the policy's write-side prefix (/tmp/aegis_sandbox_test).
+    // Should bind the policy's write-side prefix (/tmp/denyx_sandbox_test).
     assert!(
-        s.contains("/tmp/aegis_sandbox_test"),
+        s.contains("/tmp/denyx_sandbox_test"),
         "expected write_allow prefix in bwrap argv: {s}"
     );
 
@@ -161,7 +161,7 @@ fn end_to_end_cat_etc_passwd_blocked_by_sandbox() {
     // The sandbox alone is the defense in this test.
     let toml = r#"
 [filesystem]
-read_allow = ["/tmp/aegis_sandbox_e2e/**"]
+read_allow = ["/tmp/denyx_sandbox_e2e/**"]
 
 [environment]
 allow_vars = ["PATH"]
@@ -170,8 +170,8 @@ allow_vars = ["PATH"]
 allow_commands = ["cat"]
 sandbox = "bwrap"
 "#;
-    std::fs::create_dir_all("/tmp/aegis_sandbox_e2e").unwrap();
-    let runner = runner_for(toml, PathBuf::from("/tmp/aegis_sandbox_e2e"));
+    std::fs::create_dir_all("/tmp/denyx_sandbox_e2e").unwrap();
+    let runner = runner_for(toml, PathBuf::from("/tmp/denyx_sandbox_e2e"));
     let src = r#"out = subprocess.exec(["cat", "/etc/passwd"])
 print(out)
 "#;
@@ -214,7 +214,7 @@ allow_commands = ["cat"]
 sandbox = "bwrap"
 "#;
     let runner = runner_for(toml, std::env::temp_dir());
-    let src = r#"out = subprocess.exec(["cat", "/etc/aegis_does_not_exist_in_sandbox.txt"])
+    let src = r#"out = subprocess.exec(["cat", "/etc/denyx_does_not_exist_in_sandbox.txt"])
 print(out)
 "#;
     // The argv path-gate accepts /etc/<file> because read_allow
@@ -237,7 +237,7 @@ fn end_to_end_allowed_path_works_inside_sandbox() {
     // Sanity: a file that IS in read_allow should be readable from
     // inside the sandbox.
     let dir = std::env::temp_dir().join(format!(
-        "aegis_sandbox_ok_{}_{}",
+        "denyx_sandbox_ok_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

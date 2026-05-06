@@ -1,16 +1,16 @@
-//! Integration tests for `aegis policy validate` and `aegis policy show`.
+//! Integration tests for `denyx policy validate` and `denyx policy show`.
 //!
-//! Both spawn the compiled `aegis` binary with a temp policy file and
+//! Both spawn the compiled `denyx` binary with a temp policy file and
 //! assert on exit code + stdout/stderr.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_aegis");
+const BIN: &str = env!("CARGO_BIN_EXE_denyx");
 
 fn write_policy(name: &str, body: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "aegis_policy_subcmd_{}_{}_{}",
+        "denyx_policy_subcmd_{}_{}_{}",
         name,
         std::process::id(),
         std::time::SystemTime::now()
@@ -19,7 +19,7 @@ fn write_policy(name: &str, body: &str) -> PathBuf {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("aegis.toml");
+    let path = dir.join("denyx.toml");
     std::fs::write(&path, body).unwrap();
     path
 }
@@ -37,7 +37,7 @@ read_allow = ["src/**"]
         .args(["policy", "validate"])
         .arg(&path)
         .output()
-        .expect("spawn aegis");
+        .expect("spawn denyx");
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -54,7 +54,7 @@ read_allow = ["src/**"]
 
 #[test]
 fn validate_fails_on_self_writable_policy() {
-    // Policy lives at <dir>/aegis.toml with write_allow = ["**"];
+    // Policy lives at <dir>/denyx.toml with write_allow = ["**"];
     // since relative patterns anchor at the policy's parent dir,
     // ** matches the policy file itself — guard refuses.
     let body = r#"
@@ -66,7 +66,7 @@ write_allow = ["**"]
         .args(["policy", "validate"])
         .arg(&path)
         .output()
-        .expect("spawn aegis");
+        .expect("spawn denyx");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -83,7 +83,7 @@ fn validate_fails_on_malformed_toml() {
         .args(["policy", "validate"])
         .arg(&path)
         .output()
-        .expect("spawn aegis");
+        .expect("spawn denyx");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("validation failed"), "{stderr}");
@@ -119,7 +119,7 @@ max_seconds = 30
         .args(["policy", "show"])
         .arg(&path)
         .output()
-        .expect("spawn aegis");
+        .expect("spawn denyx");
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -167,9 +167,9 @@ max_seconds = 30
 #[test]
 fn show_on_nonexistent_file_fails_cleanly() {
     let out = Command::new(BIN)
-        .args(["policy", "show", "/nonexistent/aegis.toml"])
+        .args(["policy", "show", "/nonexistent/denyx.toml"])
         .output()
-        .expect("spawn aegis");
+        .expect("spawn denyx");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("load policy"), "{stderr}");
@@ -187,7 +187,7 @@ inherits = "secure-defaults"
         .args(["policy", "show"])
         .arg(&path)
         .output()
-        .expect("spawn aegis");
+        .expect("spawn denyx");
     assert!(
         out.status.success(),
         "stderr: {}",

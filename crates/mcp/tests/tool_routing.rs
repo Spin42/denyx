@@ -1,6 +1,6 @@
-//! Integration tests for the `aegis_tool_routing` MCP tool.
+//! Integration tests for the `denyx_tool_routing` MCP tool.
 //!
-//! Spawns the compiled `aegis-mcp` binary against a policy that
+//! Spawns the compiled `denyx-mcp` binary against a policy that
 //! declares two `[tools.X]` entries — one allowed (its required
 //! capability has a populated resource section), one not — and
 //! confirms the read-only oracle surfaces both records, with
@@ -11,11 +11,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_aegis-mcp");
+const BIN: &str = env!("CARGO_BIN_EXE_denyx-mcp");
 
 fn write_policy(body: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "aegis_mcp_routing_{}_{}",
+        "denyx_mcp_routing_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -23,7 +23,7 @@ fn write_policy(body: &str) -> PathBuf {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("aegis.toml");
+    let path = dir.join("denyx.toml");
     std::fs::write(&path, body).unwrap();
     path
 }
@@ -36,7 +36,7 @@ fn drive_call(policy: &PathBuf, args: serde_json::Value) -> serde_json::Value {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn aegis-mcp");
+        .expect("spawn denyx-mcp");
 
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
@@ -60,7 +60,7 @@ fn drive_call(policy: &PathBuf, args: serde_json::Value) -> serde_json::Value {
 
     let call = serde_json::json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call",
-        "params":{"name":"aegis_tool_routing","arguments": args},
+        "params":{"name":"denyx_tool_routing","arguments": args},
     });
     writeln!(stdin, "{call}").unwrap();
     reader.read_line(&mut line).unwrap();

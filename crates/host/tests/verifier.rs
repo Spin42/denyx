@@ -1,13 +1,13 @@
 //! Integration tests for the pre-execution verifier. Drives
-//! `aegis_host::verifier::verify` directly. These tests assert the
+//! `denyx_host::verifier::verify` directly. These tests assert the
 //! same word-boundary and string/comment-stripping behavior that the
 //! original inline unit tests covered, but routed through the public
 //! entry point so the verifier's internal helpers stay private.
 
 use std::path::PathBuf;
 
-use aegis_host::verifier::verify;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::verifier::verify;
+use denyx_policy::{Policy, PolicyFile};
 
 fn empty_policy() -> Policy {
     // Policy that allows nothing: any capability use should be flagged.
@@ -22,18 +22,18 @@ allow = []
 #[test]
 fn flags_underscored_capability_call() {
     // Direct use of the registered global is detected and rejected.
-    let src = r#"_aegis_fs_read("x")"#;
+    let src = r#"_denyx_fs_read("x")"#;
     let err = verify(src, &empty_policy()).unwrap_err();
     assert_eq!(err.capability, "fs.read");
 }
 
 #[test]
 fn ignores_substring_match_with_extra_prefix_or_suffix() {
-    // Word-boundary discipline: `my_aegis_fs_read` and
-    // `_aegis_fs_read_safe` are not the global the host registers.
+    // Word-boundary discipline: `my_denyx_fs_read` and
+    // `_denyx_fs_read_safe` are not the global the host registers.
     let safe_sources = [
-        r#"x = my_aegis_fs_read("x")"#,
-        r#"x = _aegis_fs_read_safe("x")"#,
+        r#"x = my_denyx_fs_read("x")"#,
+        r#"x = _denyx_fs_read_safe("x")"#,
     ];
     for src in safe_sources {
         verify(src, &empty_policy()).unwrap_or_else(|e| panic!("false positive on {src:?}: {e}"));
@@ -65,7 +65,7 @@ fn ignores_capability_name_inside_string_literal() {
     // The verifier strips strings before scanning, so a capability
     // name quoted as data must NOT be flagged.
     let src = r#"x = "fs.read"
-y = "_aegis_fs_read"
+y = "_denyx_fs_read"
 "#;
     verify(src, &empty_policy())
         .unwrap_or_else(|e| panic!("false positive on string literal: {e}"));
@@ -80,7 +80,7 @@ fn ignores_capability_name_inside_line_comment() {
 #[test]
 fn ignores_capability_name_inside_triple_quoted_string() {
     let src = r#"x = """
-this docstring mentions fs.read and _aegis_fs_read
+this docstring mentions fs.read and _denyx_fs_read
 """
 y = 1
 "#;

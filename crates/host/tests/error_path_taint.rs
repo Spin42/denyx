@@ -1,15 +1,15 @@
-//! Tests that taint redaction applies to the AegisError path, not
+//! Tests that taint redaction applies to the DenyxError path, not
 //! just to outcome.printed and audit-event payloads. A script that
 //! reads a `local_only_var` and calls `fail(secret)` would
 //! otherwise produce a Starlark error message containing the raw
 //! value — leaking it through stderr, MCP tool results, or any
-//! other consumer of AegisError::Display.
+//! other consumer of DenyxError::Display.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aegis_host::Runner;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::Runner;
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -20,7 +20,7 @@ fn runner_for(toml: &str) -> Runner {
 fn unique(prefix: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "AEGIS_TEST_{}_{}_{}",
+        "DENYX_TEST_{}_{}_{}",
         prefix,
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
@@ -41,7 +41,7 @@ local_only_vars = ["{var}"]
     );
     let runner = runner_for(&toml);
     // Starlark's `fail()` raises with the given message. Without
-    // the fix, AegisError::Starlark contains the raw value. With
+    // the fix, DenyxError::Starlark contains the raw value. With
     // the fix, the value is replaced with [REDACTED].
     let src = format!(
         r#"k = env.read("{var}")
@@ -52,7 +52,7 @@ fail(k)
     let msg = err.to_string();
     assert!(
         !msg.contains(value),
-        "raw secret leaked through AegisError::Display: {msg}"
+        "raw secret leaked through DenyxError::Display: {msg}"
     );
     assert!(
         msg.contains("[REDACTED]"),
@@ -109,10 +109,10 @@ fn untainted_run_produces_unchanged_error_messages() {
     // want to accidentally regress regular error reporting.
     let toml = r#"
 [filesystem]
-read_allow = ["/tmp/aegis_no_taint_test/**"]
+read_allow = ["/tmp/denyx_no_taint_test/**"]
 "#;
     let runner = runner_for(toml);
-    let src = r#"fs.read("/tmp/aegis_no_taint_test/missing")"#;
+    let src = r#"fs.read("/tmp/denyx_no_taint_test/missing")"#;
     let err = runner.run("t", src, "test.star").unwrap_err();
     let msg = err.to_string();
     // Whatever the exact wording, it shouldn't be "[REDACTED]" —
@@ -120,12 +120,12 @@ read_allow = ["/tmp/aegis_no_taint_test/**"]
     assert!(!msg.is_empty());
     assert!(!msg.contains("[REDACTED]"));
     // PathBuf debug formatting:
-    assert!(msg.contains("aegis_no_taint_test"));
+    assert!(msg.contains("denyx_no_taint_test"));
 }
 
 #[test]
 fn pure_redact_helper_idempotent() {
-    use aegis_host::redact;
+    use denyx_host::redact;
     // Sanity for the helper itself: applying redact twice produces
     // the same result as applying once. Not a security property,
     // just a developer-comfort check.

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 
 struct Rng(u64);
 impl Rng {
@@ -122,7 +122,7 @@ fn parser_and_matchers_do_not_panic_on_random_input() {
         };
         // Resolution may fail (e.g. an invalid CIDR or bwrap missing on
         // this host). Both are fine. Panics are not.
-        let Ok(policy) = Policy::from_file(file, PathBuf::from("/tmp/aegis_fuzz_stable")) else {
+        let Ok(policy) = Policy::from_file(file, PathBuf::from("/tmp/denyx_fuzz_stable")) else {
             continue;
         };
         // Run the matcher pipeline on a random path.
@@ -136,7 +136,7 @@ fn parser_and_matchers_do_not_panic_on_random_input() {
         // Also re-resolve idempotently: parsing + resolution twice on
         // the same input yields the same allow/deny decision.
         let file2 = PolicyFile::from_toml_str(&toml).unwrap();
-        if let Ok(policy2) = Policy::from_file(file2, PathBuf::from("/tmp/aegis_fuzz_stable")) {
+        if let Ok(policy2) = Policy::from_file(file2, PathBuf::from("/tmp/denyx_fuzz_stable")) {
             let r1 = policy.check_fs_read(p).is_ok();
             let r2 = policy2.check_fs_read(p).is_ok();
             assert_eq!(

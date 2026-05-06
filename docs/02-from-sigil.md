@@ -1,8 +1,8 @@
-# From Sigil to Aegis
+# From Sigil to Denyx
 
 > ← [Back to docs README](README.md)
 
-Aegis is the second iteration of an idea. The first was
+Denyx is the second iteration of an idea. The first was
 [**Sigil**](https://github.com/mlainez/sigil) — a research project that
 designed a custom DSL for agent code, fine-tuned local models to emit
 it, and ran it in a custom interpreter. Sigil shipped, learned a lot,
@@ -12,7 +12,7 @@ substrate**, with the language as close to something the model already
 knows as possible.
 
 This document is the bridge between those two projects. It's the design
-history that justifies why Aegis looks the way it does. The deep
+history that justifies why Denyx looks the way it does. The deep
 retrospective notes live in [conclusions.md](conclusions.md); this is the
 condensed version.
 
@@ -24,7 +24,7 @@ would be:
 > **Start from a limited language the current models already know
 > the syntax of, then extend only with what we need.**
 
-This is the load-bearing decision Aegis is built around. It's worth
+This is the load-bearing decision Denyx is built around. It's worth
 unpacking carefully because the alternative paths each fail in
 specific, instructive ways.
 
@@ -60,7 +60,7 @@ we'd have to retrain on the new base every time.
 
 ### Why "extend only with what we need"
 
-This is the deeper of the two halves, and the one that makes Aegis
+This is the deeper of the two halves, and the one that makes Denyx
 a *security* tool rather than just a convenience.
 
 Default Python is the maximally-permissive baseline. Anything in
@@ -102,7 +102,7 @@ it down because it was never there.
 
 The properties this gives us:
 
-- **The attack surface IS the capability list.** What Aegis can do
+- **The attack surface IS the capability list.** What Denyx can do
   unsafely is exactly the set of effecting builtins we wrote. Ten
   functions. They fit on one screen. We can read them all and
   reason about them.
@@ -135,7 +135,7 @@ numbers below say doesn't work at the local-7B scale.
 The combination is what's novel, and it's the answer to the question
 "why this language, not some other?" If a future runtime nails this
 combination better — say, capability-typed Wasm with first-class
-LLM support — Aegis becomes obsolete in a week. That's fine. The
+LLM support — Denyx becomes obsolete in a week. That's fine. The
 **principle** is what should outlast any specific implementation.
 
 ## What Sigil tried
@@ -178,9 +178,9 @@ matters.** A capability-typed runtime over a language the model already
 fluently writes is a strictly better deal than a custom language and a
 fine-tuned model.
 
-## What changed for Aegis
+## What changed for Denyx
 
-| Decision               | Sigil                              | Aegis                                                |
+| Decision               | Sigil                              | Denyx                                                |
 |------------------------|------------------------------------|------------------------------------------------------|
 | Language               | Bespoke DSL                        | Starlark (Buck2's strict Python subset)              |
 | Capability gating      | Grammar-level types                | Runtime builtins, all capability calls go through Rust |
@@ -193,19 +193,19 @@ Three of these are load-bearing for everything that follows:
 
 ### 1. Starlark, not a custom DSL
 
-Aegis embeds [Starlark](https://github.com/bazelbuild/starlark), the
+Denyx embeds [Starlark](https://github.com/bazelbuild/starlark), the
 strict-Python-subset language Bazel and Buck2 use. It's about as close to
 "what a 7B coder model writes when asked for Python" as any safe language
 gets. No imports, no top-level for/if, no f-strings — but stock Python idioms
 like `def`, list/dict comprehensions inside functions, normal string
 operations, all work. Crucially, **Starlark is a real language with a real
-ecosystem** (LSPs, formatters, well-defined semantics). Aegis adds nothing
+ecosystem** (LSPs, formatters, well-defined semantics). Denyx adds nothing
 to it.
 
 ### 2. Don't bend the language
 
 The earlier project's reflex was: when the model emits non-Sigil idioms,
-expand the dialect. Aegis explicitly does the opposite. When a 7B model
+expand the dialect. Denyx explicitly does the opposite. When a 7B model
 emits `import json` (which Starlark rejects), the answer is to teach the
 model — via the system prompt, via RAG, via validator-in-loop retry. The
 runtime stays spec-compliant Starlark.
@@ -220,7 +220,7 @@ examples plus one retry on Starlark errors gets the entire current
 
 Sigil expressed policy in the same language the agent ran in — hard to
 reason about, easy for the agent to be confused into "modifying" it
-in-flight. Aegis's policy is **TOML**. It is parsed as configuration data,
+in-flight. Denyx's policy is **TOML**. It is parsed as configuration data,
 never as code. The agent script literally cannot rewrite or extend the
 policy from inside the sandbox. And because it's TOML, the same file is
 consumable by any agent runtime — Claude Code, Cursor, opencode, custom
@@ -230,17 +230,17 @@ spec.
 ## What Sigil's retrospective measured
 
 Numbers worth keeping in mind, because they motivated several design
-choices in Aegis:
+choices in Denyx:
 
 - **Stream C ceiling at parity:** Sigil's local-7B Stream C topped out at
   **7/30 multi-step tasks** despite extensive tuning effort.
-- **Aegis with a stock 7B (`qwen2.5-coder:7b`) alone, no cloud:**
+- **Denyx with a stock 7B (`qwen2.5-coder:7b`) alone, no cloud:**
   **10/10 single-step**, **36/36 multi-step** on the current expanded
   suite with embedding-RAG + 1-retry validator-in-loop. (The earlier
   27-29/31 figure quoted in older docs reflects the original 31-task
   version of the suite before some hardcoded URLs were refreshed and
   the redirect-blocking fix landed.)
-- **Aegis with cloud orchestrator layered on top of qwen+Aegis (same
+- **Denyx with cloud orchestrator layered on top of qwen+Denyx (same
   36-task suite):** Sonnet **30/36 / $1.37**, Opus **35/36 / $2.83**.
   In this mode the cloud model only does task decomposition and step
   routing; qwen still writes every Starlark program. The orchestrated
@@ -262,9 +262,9 @@ both stacks.
 ## Further reading
 
 - [conclusions.md](conclusions.md) — the original Sigil retrospective in
-  full. Twelve numbered conclusions; each is a design constraint Aegis
+  full. Twelve numbered conclusions; each is a design constraint Denyx
   inherits.
-- [project-plan.md](project-plan.md) — the initial Aegis design plan
+- [project-plan.md](project-plan.md) — the initial Denyx design plan
   (slices 1-3), kept as a historical artifact.
 - [03-architecture.md](03-architecture.md) — what the architecture choices
   here actually look like in code.

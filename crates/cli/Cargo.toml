@@ -1,18 +1,18 @@
 [package]
-name = "aegis-cli"
+name = "denyx-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Aegis CLI binary."
+description = "Denyx CLI binary."
 
 [[bin]]
-name = "aegis"
+name = "denyx"
 path = "src/main.rs"
 
 [dependencies]
-aegis-policy.workspace = true
-aegis-host.workspace = true
+denyx-policy.workspace = true
+denyx-host.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 clap.workspace = true

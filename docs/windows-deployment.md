@@ -1,8 +1,8 @@
-# Aegis on Windows
+# Denyx on Windows
 
 > ← [Back to docs README](README.md) · [Install](05-install.md) · [Architecture](03-architecture.md)
 
-This is the supported Windows deployment shape: **run `aegis-mcp`
+This is the supported Windows deployment shape: **run `denyx-mcp`
 inside WSL2 (Windows Subsystem for Linux) and let your host's MCP
 client talk to it through `wsl.exe -e`.** Windows ships a real Linux
 kernel via WSL2; bubblewrap and namespaces work exactly as they do
@@ -26,7 +26,7 @@ under Hyper-V, integrated as a Windows feature with first-class
 Microsoft support and no deprecation pressure. The wider ecosystem
 already uses it for "Linux-shaped tooling on Windows": the
 GitHub-Actions runner, Docker Desktop, Bun, Deno, the entire
-JetBrains line on Windows. Aegis is not special.
+JetBrains line on Windows. Denyx is not special.
 
 The cost is a one-time `wsl --install` on the Windows side. The
 benefit is that **the Windows deployment behaves identically to a
@@ -50,8 +50,8 @@ sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl gi
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-git clone https://github.com/<owner>/post-sigil aegis
-cd aegis
+git clone https://github.com/<owner>/post-sigil denyx
+cd denyx
 cargo build --release
 ```
 
@@ -61,13 +61,13 @@ host) configuration:
 ```jsonc
 {
   "mcpServers": {
-    "aegis": {
+    "denyx": {
       "command": "wsl.exe",
       "args": [
         "-d", "Ubuntu-24.04",
         "-e",
-        "/home/YOU/aegis/target/release/aegis-mcp",
-        "--policy", "/mnt/c/Users/YOU/projects/myapp/aegis.toml"
+        "/home/YOU/denyx/target/release/denyx-mcp",
+        "--policy", "/mnt/c/Users/YOU/projects/myapp/denyx.toml"
       ]
     }
   }
@@ -75,7 +75,7 @@ host) configuration:
 ```
 
 Replace `YOU` with your usernames (the WSL Linux user, and the
-Windows account name). The agent calls `aegis_run` from the host;
+Windows account name). The agent calls `denyx_run` from the host;
 the call traverses `wsl.exe -e` (stdio JSON-RPC), lands in the
 WSL2 distro, the script runs under bubblewrap, the printed output
 flows back up the pipe.
@@ -85,8 +85,8 @@ flows back up the pipe.
 | Component         | Why                                              | Link                                                   |
 |-------------------|--------------------------------------------------|--------------------------------------------------------|
 | Windows 10 21H2+ or Windows 11 | WSL2 baseline.                       | <https://learn.microsoft.com/windows/wsl/install>      |
-| WSL2 + Ubuntu     | The Linux kernel + userland Aegis runs on.       | (installed by `wsl --install`).                        |
-| Aegis             | The thing being sandboxed (built inside WSL).    | This repo.                                             |
+| WSL2 + Ubuntu     | The Linux kernel + userland Denyx runs on.       | (installed by `wsl --install`).                        |
+| Denyx             | The thing being sandboxed (built inside WSL).    | This repo.                                             |
 
 Hardware: any 64-bit machine with virtualization extensions enabled
 in the BIOS/UEFI (most x86-64 machines from the past decade; ARM
@@ -149,17 +149,17 @@ if ! command -v cargo >/dev/null; then
 fi
 ```
 
-### 3. Build Aegis inside WSL
+### 3. Build Denyx inside WSL
 
 ```sh
-git clone https://github.com/<owner>/post-sigil aegis
-cd aegis
+git clone https://github.com/<owner>/post-sigil denyx
+cd denyx
 cargo build --release
 ```
 
-The `target/release/aegis-mcp` is now a Linux ELF inside the WSL
+The `target/release/denyx-mcp` is now a Linux ELF inside the WSL
 distro. From Windows it's reachable at
-`\\wsl$\Ubuntu-24.04\home\YOU\aegis\target\release\aegis-mcp` — but
+`\\wsl$\Ubuntu-24.04\home\YOU\denyx\target\release\denyx-mcp` — but
 you'll typically address it via `wsl.exe -e` rather than that UNC
 path.
 
@@ -169,8 +169,8 @@ You have two choices, and both work:
 
 **(a) Policy on the Windows side, accessed via the auto-mount.** WSL2
 mounts each Windows drive at `/mnt/<letter>/`. So
-`C:\Users\YOU\projects\myapp\aegis.toml` is reachable inside WSL as
-`/mnt/c/Users/YOU/projects/myapp/aegis.toml`. **Use this when the
+`C:\Users\YOU\projects\myapp\denyx.toml` is reachable inside WSL as
+`/mnt/c/Users/YOU/projects/myapp/denyx.toml`. **Use this when the
 policy lives next to a Windows-side project tree the agent is
 editing.**
 
@@ -188,13 +188,13 @@ Edit your Claude Code MCP config (typically
 ```jsonc
 {
   "mcpServers": {
-    "aegis": {
+    "denyx": {
       "command": "wsl.exe",
       "args": [
         "-d", "Ubuntu-24.04",
         "-e",
-        "/home/YOU/aegis/target/release/aegis-mcp",
-        "--policy", "/mnt/c/Users/YOU/projects/myapp/aegis.toml"
+        "/home/YOU/denyx/target/release/denyx-mcp",
+        "--policy", "/mnt/c/Users/YOU/projects/myapp/denyx.toml"
       ]
     }
   }
@@ -220,8 +220,8 @@ In the Ubuntu shell:
 
 ```sh
 echo 'fs.read("/etc/shadow")' > /tmp/check.star
-~/aegis/target/release/aegis run \
-  --policy /mnt/c/Users/YOU/projects/myapp/aegis.toml \
+~/denyx/target/release/denyx run \
+  --policy /mnt/c/Users/YOU/projects/myapp/denyx.toml \
   /tmp/check.star
 ```
 
@@ -240,7 +240,7 @@ Ubuntu 24.04 inside WSL2:
 
 - WSL distro cold-start: 1–3 s.
 - First `wsl.exe -e` after boot: ~50 ms.
-- Subsequent `aegis_run` calls: dominated by Starlark + bwrap, the
+- Subsequent `denyx_run` calls: dominated by Starlark + bwrap, the
   pipe overhead is <5 ms.
 - File reads through `/mnt/c/...` (Windows drive): noticeably
   slower than Linux-native I/O. For policy files this is fine; for
@@ -252,7 +252,7 @@ Ubuntu 24.04 inside WSL2:
 ## Updating
 
 ```sh
-cd ~/aegis
+cd ~/denyx
 git pull
 cargo build --release
 ```
@@ -273,7 +273,7 @@ What you get:
 - ✅ Real OS-level isolation (bwrap + Linux namespaces) on a
   Microsoft-blessed kernel.
 - ✅ Same audit log, same policy file, same MCP surface as Linux.
-- ✅ No native Windows code paths to maintain in Aegis.
+- ✅ No native Windows code paths to maintain in Denyx.
 - ✅ Future-proof — WSL2 is a strategic Microsoft product with
   consistent investment.
 
@@ -300,7 +300,7 @@ If those tradeoffs are unacceptable, see "Alternatives" below.
 | **Docker Desktop** + container | Yes (container) | If your team already standardised on Docker on Windows. |
 | **Windows Sandbox** (per-call) | Partial         | Built into Windows Pro/Enterprise. Ephemeral; useful for one-shot runs but heavyweight per-call. |
 | **Multipass**                 | Yes             | Canonical's tool; simpler than full Hyper-V VMs. |
-| **Native AppContainer integration** | Future (Aegis v0.2+ at earliest) | When demand justifies the engineering. Not on the v0.1 roadmap. |
+| **Native AppContainer integration** | Future (Denyx v0.2+ at earliest) | When demand justifies the engineering. Not on the v0.1 roadmap. |
 
 The MCP wiring pattern is identical across all of these — only the
 `command` (`wsl.exe`/`docker.exe`/`hyper-v-run`) and the args change.
@@ -314,13 +314,13 @@ The MCP wiring pattern is identical across all of these — only the
   available, which doesn't have a real Linux kernel. Upgrade to
   21H2+ or use a Hyper-V VM directly.
 - **GUI agents inside the WSL distro.** WSLg works but isn't
-  required for `aegis-mcp`; this guide is headless.
+  required for `denyx-mcp`; this guide is headless.
 
 ## Where this fits in the docs
 
 | Doc                                       | Role |
 |-------------------------------------------|------|
-| **This doc** (`windows-deployment.md`)    | Run Aegis on Windows. Operational guide. |
+| **This doc** (`windows-deployment.md`)    | Run Denyx on Windows. Operational guide. |
 | [macos-deployment.md](macos-deployment.md) | The parallel doc for macOS + Lima. |
 | [05-install.md](05-install.md)            | Generic install (Linux native, plus pointers here for Windows / macOS). |
 | [04-policy-file.md](04-policy-file.md)    | Policy file reference. The same policy works on Linux, macOS-via-Lima, and Windows-via-WSL2. |

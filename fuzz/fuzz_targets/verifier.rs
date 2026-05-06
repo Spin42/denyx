@@ -8,8 +8,8 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use aegis_host::verifier::verify;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::verifier::verify;
+use denyx_policy::{Policy, PolicyFile};
 
 fn empty_policy() -> Policy {
     let file = PolicyFile::from_toml_str("").unwrap();

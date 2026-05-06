@@ -1,13 +1,13 @@
 [package]
-name = "aegis-host"
+name = "denyx-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Aegis embeddable Starlark host with capability-typed effects."
+description = "Denyx embeddable Starlark host with capability-typed effects."
 
 [dependencies]
-aegis-policy.workspace = true
+denyx-policy.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

@@ -13,62 +13,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-cli"
-version = "0.1.0"
-dependencies = [
- "aegis-host",
- "aegis-policy",
- "anyhow",
- "clap",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "aegis-host"
-version = "0.1.0"
-dependencies = [
- "aegis-policy",
- "allocative",
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "sha2",
- "starlark",
- "thiserror 2.0.18",
- "ureq",
-]
-
-[[package]]
-name = "aegis-mcp"
-version = "0.1.0"
-dependencies = [
- "aegis-host",
- "aegis-policy",
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "aegis-policy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "globset",
- "ipnet",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "toml",
- "url",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -432,6 +376,62 @@ dependencies = [
  "schemafy",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "denyx-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "denyx-host",
+ "denyx-policy",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "denyx-host"
+version = "0.1.0"
+dependencies = [
+ "allocative",
+ "anyhow",
+ "chrono",
+ "denyx-policy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "starlark",
+ "thiserror 2.0.18",
+ "ureq",
+]
+
+[[package]]
+name = "denyx-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "denyx-host",
+ "denyx-policy",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "denyx-policy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "globset",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+ "url",
 ]
 
 [[package]]

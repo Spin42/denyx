@@ -5,12 +5,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aegis_host::{verify_chain, AuditEvent, AuditSink, JsonlAuditSink, Runner, GENESIS_PREV_HASH};
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::{verify_chain, AuditEvent, AuditSink, JsonlAuditSink, Runner, GENESIS_PREV_HASH};
+use denyx_policy::{Policy, PolicyFile};
 
 fn fresh_log(prefix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "aegis_audit_chain_{}_{}_{}",
+        "denyx_audit_chain_{}_{}_{}",
         prefix,
         std::process::id(),
         std::time::SystemTime::now()
@@ -39,8 +39,8 @@ fn first_emit_uses_genesis_prev_hash_and_seq_one() {
     let lines = read_lines(&path);
     assert_eq!(lines.len(), 1);
     let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
-    assert_eq!(v["aegis_seq"].as_u64(), Some(1));
-    assert_eq!(v["aegis_prev_hash"].as_str(), Some(GENESIS_PREV_HASH));
+    assert_eq!(v["denyx_seq"].as_u64(), Some(1));
+    assert_eq!(v["denyx_prev_hash"].as_str(), Some(GENESIS_PREV_HASH));
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn verify_detects_in_place_mutation() {
     let any_hash_failure = report
         .failures
         .iter()
-        .any(|f| f.reason.contains("aegis_prev_hash mismatch"));
+        .any(|f| f.reason.contains("denyx_prev_hash mismatch"));
     assert!(
         any_hash_failure,
         "expected a prev_hash mismatch in failures: {:?}",
@@ -126,8 +126,8 @@ fn verify_detects_seq_jump() {
         "capability": "fs.read",
         "status": "allowed",
         "detail": {},
-        "aegis_seq": 1,
-        "aegis_prev_hash": GENESIS_PREV_HASH,
+        "denyx_seq": 1,
+        "denyx_prev_hash": GENESIS_PREV_HASH,
     });
     let l1_str = serde_json::to_string(&l1).unwrap();
     use sha2::{Digest, Sha256};
@@ -144,8 +144,8 @@ fn verify_detects_seq_jump() {
         "capability": "fs.read",
         "status": "allowed",
         "detail": {},
-        "aegis_seq": 5,
-        "aegis_prev_hash": l1_hex,
+        "denyx_seq": 5,
+        "denyx_prev_hash": l1_hex,
     });
     let l2_str = serde_json::to_string(&l2).unwrap();
     std::fs::write(&path, format!("{l1_str}\n{l2_str}\n")).unwrap();
@@ -155,7 +155,7 @@ fn verify_detects_seq_jump() {
     let any_seq_failure = report
         .failures
         .iter()
-        .any(|f| f.reason.contains("aegis_seq jump"));
+        .any(|f| f.reason.contains("denyx_seq jump"));
     assert!(any_seq_failure, "got: {:?}", report.failures);
 }
 

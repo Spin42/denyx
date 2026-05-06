@@ -5,7 +5,7 @@
 This document is the "I want to reproduce these numbers" guide. The
 project ships three evaluation harnesses under
 `examples/local_executor/`. Each one drives a real Ollama model + a
-real `aegis-mcp` subprocess against a curated task suite, so the
+real `denyx-mcp` subprocess against a curated task suite, so the
 results in [docs/09-local-executor.md](09-local-executor.md) are
 reproducible on any Linux/macOS machine with the prerequisites
 installed.
@@ -18,15 +18,15 @@ place:
 | Harness                 | Configuration                                              | Result        | Cost       | What it measures |
 |-------------------------|------------------------------------------------------------|---------------|------------|------------------|
 | `run.py`                | qwen2.5-coder:7b alone, 10 single-step tasks               | **10/10**     | $0         | Smoke test — your install is wired correctly, every capability gate fires once. |
-| `run_multistep.py`      | qwen2.5-coder:7b alone + RAG + 1-retry, 36 multi-step      | **36/36**     | $0         | The headline number. Local 7B + Aegis with no cloud orchestrator passes the full suite, including 5 feature-demo tasks pinning recent security fixes. |
-| `run_orchestrated.py`   | Sonnet → qwen+Aegis, 36-task suite                         | **30/36**     | **$1.37**  | Cloud orchestrator on top of the same stack; 6 misses are model-side artifacts (refusal pattern + paraphrase). |
-| `run_orchestrated.py`   | Opus → qwen+Aegis, 36-task suite (fresh GitHub quota)      | **35/36**     | **$2.83**  | Same shape; the single miss is a verify-hook substring strictness issue (Opus paraphrased `[REDACTED]`). |
+| `run_multistep.py`      | qwen2.5-coder:7b alone + RAG + 1-retry, 36 multi-step      | **36/36**     | $0         | The headline number. Local 7B + Denyx with no cloud orchestrator passes the full suite, including 5 feature-demo tasks pinning recent security fixes. |
+| `run_orchestrated.py`   | Sonnet → qwen+Denyx, 36-task suite                         | **30/36**     | **$1.37**  | Cloud orchestrator on top of the same stack; 6 misses are model-side artifacts (refusal pattern + paraphrase). |
+| `run_orchestrated.py`   | Opus → qwen+Denyx, 36-task suite (fresh GitHub quota)      | **35/36**     | **$2.83**  | Same shape; the single miss is a verify-hook substring strictness issue (Opus paraphrased `[REDACTED]`). |
 
 ### How to read these
 
 - **`qwen alone: 36/36` is the runtime measurement.** No Anthropic
   API call, no `claude` binary, no cloud orchestrator. A stock 7B
-  model writes Starlark, Aegis enforces the policy, the verify
+  model writes Starlark, Denyx enforces the policy, the verify
   hooks check both printed output AND filesystem state. This is
   what the project is fundamentally claiming: a local 7B + an
   addition-based Starlark runtime is enough to pass a 36-task
@@ -39,16 +39,16 @@ place:
 
   | Bucket | Why it fails the verify hook | Counts as a runtime bug? |
   |--------|------------------------------|--------------------------|
-  | Sonnet preemptive refusal on DENY tasks | The orchestrator recognises a task as "obviously unsafe" (`/etc/passwd`, `AWS_SECRET_ACCESS_KEY`, IMDS SSRF) and refuses to delegate any step. Aegis would have correctly denied if it had been called. | No — the refusal is at a *higher* layer than the gate, not a bypass. |
-  | Verify-hook substring strictness on LOCAL_ONLY / argv-gate tasks | Aegis correctly substitutes `[REDACTED]` in the redacted output and surfaces `subprocess.exec` in argv-gate errors; the orchestrator then paraphrases qwen's literal output ("content was redacted by Aegis policy") instead of preserving the sentinel verbatim, and the verify hook does a substring match. | No — the redaction/denial worked; the test is over-strict on output format. |
-  | `api.github.com` 60-req/hour rate-limit *(only affects back-to-back runs)* | If you run two models back-to-back without setting `GH_TOKEN`, the second model's HTTP fetches will mostly 403. Not a factor in the numbers above (run on a fresh quota). | No — direct `aegis run` against the same URLs succeeds; this is an environmental flake, not a runtime issue. |
+  | Sonnet preemptive refusal on DENY tasks | The orchestrator recognises a task as "obviously unsafe" (`/etc/passwd`, `AWS_SECRET_ACCESS_KEY`, IMDS SSRF) and refuses to delegate any step. Denyx would have correctly denied if it had been called. | No — the refusal is at a *higher* layer than the gate, not a bypass. |
+  | Verify-hook substring strictness on LOCAL_ONLY / argv-gate tasks | Denyx correctly substitutes `[REDACTED]` in the redacted output and surfaces `subprocess.exec` in argv-gate errors; the orchestrator then paraphrases qwen's literal output ("content was redacted by Denyx policy") instead of preserving the sentinel verbatim, and the verify hook does a substring match. | No — the redaction/denial worked; the test is over-strict on output format. |
+  | `api.github.com` 60-req/hour rate-limit *(only affects back-to-back runs)* | If you run two models back-to-back without setting `GH_TOKEN`, the second model's HTTP fetches will mostly 403. Not a factor in the numbers above (run on a fresh quota). | No — direct `denyx run` against the same URLs succeeds; this is an environmental flake, not a runtime issue. |
 
-- **What this implies for "how good is Aegis."** The runtime layer
+- **What this implies for "how good is Denyx."** The runtime layer
   is at parity with itself across single-step, multi-step, and
   orchestrated configurations: the *same* policy enforces the
   *same* gates and produces the *same* denials. Where the
   orchestrated numbers dip below 36/36 is a measurement of the
-  orchestrator's behavior, not Aegis's.
+  orchestrator's behavior, not Denyx's.
 
 - **What this implies for cost.** The orchestrated mode buys you
   task decomposition and step routing for ~$0.04/task (Sonnet) to
@@ -88,8 +88,8 @@ Build the workspace once:
 cargo build --release
 ```
 
-That produces `target/release/aegis` and `target/release/aegis-mcp`.
-The harnesses look for `aegis-mcp` at that path by default; pass
+That produces `target/release/denyx` and `target/release/denyx-mcp`.
+The harnesses look for `denyx-mcp` at that path by default; pass
 `--mcp-bin <path>` to override.
 
 ## The three harnesses
@@ -111,7 +111,7 @@ modern hardware.
 Flags:
 - `--model <name>` — pick a different Ollama model (default: `qwen2.5-coder:7b`)
 - `--ollama <url>` — non-default Ollama URL (default: `http://localhost:11434`)
-- `--mcp-bin <path>` — non-default `aegis-mcp` location
+- `--mcp-bin <path>` — non-default `denyx-mcp` location
 
 ### 2. `run_multistep.py` — multi-step composition (the headline eval)
 
@@ -147,7 +147,7 @@ python3 examples/local_executor/run_multistep.py
 
 Expected: **36/36** in the most recent fresh run with
 `qwen2.5-coder:7b` + embedding-based RAG retrieval (`rag.py`) +
-one validator-in-loop retry on Aegis errors. The five feature-demo
+one validator-in-loop retry on Denyx errors. The five feature-demo
 tasks pass deterministically (each tests a runtime layer the
 model doesn't need to think about). The 31 "capability
 composition" tasks all pass once the RAG and retry are wired in;
@@ -173,15 +173,15 @@ Flags:
 - `--only <name>` — run a single named task
 - `--category <name>` — run all tasks in one category
 - `--show-script` — print each generated Starlark program
-- `--keep-artifacts` — leave `/tmp/aegis_demo/` populated for inspection
+- `--keep-artifacts` — leave `/tmp/denyx_demo/` populated for inspection
 
-### 3. `run_orchestrated.py` — Sonnet/Opus → local executor → Aegis
+### 3. `run_orchestrated.py` — Sonnet/Opus → local executor → Denyx
 
 The full agentic stack. A cloud orchestrator (Claude Sonnet or Opus
 via the `claude` CLI) is restricted to a single tool —
 `delegate_to_local` — exposed by `local_mcp.py`. The bridge layer
 forwards each step to qwen, which writes Starlark, which runs
-through `aegis-mcp` under your project policy.
+through `denyx-mcp` under your project policy.
 
 ```sh
 python3 examples/local_executor/run_orchestrated.py --models sonnet opus --all
@@ -212,7 +212,7 @@ The orchestrated scores trail the qwen-alone 36/36 because of
   Sonnet's misses + the single Opus miss). The redaction in the
   runtime correctly replaces the secret with `[REDACTED]`; the
   orchestrator then paraphrases the step output ("content was
-  redacted by Aegis policy") and the literal substring
+  redacted by Denyx policy") and the literal substring
   `[REDACTED]` doesn't survive verbatim.
 - **`api.github.com` rate-limit if you run back-to-back without
   `GH_TOKEN`.** Not a factor in the numbers above (this run had a
@@ -237,19 +237,19 @@ Each task prints a one-line verdict:
 
 ```
 == [file] count_error_lines (expect: success)
-   ✓ mcp=OK  (1234 ms)  /tmp/aegis_demo/multistep/out/error_count.txt has numeric content (1 chars)
+   ✓ mcp=OK  (1234 ms)  /tmp/denyx_demo/multistep/out/error_count.txt has numeric content (1 chars)
 ```
 
 Reading right to left:
 - The right-hand side is the **verify hook's reason** — a sentence
   describing what was checked.
-- `(1234 ms)` is wall-time including model inference + Aegis run.
-- `mcp=OK` means Aegis returned without error (or `ERR` if it did).
+- `(1234 ms)` is wall-time including model inference + Denyx run.
+- `mcp=OK` means Denyx returned without error (or `ERR` if it did).
 - `✓` / `✗` is whether the verify hook accepted the result.
 
 A run ends with a summary like `36/36 passed` plus a per-category
 breakdown. Failures print extra context: the generated Starlark
-program (with `--show-script`) and the Aegis error message.
+program (with `--show-script`) and the Denyx error message.
 
 ## Adding a new task
 
@@ -264,7 +264,7 @@ Task(
     expect="success",   # or "denied" for tasks that must be rejected
     setup=lambda: shutil.copy(...),  # optional fixture creation
     verify=vh_file_contains(OUT / "count.txt", "vowels"),
-    cleanup=None,       # optional; default removes /tmp/aegis_demo/...
+    cleanup=None,       # optional; default removes /tmp/denyx_demo/...
 ),
 ```
 

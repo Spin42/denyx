@@ -1,5 +1,5 @@
 //! Pre-execution verifier. Walks the script source for any reference to
-//! a known Aegis capability name and rejects the script before evaluation
+//! a known Denyx capability name and rejects the script before evaluation
 //! if the capability is not in `policy.functions.allow`.
 //!
 //! This is the "compile-time" line of defense. The runtime interceptor
@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use aegis_policy::Policy;
+use denyx_policy::Policy;
 
 use crate::CAPABILITIES;
 

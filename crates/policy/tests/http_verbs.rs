@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 
 fn build(toml: &str) -> Policy {
     let file = PolicyFile::from_toml_str(toml).unwrap();

@@ -8,8 +8,8 @@
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 
-use aegis_host::{AegisError, Runner};
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::{DenyxError, Runner};
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str, root: PathBuf) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -19,7 +19,7 @@ fn runner_for(toml: &str, root: PathBuf) -> Runner {
 
 fn fresh_dir(prefix: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "aegis_symlink_{}_{}_{}",
+        "denyx_symlink_{}_{}_{}",
         prefix,
         std::process::id(),
         std::time::SystemTime::now()
@@ -40,7 +40,7 @@ fn fs_read_via_symlink_to_outside_target_is_blocked() {
     let root = fresh_dir("read_block");
     std::fs::create_dir_all(root.join("src")).unwrap();
     let outside = std::env::temp_dir().join(format!(
-        "aegis_outside_target_{}_{}",
+        "denyx_outside_target_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -66,7 +66,7 @@ print(x)
     );
     let err = runner.run("t", &src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "symlink target outside allow should be denied; got: {err:?}"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -116,7 +116,7 @@ fn fs_write_via_symlink_to_outside_target_is_blocked() {
     let root = fresh_dir("write_block");
     std::fs::create_dir_all(root.join("build")).unwrap();
     let outside_dir = std::env::temp_dir().join(format!(
-        "aegis_outside_write_{}_{}",
+        "denyx_outside_write_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -144,7 +144,7 @@ write_allow = ["{abs}/build/**"]
     );
     let err = runner.run("t", &src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "symlink-redirected write must be denied; got: {err:?}"
     );
     // Confirm the outside file wasn't actually overwritten.

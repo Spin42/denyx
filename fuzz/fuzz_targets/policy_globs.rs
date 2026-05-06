@@ -9,7 +9,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 use std::path::Path;
 
 fuzz_target!(|data: &[u8]| {
@@ -48,7 +48,7 @@ delete_allow = ["{}"]
     let Ok(file) = PolicyFile::from_toml_str(&toml) else {
         return;
     };
-    let Ok(policy) = Policy::from_file(file, std::path::PathBuf::from("/tmp/aegis_fuzz")) else {
+    let Ok(policy) = Policy::from_file(file, std::path::PathBuf::from("/tmp/denyx_fuzz")) else {
         return;
     };
     let p = Path::new(&path);

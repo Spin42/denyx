@@ -13,19 +13,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-fuzz"
+name = "denyx-fuzz"
 version = "0.0.0"
 dependencies = [
- "aegis-host",
- "aegis-policy",
+ "denyx-host",
+ "denyx-policy",
  "libfuzzer-sys",
 ]
 
 [[package]]
-name = "aegis-host"
+name = "denyx-host"
 version = "0.1.0"
 dependencies = [
- "aegis-policy",
+ "denyx-policy",
  "allocative",
  "anyhow",
  "chrono",
@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-policy"
+name = "denyx-policy"
 version = "0.1.0"
 dependencies = [
  "anyhow",

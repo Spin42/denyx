@@ -2,7 +2,7 @@
 
 > ← [Back to docs README](README.md)
 
-Aegis runs mutation testing on its security-critical core via
+Denyx runs mutation testing on its security-critical core via
 [`cargo-mutants`](https://mutants.rs/). The CI workflow is
 [`.github/workflows/mutants.yml`](../.github/workflows/mutants.yml);
 the per-project configuration is
@@ -118,7 +118,7 @@ For each entry in `missed.txt`, decide:
    branch). Either is the right answer; "add a test that asserts
    dead code stays dead" is rarely useful.
 
-The acceptance bar for an Aegis PR is **no new surviving mutants in
+The acceptance bar for an Denyx PR is **no new surviving mutants in
 the policy-gate decision functions** (the boolean classifiers and
 the `check_*` methods on `Policy` — `requires_approval`,
 `*_is_local_only`, `check_subprocess_command`,

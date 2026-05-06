@@ -1,6 +1,6 @@
-//! Integration tests for the `aegis init` policy generator.
+//! Integration tests for the `denyx init` policy generator.
 //!
-//! Spawns the compiled `aegis` binary, asks it to generate a policy
+//! Spawns the compiled `denyx` binary, asks it to generate a policy
 //! for each supported language, and verifies that:
 //!   - exit is 0
 //!   - stdout is a non-empty TOML body
@@ -13,18 +13,18 @@
 
 use std::process::Command;
 
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 
-const BIN: &str = env!("CARGO_BIN_EXE_aegis");
+const BIN: &str = env!("CARGO_BIN_EXE_denyx");
 
 fn run_init_to_stdout(lang: &str) -> String {
     let out = Command::new(BIN)
         .args(["init", "--lang", lang, "--output", "-"])
         .output()
-        .expect("spawn aegis init");
+        .expect("spawn denyx init");
     assert!(
         out.status.success(),
-        "aegis init --lang {lang} failed: stderr={}",
+        "denyx init --lang {lang} failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("stdout is utf-8")
@@ -156,7 +156,7 @@ fn unknown_language_is_rejected() {
     let out = Command::new(BIN)
         .args(["init", "--lang", "cobol", "--output", "-"])
         .output()
-        .expect("spawn aegis init");
+        .expect("spawn denyx init");
     assert!(!out.status.success(), "unknown lang must error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -168,7 +168,7 @@ fn unknown_language_is_rejected() {
 #[test]
 fn refuses_to_overwrite_existing_file_without_force() {
     let dir = tempdir();
-    let target = dir.join("aegis.toml");
+    let target = dir.join("denyx.toml");
     std::fs::write(&target, "# pre-existing").unwrap();
 
     let out = Command::new(BIN)
@@ -180,7 +180,7 @@ fn refuses_to_overwrite_existing_file_without_force() {
             target.to_str().unwrap(),
         ])
         .output()
-        .expect("spawn aegis init");
+        .expect("spawn denyx init");
     assert!(!out.status.success(), "should refuse overwrite");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("already exists"));
@@ -192,7 +192,7 @@ fn refuses_to_overwrite_existing_file_without_force() {
 #[test]
 fn force_overwrites_existing_file() {
     let dir = tempdir();
-    let target = dir.join("aegis.toml");
+    let target = dir.join("denyx.toml");
     std::fs::write(&target, "# pre-existing").unwrap();
 
     let out = Command::new(BIN)
@@ -205,7 +205,7 @@ fn force_overwrites_existing_file() {
             "--force",
         ])
         .output()
-        .expect("spawn aegis init");
+        .expect("spawn denyx init");
     assert!(out.status.success(), "force should succeed");
     let written = std::fs::read_to_string(&target).unwrap();
     assert!(written.contains("inherits = \"secure-defaults\""));
@@ -213,7 +213,7 @@ fn force_overwrites_existing_file() {
 
 fn tempdir() -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!(
-        "aegis_init_test_{}_{}",
+        "denyx_init_test_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

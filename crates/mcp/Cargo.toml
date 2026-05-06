@@ -1,18 +1,18 @@
 [package]
-name = "aegis-mcp"
+name = "denyx-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Aegis MCP server: exposes the policy-gated Starlark host over stdio JSON-RPC."
+description = "Denyx MCP server: exposes the policy-gated Starlark host over stdio JSON-RPC."
 
 [[bin]]
-name = "aegis-mcp"
+name = "denyx-mcp"
 path = "src/main.rs"
 
 [dependencies]
-aegis-policy.workspace = true
-aegis-host.workspace = true
+denyx-policy.workspace = true
+denyx-host.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 serde.workspace = true

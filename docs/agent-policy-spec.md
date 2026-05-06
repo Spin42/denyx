@@ -5,7 +5,7 @@
 A portable, tool-agnostic format for declaring what an autonomous (or
 semi-autonomous) coding agent is permitted to do in a given environment.
 
-The spec is implementation-neutral. Aegis (this repository) is a
+The spec is implementation-neutral. Denyx (this repository) is a
 reference runtime that enforces it for Starlark agent scripts, but the
 file format is intended to be consumable by any agentic system —
 Claude Code, opencode, Cursor, Continue, Aider, custom CLI agents,
@@ -21,10 +21,10 @@ The rest of this document covers:
 - [The TOML schema](#the-toml-schema)
 - [Inheritance and presets](#inheritance-and-presets)
 - [Enforcement semantics](#enforcement-semantics)
-- [Implementer's guide](#implementers-guide-non-aegis-systems)
+- [Implementer's guide](#implementers-guide-non-denyx-systems)
 - [Reference policies](#reference-policies)
 - [Compatibility and versioning](#compatibility-and-versioning)
-- [Aegis as the reference implementation](#aegis-as-the-reference-implementation)
+- [Denyx as the reference implementation](#denyx-as-the-reference-implementation)
 
 ---
 
@@ -202,7 +202,7 @@ max_callstack_size = 256
 # ----- Host tools (optional) -----
 [tools]
 # Map external tool names (as exposed by an MCP host or an IDE agent
-# runtime) to the dotted Aegis capabilities they require. A consuming
+# runtime) to the dotted Denyx capabilities they require. A consuming
 # host that receives a tool call by name (Bash, Read, Edit, WebFetch...)
 # looks up the name here, gets back the implied capabilities, and
 # verifies each is enabled (i.e. has a populated resource section)
@@ -398,7 +398,7 @@ smell — pick one.
 A v1-conformant implementation MUST ship at least the
 `secure-defaults` preset, covering universally-bad actions on any
 project: well-known credential paths, secret env var names,
-destructive shell commands, the cloud metadata IP. The Aegis
+destructive shell commands, the cloud metadata IP. The Denyx
 runtime's preset is reproduced in
 `crates/policy/src/presets.rs`.
 
@@ -456,7 +456,7 @@ allowed.
   before initiating the request and run each resolved A/AAAA
   through the `deny_ips` check. This catches the case where a
   hostname (which passed the host glob check) resolves to an
-  internal IP. Aegis fails open on resolution errors (a temporary
+  internal IP. Denyx fails open on resolution errors (a temporary
   DNS hiccup shouldn't block legitimate traffic) and matches at
   the IP layer; full defense against DNS rebinding requires
   resolved-IP pinning passed into the HTTP client, which is beyond
@@ -465,7 +465,7 @@ allowed.
   call. Implementations SHOULD apply it as the total request
   timeout (connect + read + write); a request that fails to
   complete within the budget surfaces as a runtime error. Default
-  in Aegis is 30 seconds when unset. Keeping the timeout low (5–10s)
+  in Denyx is 30 seconds when unset. Keeping the timeout low (5–10s)
   is a defense-in-depth against unhealthy backends hanging the
   agent indefinitely.
 
@@ -482,14 +482,14 @@ allowed.
   `add` matches both `bundle add` *and* `bundle config add` even though
   only the first was intended; mitigation is to write more specific
   patterns (`"add "` with trailing space, or include the gem name).
-  Implementers MAY skip the arg-level check in v1; Aegis implements it.
+  Implementers MAY skip the arg-level check in v1; Denyx implements it.
 
 ### Subprocess is a privilege boundary
 
 Listing a binary in `allow_commands` is a *privilege grant*, not just
 a permission. Every implementation MUST treat the choice as such.
 
-The runtime gates argv at three levels (Aegis names; ports may rename):
+The runtime gates argv at three levels (Denyx names; ports may rename):
 
 1. **Command gate** — argv[0] must pass `allow_commands` and
    `deny_commands` (above).
@@ -497,7 +497,7 @@ The runtime gates argv at three levels (Aegis names; ports may rename):
 3. **Argv path gate** — every argv element that *looks like a path*
    (absolute, starts with `~/`, contains `/`, or names an existing
    file at the policy root) is checked against the same `[filesystem]`
-   rules as `fs.read` / `fs.write`. Aegis rejects
+   rules as `fs.read` / `fs.write`. Denyx rejects
    `subprocess.exec(["cat", "/etc/passwd"])` if `/etc/passwd` is
    outside the read-side allow lists. Implementers SHOULD do the
    same; a port that skips this check has a real bypass for any
@@ -515,7 +515,7 @@ What these gates **cannot** see:
   literal `/`, the path is computed at runtime, and the gate is
   blind. **Implementations MUST treat shell evaluators and inline-
   exec interpreters as wholesale-bypass commands** and either
-  deny them by default or document the consequence loudly. Aegis's
+  deny them by default or document the consequence loudly. Denyx's
   `secure-defaults` preset denies them; language templates that
   legitimately need an interpreter (Python, Node, Ruby) negate
   the deny AND add a `deny_args` entry blocking the inline-exec
@@ -523,18 +523,18 @@ What these gates **cannot** see:
 
 - **Paths read from environment variables or stdin** by the
   binary. Defense: filter the child env to the declared
-  `allow_vars` only (Aegis does this), and don't pipe untrusted
+  `allow_vars` only (Denyx does this), and don't pipe untrusted
   content into the child's stdin.
 
 - **Children of generic command runners** (`env CMD`, `xargs CMD`,
   `find -exec CMD`, `timeout CMD`, `nohup CMD`, ...). These
   binaries spawn whatever command they're told to spawn, sidestepping
-  `allow_commands` for the actual work. Aegis's `secure-defaults`
+  `allow_commands` for the actual work. Denyx's `secure-defaults`
   denies them and adds `find = ["-exec", "-execdir"]` to
   `deny_args`. Implementers SHOULD do the same.
 
 For total isolation, implementers SHOULD additionally provide an
-opt-in OS-level sandbox backend (Aegis: `[subprocess].sandbox =
+opt-in OS-level sandbox backend (Denyx: `[subprocess].sandbox =
 "bwrap"` on Linux). With sandboxing on, the child's filesystem
 view is exactly what the policy bind-mounts in; paths outside the
 view do not exist for the child no matter what obfuscation is
@@ -556,8 +556,8 @@ the side effect. The hook receives:
 
 The hook returns `Allow` or `Deny`. A `Deny` MUST be audit-logged
 with `status="denied"` and a stable reason string the orchestrator
-can match on (the Aegis implementation uses `"confirm hook denied"`
-in error messages and tags MCP responses with `aegis_error_kind:
+can match on (the Denyx implementation uses `"confirm hook denied"`
+in error messages and tags MCP responses with `denyx_error_kind:
 "confirm_denied"`).
 
 How the hook surfaces the escalation depends on the host:
@@ -614,7 +614,7 @@ JSON Lines is the recommended on-disk format. Tamper-evident options
 (signed lines, Merkle chaining) are out of scope for v1 of the spec
 but compatible with the wire format.
 
-## Implementer's guide (non-Aegis systems)
+## Implementer's guide (non-Denyx systems)
 
 To consume this spec from your own agent host:
 
@@ -701,7 +701,7 @@ out of the box:
   `bundle add` via `[subprocess.deny_args]`.
 
 Cargo'ed copies of all three live alongside this spec. They're
-useful as both running-Aegis demos and as portable templates for any
+useful as both running-Denyx demos and as portable templates for any
 agent host implementing the spec.
 
 ## Compatibility and versioning
@@ -748,36 +748,36 @@ A compatibility profile in your README or product docs is encouraged:
 > enforced (Slice 2 follow-up). (2) The `bwrap` sandbox backend is
 > Linux-only; macOS / Windows fall back to the language-level gate.
 
-## Aegis as the reference implementation
+## Denyx as the reference implementation
 
-Aegis (this repository) is one runtime that implements this spec:
+Denyx (this repository) is one runtime that implements this spec:
 
 - Embeds Starlark via `starlark-rust 0.13` and exposes the canonical
   capability set as Starlark builtins (`fs.read`, `net.http_get`,
   `subprocess.exec`, etc.) under a curated namespace.
-- Three integration surfaces: standalone CLI (`aegis run --policy
-  ... <script>`), embeddable Rust crate (`aegis-host`), and an MCP
-  server (`aegis-mcp --policy ... <stdio>`). All three reuse the
+- Three integration surfaces: standalone CLI (`denyx run --policy
+  ... <script>`), embeddable Rust crate (`denyx-host`), and an MCP
+  server (`denyx-mcp --policy ... <stdio>`). All three reuse the
   same `host::Runner` enforcement core.
 - The MCP server speaks newline-delimited JSON-RPC 2.0 on stdio and
-  exposes nine tools: a primary `aegis_run(script)` for full
-  Starlark programs, per-capability sugar (`aegis_fs_read`,
-  `aegis_fs_write`, `aegis_fs_delete`, `aegis_subprocess_exec`,
-  `aegis_net_http_get`, `aegis_net_http_post`, `aegis_env_read`),
-  and a read-only oracle `aegis_tool_routing(name?)` that returns
+  exposes nine tools: a primary `denyx_run(script)` for full
+  Starlark programs, per-capability sugar (`denyx_fs_read`,
+  `denyx_fs_write`, `denyx_fs_delete`, `denyx_subprocess_exec`,
+  `denyx_net_http_get`, `denyx_net_http_post`, `denyx_env_read`),
+  and a read-only oracle `denyx_tool_routing(name?)` that returns
   the `[tools.X]` records (capabilities, backend_url, backend_method,
   description, allowed flag) so a calling host can consult the
   policy's tool surface without re-parsing the TOML.
   Hosts that prefer one MCP call per discrete action use the sugar;
   hosts whose agents naturally compose multi-step Starlark prefer
-  `aegis_run`. All surfaces share the same enforcement code path.
+  `denyx_run`. All surfaces share the same enforcement code path.
 
-### Enforcement coverage in Aegis today
+### Enforcement coverage in Denyx today
 
 Every section of the v1 schema is actively enforced by the runtime.
 The honest picture:
 
-| Section / field                  | Aegis enforcement |
+| Section / field                  | Denyx enforcement |
 |----------------------------------|-------------------|
 | `[filesystem]` (read/write/delete allow + deny) | ✅ enforced |
 | `[network]` http_get, http_post  | ✅ enforced |
@@ -793,7 +793,7 @@ The honest picture:
 | `[filesystem].local_only_read` / `[network].local_only_hosts` | ✅ enforced; values tainted at output boundary (printed, audit, MCP result) |
 | Derived capability set            | ✅ enforced (verifier + runtime); auto-derived from populated resource sections, no `[functions]` block |
 | `[tools]` short and long form     | ✅ enforced via Policy::check_tool; long form's backend_url / backend_method routing hints exposed via Policy::tool_routing for bridge layers |
-| `requires_approval`               | ✅ enforced via ConfirmHook; `aegis-mcp --confirm-mode {auto,elicit,auto-deny,auto-allow}` selects behavior. `auto` (default) sends MCP `elicitation/create` when the client advertises elicitation, otherwise falls back to `auto-deny`. `auto-deny` tags responses with `aegis_error_kind: "confirm_denied"` for orchestrator branching. |
+| `requires_approval`               | ✅ enforced via ConfirmHook; `denyx-mcp --confirm-mode {auto,elicit,auto-deny,auto-allow}` selects behavior. `auto` (default) sends MCP `elicitation/create` when the client advertises elicitation, otherwise falls back to `auto-deny`. `auto-deny` tags responses with `denyx_error_kind: "confirm_denied"` for orchestrator branching. |
 | Self-writable guard              | ✅ enforced at load — refuses any policy whose write_allow / delete_allow matches the policy file itself |
 | `inherits` (presets)             | ✅ resolved at load |
 
@@ -805,5 +805,5 @@ or rely on `[subprocess].allow_commands` and
 binaries.
 
 Other implementations are welcome. The spec is intentionally
-implementation-neutral; Aegis serves as a reference that proves the
+implementation-neutral; Denyx serves as a reference that proves the
 model is enforceable, not as the only correct way to enforce it.

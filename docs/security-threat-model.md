@@ -1,10 +1,10 @@
-# Aegis Security Threat Model
+# Denyx Security Threat Model
 
 > ← [Back to docs README](README.md)
 
 This is the one-page review companion. If you're a security engineer
 sitting down with the codebase for the first time, **read this first**
-— it lists exactly what Aegis claims to defend against, what it
+— it lists exactly what Denyx claims to defend against, what it
 explicitly does *not* defend against, and where the trust boundaries
 sit. Everything below is what you should hold the implementation
 accountable to.
@@ -16,13 +16,13 @@ ratings and closure verification), see
 [security-pentest-report.md](security-pentest-report.md). For the
 policy file reference, see [04-policy-file.md](04-policy-file.md).
 
-## What Aegis is
+## What Denyx is
 
 A Rust runtime that runs Starlark agent code under a TOML-declared
-policy. Three crates do the work: `aegis-policy` parses and resolves
-the policy; `aegis-host` embeds Starlark and enforces the policy at
+policy. Three crates do the work: `denyx-policy` parses and resolves
+the policy; `denyx-host` embeds Starlark and enforces the policy at
 every effecting builtin (`fs.*`, `net.*`, `subprocess.exec`,
-`env.read`); `aegis-mcp` exposes the same enforcement over JSON-RPC
+`env.read`); `denyx-mcp` exposes the same enforcement over JSON-RPC
 to MCP-aware orchestrators. There is no plugin model and no dynamic
 policy: every effect goes through one of nine Rust functions, all in
 `crates/host/src/`.
@@ -38,7 +38,7 @@ policy: every effect goes through one of nine Rust functions, all in
 | **Agent following an HTTP redirect to a denied host** | `net.http_*` does not auto-follow 3xx; the call returns a typed error and the script must re-issue against the new URL (which gets gated again). |
 | **Agent reading a denied path via a symlink the operator allowed** | `fs.*` canonicalize paths before the policy check; the symlink target — not the symlink itself — is what the policy sees. |
 | **Agent modifying its own policy or audit log** | `Policy::guard_audit_log` and the self-writable guard refuse to start if the policy file or audit log is reachable to the agent under any of `write_allow` / `delete_allow`. |
-| **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`aegis_seq` + `aegis_prev_hash`); `aegis audit verify` detects in-place mutations, line removals, and seq jumps. |
+| **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutations, line removals, and seq jumps. |
 
 ## What it does NOT defend against
 
@@ -81,7 +81,7 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   bounds wall time, but during that window an agent can busy-loop,
   allocate, or fork-bomb on Linux without `bwrap`. Run inside a
   container if you care about resource exhaustion.
-- **OS-level kernel bugs / sandbox escape.** Aegis is a *language-runtime*
+- **OS-level kernel bugs / sandbox escape.** Denyx is a *language-runtime*
   gate. Even with `[subprocess].sandbox = "bwrap"`, a kernel-level
   exploit defeats it. Run inside a VM if you care about kernel
   exploits.
@@ -129,14 +129,14 @@ the agent has no other surface.
 
 ## Assumptions
 
-- **Policy file is operator-controlled.** Aegis treats the policy
+- **Policy file is operator-controlled.** Denyx treats the policy
   as ground truth. If the agent can edit the policy, the policy is
   worthless — that's why `Policy::guard_self_writable` refuses to
   start with a policy that grants write/delete on itself.
 - **Single-threaded evaluation.** No TOCTOU between policy check
   and operation within one script — the evaluator is single-threaded.
-  Two concurrent `aegis run` invocations against shared state are
-  the operator's problem, not Aegis's.
+  Two concurrent `denyx run` invocations against shared state are
+  the operator's problem, not Denyx's.
 - **Filesystem rooted at the policy file.** Relative patterns
   (`src/**`) anchor at the policy-file directory, not the CWD.
   Operators don't need to leak their machine's directory structure
@@ -172,7 +172,7 @@ files:
 
 | Doc | Purpose |
 |-----|---------|
-| **This doc** (`security-threat-model.md`) | What Aegis claims to defend; what it doesn't. Read first. |
+| **This doc** (`security-threat-model.md`) | What Denyx claims to defend; what it doesn't. Read first. |
 | [security-audit.md](security-audit.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
 | [security-pentest-report.md](security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). Two High findings (base64, ROT-N), both remediated and closure-verified. Methodology + scope + residual risk. |
 | [04-policy-file.md](04-policy-file.md) | Policy file reference (operator-facing). |

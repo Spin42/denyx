@@ -8,15 +8,15 @@ and turns it into:
   1. A Starlark program emitted by a local Ollama model (qwen2.5-coder:7b
      by default), guided by the same in-context-RAG prompt + retrieval
      library used by run_multistep.py.
-  2. An execution through aegis-mcp, which runs the program under the
-     configured Aegis policy (filesystem/network/env/subprocess gating
+  2. An execution through denyx-mcp, which runs the program under the
+     configured Denyx policy (filesystem/network/env/subprocess gating
      plus audit log).
   3. A result string returned to the orchestrator: either the program's
-     printed output or the full Aegis diagnostic on failure.
+     printed output or the full Denyx diagnostic on failure.
 
 The retry-on-syntax-error loop from run_multistep.py is preserved: if
 the local model's first program produces a parse/eval error from
-Aegis (NOT a policy denial — those are returned as-is), the diagnostic
+Denyx (NOT a policy denial — those are returned as-is), the diagnostic
 is fed back and the model gets one fix-it attempt.
 
 This server is itself an MCP server. The orchestrator (Claude CLI)
@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rag  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_AEGIS_MCP = REPO_ROOT / "target" / "release" / "aegis-mcp"
+DEFAULT_DENYX_MCP = REPO_ROOT / "target" / "release" / "denyx-mcp"
 
 # tomllib is stdlib in Python 3.11+. We use it to surface the
 # `[tools.X]` routing hints to the local model. If the host runs an
@@ -132,7 +132,7 @@ def render_tools_routing(routes: list[dict]) -> str:
 
 PROTOCOL_VERSION = "2024-11-05"
 
-LOCAL_SYSTEM_PROMPT_TEMPLATE = """You are a local code executor running under the Aegis policy-enforced runtime.
+LOCAL_SYSTEM_PROMPT_TEMPLATE = """You are a local code executor running under the Denyx policy-enforced runtime.
 
 A cloud orchestrator (Claude Sonnet or Opus) is delegating a single step to you. Your job: produce a Starlark program that accomplishes that step. Starlark looks like Python but is a STRICT SUBSET — read the rules carefully.
 
@@ -191,7 +191,7 @@ Output ONLY the Starlark program. No commentary. No markdown fences. Begin immed
 
 
 # ---------------------------------------------------------------------------
-# Ollama + aegis-mcp clients
+# Ollama + denyx-mcp clients
 # ---------------------------------------------------------------------------
 
 def call_ollama_chat(
@@ -229,8 +229,8 @@ def strip_fences(text: str) -> str:
     return inner.strip()
 
 
-class AegisMcpClient:
-    """Subprocess client for aegis-mcp — speaks the same JSON-RPC
+class DenyxMcpClient:
+    """Subprocess client for denyx-mcp — speaks the same JSON-RPC
     protocol we expose upstream, just one layer down."""
 
     def __init__(self, mcp_bin: Path, policy: Path, audit_log: Path | None = None) -> None:
@@ -259,7 +259,7 @@ class AegisMcpClient:
             },
         )
         if "result" not in init:
-            raise RuntimeError(f"aegis-mcp initialize failed: {init}")
+            raise RuntimeError(f"denyx-mcp initialize failed: {init}")
 
     def _call(self, method: str, params: dict | None = None) -> dict:
         self._id += 1
@@ -273,13 +273,13 @@ class AegisMcpClient:
         assert self.proc.stdout is not None
         resp_line = self.proc.stdout.readline()
         if not resp_line:
-            raise RuntimeError("aegis-mcp server closed unexpectedly")
+            raise RuntimeError("denyx-mcp server closed unexpectedly")
         return json.loads(resp_line)
 
-    def aegis_run(self, script: str, task_id: str) -> dict:
+    def denyx_run(self, script: str, task_id: str) -> dict:
         return self._call(
             "tools/call",
-            {"name": "aegis_run", "arguments": {"script": script, "task_id": task_id}},
+            {"name": "denyx_run", "arguments": {"script": script, "task_id": task_id}},
         )
 
     def close(self) -> None:
@@ -295,7 +295,7 @@ class AegisMcpClient:
 
 
 # ---------------------------------------------------------------------------
-# Local executor pipeline (qwen + retry + aegis-mcp)
+# Local executor pipeline (qwen + retry + denyx-mcp)
 # ---------------------------------------------------------------------------
 
 def is_retryable(output_text: str) -> bool:
@@ -313,7 +313,7 @@ def build_retry_message(error_text: str, step: str) -> str:
         snippet = snippet[:597] + "..."
     return (
         "Your previous Starlark program produced this error from the "
-        "Aegis runtime:\n\n"
+        "Denyx runtime:\n\n"
         f"{snippet}\n\n"
         "Common fixes:\n"
         "  - top-level `for`/`if` → wrap in `def helper(): ...` and call it.\n"
@@ -328,7 +328,7 @@ def build_retry_message(error_text: str, step: str) -> str:
 
 
 def execute_step(
-    aegis: AegisMcpClient,
+    denyx: DenyxMcpClient,
     step: str,
     *,
     model: str,
@@ -353,7 +353,7 @@ def execute_step(
 
     counter[0] += 1
     task_id = f"orchestrated-{counter[0]}"
-    resp = aegis.aegis_run(script, task_id=task_id)
+    resp = denyx.denyx_run(script, task_id=task_id)
     result = resp.get("result", {})
     is_error = bool(result.get("isError", False))
     content = result.get("content", [{}])
@@ -369,7 +369,7 @@ def execute_step(
         script = strip_fences(raw)
         counter[0] += 1
         task_id = f"orchestrated-{counter[0]}-r{retries}"
-        resp = aegis.aegis_run(script, task_id=task_id)
+        resp = denyx.denyx_run(script, task_id=task_id)
         result = resp.get("result", {})
         is_error = bool(result.get("isError", False))
         content = result.get("content", [{}])
@@ -388,15 +388,15 @@ def tool_definitions() -> list[dict]:
             "name": "delegate_to_local",
             "description": (
                 "Delegate a single step to a local 7B-class executor model "
-                "(qwen2.5-coder:7b) running under the Aegis policy-enforced "
+                "(qwen2.5-coder:7b) running under the Denyx policy-enforced "
                 "runtime. The local executor synthesizes a Starlark program "
                 "from your step description and runs it. The program has "
                 "access to fs.read/write/delete, net.http_get/post, "
                 "subprocess.exec, env.read, json.encode/decode — every "
-                "effecting call goes through the Aegis policy (filesystem "
+                "effecting call goes through the Denyx policy (filesystem "
                 "deny patterns, network host/IP checks, subprocess command "
                 "and arg gates, env var allow/deny). Returns the program's "
-                "printed output on success, or the Aegis diagnostic on "
+                "printed output on success, or the Denyx diagnostic on "
                 "failure (policy denial, parse error, runtime crash).\n\n"
                 "Pass ONE atomic step per call. Decompose multi-step plans "
                 "yourself and dispatch sequentially — each call is "
@@ -429,7 +429,7 @@ def make_response(id_: object, result: dict | None = None, error: dict | None = 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", required=True, type=Path)
-    parser.add_argument("--mcp-bin", default=str(DEFAULT_AEGIS_MCP), type=Path)
+    parser.add_argument("--mcp-bin", default=str(DEFAULT_DENYX_MCP), type=Path)
     parser.add_argument("--model", default="qwen2.5-coder:7b")
     parser.add_argument("--ollama", default="http://localhost:11434")
     parser.add_argument("--audit-log", default=None, type=Path)
@@ -442,14 +442,14 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.mcp_bin.exists():
-        print(f"aegis-mcp binary not at {args.mcp_bin}", file=sys.stderr)
+        print(f"denyx-mcp binary not at {args.mcp_bin}", file=sys.stderr)
         return 2
 
     # Pre-warm the embedding cache before the first call so the first
     # tool invocation isn't slow.
     rag.precompute_library_embeddings(host=args.ollama)
 
-    aegis = AegisMcpClient(args.mcp_bin, args.policy, args.audit_log)
+    denyx = DenyxMcpClient(args.mcp_bin, args.policy, args.audit_log)
     counter = [0]
 
     # Load any [tools.X] long-form routing hints from the policy and
@@ -518,7 +518,7 @@ def main() -> int:
                         t0 = time.time()
                         try:
                             text, is_error, retries, script = execute_step(
-                                aegis,
+                                denyx,
                                 step,
                                 model=args.model,
                                 ollama_host=args.ollama,
@@ -546,7 +546,7 @@ def main() -> int:
                             f"retries={retries} duration={dur_ms}ms]"
                         )
                         body = header + "\n\n--- Starlark program executed ---\n" + script
-                        body += "\n\n--- Aegis result ---\n" + text
+                        body += "\n\n--- Denyx result ---\n" + text
                         resp = make_response(id_, result={
                             "content": [{"type": "text", "text": body}],
                             "isError": is_error,
@@ -559,7 +559,7 @@ def main() -> int:
             stdout.write(json.dumps(resp) + "\n")
             stdout.flush()
     finally:
-        aegis.close()
+        denyx.close()
     return 0
 
 

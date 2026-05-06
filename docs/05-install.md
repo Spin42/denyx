@@ -2,13 +2,13 @@
 
 > ← [Back to docs README](README.md)
 
-Aegis is a Rust workspace. There are no published crates yet — install
+Denyx is a Rust workspace. There are no published crates yet — install
 from source. The build process is the same on every platform; the
 *runtime layer* differs because OS-level isolation is platform-specific.
 
 ## Pick your platform
 
-| Host OS    | Where Aegis runs                          | Sandbox layer                   | Setup guide                                                |
+| Host OS    | Where Denyx runs                          | Sandbox layer                   | Setup guide                                                |
 |------------|-------------------------------------------|---------------------------------|------------------------------------------------------------|
 | **Linux**  | Native binary on the host                 | `bubblewrap` (`bwrap`) — native | This doc, "[Linux native](#linux-native)" below            |
 | **macOS**  | Linux binary inside a Lima VM             | `bubblewrap` inside the VM      | [macos-deployment.md](macos-deployment.md)                 |
@@ -17,16 +17,16 @@ from source. The build process is the same on every platform; the
 The same policy file, the same MCP surface, and the same audit-log
 shape work in all three configurations — the only thing that varies
 is the bridge between your MCP host (Claude Code, opencode, …) and
-the place `aegis-mcp` actually executes.
+the place `denyx-mcp` actually executes.
 
-If you're a *developer* of Aegis itself (modifying the Rust crates),
+If you're a *developer* of Denyx itself (modifying the Rust crates),
 you can build and run on any of the three; macOS and Windows builds
 are uncommon for the runtime path because the bwrap-backed sandbox
 is Linux-kernel-only.
 
 ## Linux (native)
 
-This is the canonical path. `aegis-mcp` runs as a Linux binary on
+This is the canonical path. `denyx-mcp` runs as a Linux binary on
 your host, with `bwrap` available on `PATH` for OS-level isolation
 when `[subprocess].sandbox = "bwrap"` is enabled in the policy.
 
@@ -45,30 +45,30 @@ bubblewrap. The policy then must use `[subprocess].sandbox = "none"`.
 ### 2. Build
 
 ```sh
-git clone https://github.com/<owner>/post-sigil aegis
-cd aegis
+git clone https://github.com/<owner>/post-sigil denyx
+cd denyx
 cargo build --release
 ```
 
 That produces three binaries under `target/release/`:
 
-- `aegis` — the CLI (run + init subcommands)
-- `aegis-mcp` — the MCP server
-- (`aegis-host` and `aegis-policy` are libraries, linked into both)
+- `denyx` — the CLI (run + init subcommands)
+- `denyx-mcp` — the MCP server
+- (`denyx-host` and `denyx-policy` are libraries, linked into both)
 
 Optionally put them on your `PATH`:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-ln -sf "$PWD/target/release/aegis"     "$HOME/.local/bin/aegis"
-ln -sf "$PWD/target/release/aegis-mcp" "$HOME/.local/bin/aegis-mcp"
+ln -sf "$PWD/target/release/denyx"     "$HOME/.local/bin/denyx"
+ln -sf "$PWD/target/release/denyx-mcp" "$HOME/.local/bin/denyx-mcp"
 ```
 
 ### 3. Smoke test
 
 ```sh
-aegis --help
-aegis init --lang python --output -    # writes a sample policy to stdout
+denyx --help
+denyx init --lang python --output -    # writes a sample policy to stdout
 ```
 
 ### 4. Run the test suite (optional)
@@ -85,15 +85,15 @@ See **[macos-deployment.md](macos-deployment.md)**. Short version:
 
 ```sh
 brew install lima
-limactl start --name=aegis examples/macos/aegis.lima.yaml
-limactl shell aegis -- bash -lc "cd '$PWD' && cargo build --release"
+limactl start --name=denyx examples/macos/denyx.lima.yaml
+limactl shell denyx -- bash -lc "cd '$PWD' && cargo build --release"
 ```
 
 Then point Claude Code's MCP config at
-`limactl shell aegis <path-to>/target/release/aegis-mcp ...`.
+`limactl shell denyx <path-to>/target/release/denyx-mcp ...`.
 
 The Lima template in
-[`examples/macos/aegis.lima.yaml`](../examples/macos/aegis.lima.yaml)
+[`examples/macos/denyx.lima.yaml`](../examples/macos/denyx.lima.yaml)
 provisions bubblewrap and the Rust toolchain on first boot. Builds
 and runs identically to a native Linux deployment from that point
 on.
@@ -114,19 +114,19 @@ sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl gi
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-git clone https://github.com/<owner>/post-sigil aegis
-cd aegis
+git clone https://github.com/<owner>/post-sigil denyx
+cd denyx
 cargo build --release
 ```
 
 Then point Claude Code's MCP config at
-`wsl.exe -d Ubuntu-24.04 -e <path-to>/target/release/aegis-mcp ...`.
+`wsl.exe -d Ubuntu-24.04 -e <path-to>/target/release/denyx-mcp ...`.
 
 ## Optional components
 
 These are independent of the OS-level setup above. Install them on
 the side that runs your *agent* (typically the host OS), not
-necessarily the side that runs `aegis-mcp`.
+necessarily the side that runs `denyx-mcp`.
 
 ### Ollama (for the local-executor flow)
 
@@ -167,7 +167,7 @@ curl -s http://localhost:11434/api/tags | head -c 200
 CLI. The orchestrated harness uses
 `claude -p ... --mcp-config ...` to run Sonnet or Opus as the
 orchestrator while delegating actual code to the local executor via
-`aegis-mcp`. See [07-claude-code.md](07-claude-code.md) for the
+`denyx-mcp`. See [07-claude-code.md](07-claude-code.md) for the
 integration setup.
 
 ```sh
@@ -205,10 +205,10 @@ The orchestrated and pentest harnesses additionally require the
 
 - [06-quickstart.md](06-quickstart.md) — generate a policy, run a
   script, watch the audit log.
-- [07-claude-code.md](07-claude-code.md) — wire Aegis into Claude
+- [07-claude-code.md](07-claude-code.md) — wire Denyx into Claude
   Code as an MCP tool.
 - [08-opencode.md](08-opencode.md) — same for opencode.
 - [09-local-executor.md](09-local-executor.md) — the full Sonnet/Opus
-  → local 7B → Aegis architecture.
+  → local 7B → Denyx architecture.
 - [macos-deployment.md](macos-deployment.md) — full macOS guide.
 - [windows-deployment.md](windows-deployment.md) — full Windows guide.

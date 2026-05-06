@@ -12,7 +12,7 @@
 /// allow-empty (meaning the user file is the sole source of project
 /// permissions).
 pub const SECURE_DEFAULTS: &str = r#"
-# Aegis built-in preset: secure-defaults.
+# Denyx built-in preset: secure-defaults.
 #
 # Universal denies that apply to any agent run, regardless of project
 # stack. Inherits well-known credential paths, dangerous shell commands,
@@ -32,13 +32,13 @@ deny = [
     "~/.ssh/**",
     "~/.config/gh/**",
     "~/.config/gcloud/**",
-    # Aegis's own per-user control-plane config (the dotenv file holding
-    # AEGIS_AUTH_TOKEN, AEGIS_POLICY_URL, AEGIS_AUDIT_URL). The
+    # Denyx's own per-user control-plane config (the dotenv file holding
+    # DENYX_AUTH_TOKEN, DENYX_POLICY_URL, DENYX_AUDIT_URL). The
     # variable names themselves are denied by the runtime's reserved-
     # name list (see crates/policy/src/lib.rs); this is the parallel
     # filesystem deny so an agent that tries to bypass the env-var
     # check by reading the file directly is also blocked.
-    "~/.config/aegis/**",
+    "~/.config/denyx/**",
     "~/.netrc",
     "~/.docker/config.json",
     "~/.gem/credentials",
@@ -100,20 +100,20 @@ deny_vars = [
     # Database creds
     "DATABASE_URL",
     "DATABASE_PASSWORD",
-    # Aegis's own server-mode credentials. When aegis-mcp is launched
+    # Denyx's own server-mode credentials. When denyx-mcp is launched
     # with --policy-url / --audit-url and an --auth-token, the token
     # is in the process environment. An agent that could read these
     # variables could fetch unauthorised policies, forge audit
     # events, or impersonate the machine to the control plane. The
     # token MUST never be readable by the model — even if a project
-    # policy adds AEGIS_AUTH_TOKEN to allow_vars (which it shouldn't),
+    # policy adds DENYX_AUTH_TOKEN to allow_vars (which it shouldn't),
     # this deny wins. Same reasoning for the alternate names projects
     # might use when wiring the token into a .env file.
-    "AEGIS_AUTH_TOKEN",
-    "AEGIS_TOKEN",
-    "AEGIS_SERVER_TOKEN",
-    "AEGIS_JWT",
-    "AEGIS_API_KEY",
+    "DENYX_AUTH_TOKEN",
+    "DENYX_TOKEN",
+    "DENYX_SERVER_TOKEN",
+    "DENYX_JWT",
+    "DENYX_API_KEY",
 ]
 
 [subprocess]
@@ -121,7 +121,7 @@ deny_commands = [
     # ── Wholesale-bypass commands ──────────────────────────────────
     # These execute arbitrary code with arbitrary args, opaque to
     # the argv path-gate. Allowing any of them in `allow_commands`
-    # nullifies Aegis's filesystem and (often) network policies for
+    # nullifies Denyx's filesystem and (often) network policies for
     # whatever the binary chooses to do. Negate via `!sh` etc. only
     # if you understand the consequences — see docs/04-policy-file.md
     # "Subprocess is a privilege boundary".

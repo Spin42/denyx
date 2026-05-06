@@ -1,8 +1,8 @@
-# Aegis on macOS
+# Denyx on macOS
 
 > ← [Back to docs README](README.md) · [Install](05-install.md) · [Architecture](03-architecture.md)
 
-This is the supported macOS deployment shape: **run `aegis-mcp`
+This is the supported macOS deployment shape: **run `denyx-mcp`
 inside a lightweight Linux VM (Lima) and let your host's MCP client
 talk to it through `limactl shell`.** No native macOS code, no
 deprecated APIs, no Apple-vendor entitlements. Same isolation
@@ -32,7 +32,7 @@ The honest situation on macOS in 2026:
 So the immediately-correct answer is what the wider Mac ecosystem
 already does for "Linux-shaped tooling on a Mac": run the tooling in
 a small Linux VM. Docker Desktop, Lima, OrbStack, Colima, Bun's CI,
-Buildkit, Nix's daemon — they all use this pattern. Aegis is not
+Buildkit, Nix's daemon — they all use this pattern. Denyx is not
 special.
 
 The cost of this shape is one-time setup (install Lima, boot a VM)
@@ -46,9 +46,9 @@ filesystem, no platform-specific code paths to maintain.
 ```sh
 brew install lima
 
-limactl start --name=aegis examples/macos/aegis.lima.yaml
+limactl start --name=denyx examples/macos/denyx.lima.yaml
 
-limactl shell aegis -- bash -lc \
+limactl shell denyx -- bash -lc \
   "cd '$PWD' && cargo build --release"
 ```
 
@@ -57,19 +57,19 @@ Then add this to your Claude Code (or other MCP host) configuration:
 ```jsonc
 {
   "mcpServers": {
-    "aegis": {
+    "denyx": {
       "command": "limactl",
       "args": [
-        "shell", "aegis",
-        "/Users/YOU/Projects/post-sigil/target/release/aegis-mcp",
-        "--policy", "/Users/YOU/Projects/myapp/aegis.toml"
+        "shell", "denyx",
+        "/Users/YOU/Projects/post-sigil/target/release/denyx-mcp",
+        "--policy", "/Users/YOU/Projects/myapp/denyx.toml"
       ]
     }
   }
 }
 ```
 
-The agent calls `aegis_run` from the host; the call traverses
+The agent calls `denyx_run` from the host; the call traverses
 `limactl shell` (stdio JSON-RPC), lands in the VM, the script runs
 under bubblewrap, the printed output flows back up the pipe. Path
 arguments resolve identically on both sides because Lima mirrors the
@@ -81,7 +81,7 @@ host's `$HOME` at the same absolute path inside the VM.
 |-----------|--------------------------------------------------------|-------------------------------------|
 | Lima      | Manages the Linux VM and the `limactl shell` bridge.   | <https://lima-vm.io>                |
 | Homebrew  | Easiest way to install Lima.                           | <https://brew.sh>                   |
-| Aegis     | The thing being sandboxed (built inside the VM).        | This repo.                          |
+| Denyx     | The thing being sandboxed (built inside the VM).        | This repo.                          |
 
 Hardware: any Apple Silicon Mac (M1+) on macOS 11 or newer, or any
 Intel Mac on macOS 12 or newer. Lima uses Apple's
@@ -97,19 +97,19 @@ brew install lima
 limactl --version    # 1.x or newer expected
 ```
 
-### 2. Boot the Aegis VM
+### 2. Boot the Denyx VM
 
 The repo ships a tested template at
-[`examples/macos/aegis.lima.yaml`](../examples/macos/aegis.lima.yaml).
+[`examples/macos/denyx.lima.yaml`](../examples/macos/denyx.lima.yaml).
 Boot a VM with it:
 
 ```sh
-limactl start --name=aegis examples/macos/aegis.lima.yaml
+limactl start --name=denyx examples/macos/denyx.lima.yaml
 ```
 
 First boot takes ~2 minutes (downloading the Ubuntu cloud image,
 installing bubblewrap and the build toolchain). Subsequent
-`limactl start aegis` calls bring the VM up in 5–10 s.
+`limactl start denyx` calls bring the VM up in 5–10 s.
 
 The template:
 
@@ -122,7 +122,7 @@ The template:
 - Runs CPU/memory at 2 cores / 2 GiB by default. Bump in the YAML
   if you run heavy local-executor evals inside the VM.
 
-### 3. Build Aegis inside the VM
+### 3. Build Denyx inside the VM
 
 Because Lima mirrors `$HOME` at the same path, you build *once*
 inside the VM and the binary is reachable from both sides. From the
@@ -131,11 +131,11 @@ host:
 ```sh
 cd ~/Projects/post-sigil    # wherever you cloned
 
-limactl shell aegis -- bash -lc \
+limactl shell denyx -- bash -lc \
   "cd '$PWD' && cargo build --release"
 ```
 
-The `target/release/aegis-mcp` binary now exists at the same path on
+The `target/release/denyx-mcp` binary now exists at the same path on
 the host's filesystem (because `target/` is in your home, which is
 mirrored). It's a Linux ELF — you can't run it on macOS directly,
 which is fine: `limactl shell` is what runs it.
@@ -148,12 +148,12 @@ Edit your Claude Code MCP config (typically
 ```jsonc
 {
   "mcpServers": {
-    "aegis": {
+    "denyx": {
       "command": "limactl",
       "args": [
-        "shell", "aegis",
-        "/Users/YOU/Projects/post-sigil/target/release/aegis-mcp",
-        "--policy", "/Users/YOU/Projects/myapp/aegis.toml"
+        "shell", "denyx",
+        "/Users/YOU/Projects/post-sigil/target/release/denyx-mcp",
+        "--policy", "/Users/YOU/Projects/myapp/denyx.toml"
       ]
     }
   }
@@ -175,9 +175,9 @@ The whole point is OS-level isolation. Confirm bwrap is in the
 chain:
 
 ```sh
-limactl shell aegis -- bash -lc \
+limactl shell denyx -- bash -lc \
   "echo 'subprocess.exec([\"id\"])' > /tmp/check.star && \
-   ~/Projects/post-sigil/target/release/aegis run --policy ~/Projects/myapp/aegis.toml /tmp/check.star"
+   ~/Projects/post-sigil/target/release/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check.star"
 ```
 
 You should see the `id` output. Now flip the policy's
@@ -185,9 +185,9 @@ You should see the `id` output. Now flip the policy's
 shouldn't reach (e.g. `/etc/shadow`) to a script:
 
 ```sh
-limactl shell aegis -- bash -lc \
+limactl shell denyx -- bash -lc \
   "echo 'fs.read(\"/etc/shadow\")' > /tmp/check2.star && \
-   ~/Projects/post-sigil/target/release/aegis run --policy ~/Projects/myapp/aegis.toml /tmp/check2.star"
+   ~/Projects/post-sigil/target/release/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check2.star"
 ```
 
 You should see a typed Policy denial — the path isn't in
@@ -206,7 +206,7 @@ Numbers from a 2024 M2 MacBook Pro (Apple Silicon native), Ubuntu
 
 - VM boot from stopped: 5–10 s.
 - First `limactl shell` after boot: ~200 ms.
-- Subsequent `aegis_run` calls: dominated by Starlark + bwrap, the
+- Subsequent `denyx_run` calls: dominated by Starlark + bwrap, the
   pipe overhead is <5 ms.
 - File reads through virtiofs (host's `~`): within ~10% of native.
 - Builds inside the VM: comparable to native macOS Rust builds for
@@ -218,12 +218,12 @@ RAM (`memory: "8GiB"` in the YAML) and CPUs (`cpus: 6`).
 
 ## Updating
 
-To pick up new Aegis releases:
+To pick up new Denyx releases:
 
 ```sh
 cd ~/Projects/post-sigil
 git pull
-limactl shell aegis -- bash -lc \
+limactl shell denyx -- bash -lc \
   "cd '$PWD' && cargo build --release"
 ```
 
@@ -233,7 +233,7 @@ keeps working.
 To update the VM's base OS or bwrap version:
 
 ```sh
-limactl shell aegis -- bash -lc 'sudo apt-get update && sudo apt-get upgrade -y'
+limactl shell denyx -- bash -lc 'sudo apt-get update && sudo apt-get upgrade -y'
 ```
 
 ## Tradeoffs
@@ -242,7 +242,7 @@ What you get with this setup:
 
 - ✅ Real OS-level isolation (bwrap + Linux namespaces).
 - ✅ Same audit log, same policy file, same MCP surface as Linux.
-- ✅ No native macOS code paths to maintain in Aegis.
+- ✅ No native macOS code paths to maintain in Denyx.
 - ✅ Future-proof — Lima sits on Apple's blessed
   Virtualization.framework, so no deprecation cliff.
 
@@ -250,7 +250,7 @@ What you trade away:
 
 - ❌ A ~500 MB Linux image lives in `~/.lima/` plus the VM's RAM
   while running.
-- ❌ A separate `limactl start aegis` step at boot if you don't
+- ❌ A separate `limactl start denyx` step at boot if you don't
   configure auto-start.
 - ❌ Cross-architecture: ARM Mac → ARM Linux, Intel Mac → x86_64
   Linux. If you need to build/test for the *other* arch, you need
@@ -266,9 +266,9 @@ If those tradeoffs are unacceptable for your environment, see
 | **Lima**            | Yes (recommended)  | Default: smallest dependency footprint, OSS.     |
 | **Colima**          | Yes (Lima fork)    | If you also use Docker; Colima ships both.       |
 | **OrbStack**        | Yes (Lima-compatible) | Commercial; better UI; faster boot; $99/yr after trial. |
-| **Docker Desktop**  | Yes, via container | If your team already standardised on Docker. Build a Dockerfile that installs bwrap + Aegis; run `aegis-mcp` as a long-running container. |
+| **Docker Desktop**  | Yes, via container | If your team already standardised on Docker. Build a Dockerfile that installs bwrap + Denyx; run `denyx-mcp` as a long-running container. |
 | **Multipass**       | Yes               | Canonical's tool; simpler setup than Lima but less flexible mounts. |
-| **Native Virtualization.framework integration** | Future (Aegis v0.2+) | When the project sees enough Mac demand to justify embedding the VM in the binary. |
+| **Native Virtualization.framework integration** | Future (Denyx v0.2+) | When the project sees enough Mac demand to justify embedding the VM in the binary. |
 
 The MCP wiring pattern is identical across all of these — only the
 `command` (`limactl`/`colima`/`orb`/`docker run`/`multipass`) and
@@ -288,7 +288,7 @@ the args change.
 
 | Doc                                            | Role |
 |------------------------------------------------|------|
-| **This doc** (`macos-deployment.md`)           | Run Aegis on a Mac. Operational guide. |
+| **This doc** (`macos-deployment.md`)           | Run Denyx on a Mac. Operational guide. |
 | [windows-deployment.md](windows-deployment.md) | The parallel doc for Windows + WSL2. |
 | [05-install.md](05-install.md)                 | Generic install (Linux native, plus pointers here for macOS / Windows). |
 | [04-policy-file.md](04-policy-file.md)         | Policy file reference. The same policy works on Linux, macOS-via-Lima, and Windows-via-WSL2. |

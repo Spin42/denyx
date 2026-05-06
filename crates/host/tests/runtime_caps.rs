@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use aegis_host::{AegisError, Runner};
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::{DenyxError, Runner};
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -28,7 +28,7 @@ print(x)
 "#;
     let err = runner.run("t", src, "test.star").unwrap_err();
     match err {
-        AegisError::RuntimeLimit(msg) => {
+        DenyxError::RuntimeLimit(msg) => {
             assert!(msg.contains("deadline"), "{msg}");
             assert!(msg.contains("fs.read"), "{msg}");
         }
@@ -78,7 +78,7 @@ fn deadline_audit_event_emitted_before_capability_runs() {
     // When the deadline triggers, an audit event with
     // status="denied" and capability="<the cap>" must fire — even
     // though the actual fs/net/exec work didn't happen.
-    use aegis_host::{AuditEvent, AuditSink};
+    use denyx_host::{AuditEvent, AuditSink};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -104,7 +104,7 @@ allow_vars = ["PATH"]
     let _ = runner.run("t", r#"env.read("PATH")"#, "test.star");
     let events = cap.0.lock().unwrap();
     let found = events.iter().any(|e| {
-        e.capability == "env.read" && matches!(e.status, aegis_host::audit::AuditStatus::Denied)
+        e.capability == "env.read" && matches!(e.status, denyx_host::audit::AuditStatus::Denied)
     });
     assert!(
         found,
@@ -132,7 +132,7 @@ deep(0)
     // the script does NOT succeed.
     assert!(matches!(
         err,
-        AegisError::Starlark(_) | AegisError::RuntimeLimit(_)
+        DenyxError::Starlark(_) | DenyxError::RuntimeLimit(_)
     ));
 }
 

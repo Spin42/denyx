@@ -1,4 +1,4 @@
-# cargo-mutants configuration for Aegis.
+# cargo-mutants configuration for Denyx.
 #
 # Mutation testing measures whether the test suite *actually verifies*
 # the behaviour of each line, not just whether the line was executed.

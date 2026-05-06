@@ -2,11 +2,11 @@
 
 > ← [Back to docs README](README.md)
 
-Five minutes from a freshly built `aegis` to a script running under a
+Five minutes from a freshly built `denyx` to a script running under a
 real policy.
 
 Assumes you've already followed [05-install.md](05-install.md) (Rust +
-`cargo build --release` + `aegis` on `$PATH`).
+`cargo build --release` + `denyx` on `$PATH`).
 
 ## 1. Generate a starter policy
 
@@ -14,11 +14,11 @@ In a project directory you want to play with:
 
 ```sh
 cd ~/myproject
-aegis init --lang python
-# aegis: wrote aegis.toml (python). Review the file, then run with --policy aegis.toml.
+denyx init --lang python
+# denyx: wrote denyx.toml (python). Review the file, then run with --policy denyx.toml.
 ```
 
-The generated `aegis.toml` inherits `secure-defaults`, allows the Python
+The generated `denyx.toml` inherits `secure-defaults`, allows the Python
 toolchain (`python3`, `pip`, `pytest`, `ruff`, ...), and explicitly blocks
 git destructive operations and staging/qa/prod config files. Open it and
 read it — the comments at the top explain what's already covered and
@@ -57,7 +57,7 @@ gives a 7B model.
 ## 3. Run it
 
 ```sh
-aegis run --policy aegis.toml count_lines.star
+denyx run --policy denyx.toml count_lines.star
 ```
 
 Expected:
@@ -71,7 +71,7 @@ by default — you'll see one `Allowed` event for the `fs.read`. To send
 audit events to a file:
 
 ```sh
-aegis run --policy aegis.toml --audit-log /tmp/audit.jsonl count_lines.star
+denyx run --policy denyx.toml --audit-log /tmp/audit.jsonl count_lines.star
 tail -1 /tmp/audit.jsonl
 # {"ts":"2026-05-05T07:50:00...","task_id":"count_lines.star","step":1,"capability":"fs.read","status":"allowed","detail":{"path":"...README.md","error":null}}
 ```
@@ -88,14 +88,14 @@ print(secrets[:50])
 Run:
 
 ```sh
-aegis run --policy aegis.toml count_lines.star
+denyx run --policy denyx.toml count_lines.star
 echo "exit=$?"
 ```
 
 You'll get a runtime denial:
 
 ```
-aegis: policy violation: policy denies read on path "/etc/passwd": matches [filesystem].deny pattern
+denyx: policy violation: policy denies read on path "/etc/passwd": matches [filesystem].deny pattern
 exit=2
 ```
 
@@ -123,13 +123,13 @@ The exit codes:
 
 ## 5. Try a confirm-prompted capability
 
-Edit your `aegis.toml`:
+Edit your `denyx.toml`:
 
 ```toml
 requires_approval = ["fs.delete"]
 
 [filesystem]
-delete_allow = ["/tmp/aegis_quickstart_*"]
+delete_allow = ["/tmp/denyx_quickstart_*"]
 ```
 
 (`fs.delete` is auto-derived from the populated `delete_allow`; no
@@ -138,18 +138,18 @@ separate `[functions]` declaration needed.)
 Make a throwaway file and a script:
 
 ```sh
-touch /tmp/aegis_quickstart_demo
+touch /tmp/denyx_quickstart_demo
 cat > delete_demo.star <<'EOF'
-fs.delete("/tmp/aegis_quickstart_demo")
+fs.delete("/tmp/denyx_quickstart_demo")
 print("deleted")
 EOF
-aegis run --policy aegis.toml delete_demo.star
+denyx run --policy denyx.toml delete_demo.star
 ```
 
 In a TTY, you'll see:
 
 ```
-[aegis] confirm fs.delete for task delete_demo.star: delete /tmp/aegis_quickstart_demo
+[denyx] confirm fs.delete for task delete_demo.star: delete /tmp/denyx_quickstart_demo
         allow? [y/N]
 ```
 
@@ -162,17 +162,17 @@ script would fail with exit code 4 unless you pass `--yes` to override.
 ## 6. Run without a policy file (loud-and-safe fallback)
 
 ```sh
-aegis run /tmp/random.star
+denyx run /tmp/random.star
 ```
 
-Aegis prints a stderr banner explaining that no `--policy` was provided,
+Denyx prints a stderr banner explaining that no `--policy` was provided,
 so it's using the built-in `secure-defaults` baseline alone — which has
 **no allow lists**, so every effecting capability fails. Pure
 computation and `print()` still work:
 
 ```sh
 echo 'print("hello", 1 + 2)' > /tmp/safe.star
-aegis run /tmp/safe.star
+denyx run /tmp/safe.star
 ```
 
 prints `hello 3`. Useful for quick experiments where you want guarantee-
@@ -183,7 +183,7 @@ nothing-effecting behavior.
 The same enforcement is available over MCP (JSON-RPC 2.0 on stdio).
 
 ```sh
-aegis-mcp --policy aegis.toml
+denyx-mcp --policy denyx.toml
 # stays running, reads JSON-RPC requests from stdin
 ```
 
@@ -194,7 +194,7 @@ and [08-opencode.md](08-opencode.md) for the wiring.
 For a hand test, you can speak the protocol manually:
 
 ```sh
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}' | aegis-mcp --policy aegis.toml
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}' | denyx-mcp --policy denyx.toml
 ```
 
 You'll get back the server's capability advertisement. The two methods
@@ -206,10 +206,10 @@ Two CLI subcommands let you reason about a policy without running
 anything against it:
 
 ```sh
-aegis policy validate aegis.toml
-# OK: aegis.toml parses, resolves, passes self-writable guard. 5 capability(ies) enabled.
+denyx policy validate denyx.toml
+# OK: denyx.toml parses, resolves, passes self-writable guard. 5 capability(ies) enabled.
 
-aegis policy show aegis.toml
+denyx policy show denyx.toml
 # (prints derived capabilities, every populated section, declared
 # tools with routing hints, runtime caps, confirm-gated caps)
 ```

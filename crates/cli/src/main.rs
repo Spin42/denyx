@@ -1,8 +1,8 @@
-//! `aegis` CLI. Two subcommands:
+//! `denyx` CLI. Two subcommands:
 //!
-//! - `aegis run --policy <toml> <script.star>` — load a policy and a
+//! - `denyx run --policy <toml> <script.star>` — load a policy and a
 //!   Starlark script, run the script under capability-typed enforcement.
-//! - `aegis init --lang <python|node|ruby|rust|go> [--output PATH]` —
+//! - `denyx init --lang <python|node|ruby|rust|go> [--output PATH]` —
 //!   emit a starter policy file inheriting `secure-defaults`, with a
 //!   language-appropriate toolchain allowlist and git-destructive /
 //!   staging-config denies.
@@ -23,18 +23,18 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use aegis_host::{
-    AegisError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
+use denyx_host::{
+    DenyxError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
     DenyAllConfirm, JsonlAuditSink, Runner,
 };
-use aegis_policy::Policy;
+use denyx_policy::Policy;
 use clap::{Parser, Subcommand};
 
 use crate::init::Lang;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "aegis",
+    name = "denyx",
     version,
     about = "Run Starlark agent scripts under capability-typed policy"
 )]
@@ -64,8 +64,8 @@ struct AuditCli {
 #[derive(Subcommand, Debug)]
 enum AuditCommand {
     /// Walk a JSONL audit log and verify the SHA-256 chain. Each
-    /// entry's `aegis_prev_hash` is checked against the SHA-256 of
-    /// the previous line, and `aegis_seq` is checked for monotonic
+    /// entry's `denyx_prev_hash` is checked against the SHA-256 of
+    /// the previous line, and `denyx_seq` is checked for monotonic
     /// +1 progression. Reports per-line failures with the kind of
     /// mismatch. Exits 0 if the chain is intact, non-zero
     /// otherwise.
@@ -136,9 +136,9 @@ struct InitArgs {
     #[arg(short, long)]
     lang: Lang,
 
-    /// Output path. Defaults to `aegis.toml` in the current directory.
+    /// Output path. Defaults to `denyx.toml` in the current directory.
     /// Use `-` to write to stdout instead.
-    #[arg(short, long, default_value = "aegis.toml")]
+    #[arg(short, long, default_value = "denyx.toml")]
     output: String,
 
     /// Overwrite an existing file at `--output`. Refused by default
@@ -151,17 +151,17 @@ fn main() -> ExitCode {
     match dispatch() {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
-            eprintln!("aegis: {e}");
+            eprintln!("denyx: {e}");
             match e {
-                CliError::Aegis(AegisError::Verifier(_)) => ExitCode::from(3),
-                CliError::Aegis(AegisError::Policy(_)) => ExitCode::from(2),
-                CliError::Aegis(AegisError::ConfirmDenied(_)) => ExitCode::from(4),
-                CliError::Aegis(AegisError::Starlark(_)) => ExitCode::from(1),
-                CliError::Aegis(AegisError::RuntimeLimit(_)) => ExitCode::from(6),
-                CliError::Aegis(AegisError::Io(_)) | CliError::Io(_) | CliError::Other(_) => {
+                CliError::Denyx(DenyxError::Verifier(_)) => ExitCode::from(3),
+                CliError::Denyx(DenyxError::Policy(_)) => ExitCode::from(2),
+                CliError::Denyx(DenyxError::ConfirmDenied(_)) => ExitCode::from(4),
+                CliError::Denyx(DenyxError::Starlark(_)) => ExitCode::from(1),
+                CliError::Denyx(DenyxError::RuntimeLimit(_)) => ExitCode::from(6),
+                CliError::Denyx(DenyxError::Io(_)) | CliError::Io(_) | CliError::Other(_) => {
                     ExitCode::from(5)
                 }
-                CliError::Aegis(AegisError::Other(_)) => ExitCode::from(5),
+                CliError::Denyx(DenyxError::Other(_)) => ExitCode::from(5),
             }
         }
     }
@@ -170,7 +170,7 @@ fn main() -> ExitCode {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error("{0}")]
-    Aegis(#[from] AegisError),
+    Denyx(#[from] DenyxError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -193,7 +193,7 @@ fn dispatch() -> Result<(), CliError> {
 }
 
 fn audit_verify(args: AuditTargetArgs) -> Result<(), CliError> {
-    let report = aegis_host::verify_chain(&args.log).map_err(CliError::Io)?;
+    let report = denyx_host::verify_chain(&args.log).map_err(CliError::Io)?;
     if report.ok() {
         println!(
             "OK: {} entries, chain valid (last seq = {}).",
@@ -366,7 +366,7 @@ fn init_cmd(args: InitArgs) -> Result<(), CliError> {
     }
     std::fs::write(&path, &body)?;
     eprintln!(
-        "aegis: wrote {path} ({lang}). Review the file, then run with --policy {path}.",
+        "denyx: wrote {path} ({lang}). Review the file, then run with --policy {path}.",
         path = path.display(),
         lang = args.lang.name(),
     );
@@ -428,17 +428,17 @@ fn run(args: RunArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Loud-and-safe banner shown when `aegis run` fires without `--policy`.
+/// Loud-and-safe banner shown when `denyx run` fires without `--policy`.
 /// Stderr only so it doesn't pollute structured stdout output.
 fn print_no_policy_banner() {
-    eprintln!("aegis: no --policy provided; using built-in `secure-defaults` baseline.");
+    eprintln!("denyx: no --policy provided; using built-in `secure-defaults` baseline.");
     eprintln!("       This baseline DENIES every fs / net / subprocess / env capability.");
     eprintln!("       Pure computation and print() still work; every effect will fail.");
     eprintln!("       To grant capabilities, generate a starter policy:");
     eprintln!();
-    eprintln!("           aegis init --lang python   # or node, ruby, rust, go");
+    eprintln!("           denyx init --lang python   # or node, ruby, rust, go");
     eprintln!();
-    eprintln!("       Then run with `--policy aegis.toml`. See examples/policies/ for templates.");
+    eprintln!("       Then run with `--policy denyx.toml`. See examples/policies/ for templates.");
 }
 
 struct TtyConfirm;
@@ -447,7 +447,7 @@ impl ConfirmHook for TtyConfirm {
         let mut stderr = std::io::stderr();
         let _ = writeln!(
             stderr,
-            "[aegis] confirm {} for task {}: {}",
+            "[denyx] confirm {} for task {}: {}",
             request.capability, request.task_id, request.summary
         );
         let _ = write!(stderr, "        allow? [y/N] ");

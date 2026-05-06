@@ -1,22 +1,22 @@
-//! `aegis-mcp` — Aegis MCP server.
+//! `denyx-mcp` — Denyx MCP server.
 //!
 //! Speaks newline-delimited JSON-RPC 2.0 on stdio (one JSON message per
-//! line). Implements the subset of MCP needed to expose Aegis as a
+//! line). Implements the subset of MCP needed to expose Denyx as a
 //! policy-gated tool surface: `initialize`, `tools/list`, `tools/call`.
 //!
 //! Tools exposed:
 //!
-//! - `aegis_run(script, task_id?)` — primary surface. The caller hands
+//! - `denyx_run(script, task_id?)` — primary surface. The caller hands
 //!   over a Starlark program; the server runs it through the host's
 //!   `Runner` under the configured policy. Output is the script's
 //!   printed lines.
-//! - `aegis_fs_read(path)`, `aegis_fs_write(path, content)`,
-//!   `aegis_fs_delete(path)` — sugar over `aegis_run` for hosts that
+//! - `denyx_fs_read(path)`, `denyx_fs_write(path, content)`,
+//!   `denyx_fs_delete(path)` — sugar over `denyx_run` for hosts that
 //!   prefer one MCP call per action.
-//! - `aegis_subprocess_exec(argv)` — same.
-//! - `aegis_net_http_get(url)`, `aegis_net_http_post(url, body)` — same.
-//! - `aegis_env_read(name)` — same.
-//! - `aegis_tool_routing(name?)` — read-only oracle. Returns the
+//! - `denyx_subprocess_exec(argv)` — same.
+//! - `denyx_net_http_get(url)`, `denyx_net_http_post(url, body)` — same.
+//! - `denyx_env_read(name)` — same.
+//! - `denyx_tool_routing(name?)` — read-only oracle. Returns the
 //!   `[tools.X]` routing hints (capabilities, backend_url,
 //!   backend_method, description, allowed flag) for a named tool,
 //!   or all declared tools if no name is given. Lets a calling host
@@ -48,11 +48,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use aegis_host::{
-    AegisError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
+use denyx_host::{
+    DenyxError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
     DenyAllConfirm, HttpAuditSink, JsonlAuditSink, Runner,
 };
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -64,7 +64,7 @@ use serde_json::{json, Value};
 /// `requires_approval`-listed capabilities through real user prompts
 /// instead of the auto-deny tag.
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const SERVER_NAME: &str = "aegis-mcp";
+const SERVER_NAME: &str = "denyx-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How long an `ElicitConfirm` call waits for the user's response
@@ -76,9 +76,9 @@ const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "aegis-mcp",
+    name = "denyx-mcp",
     version,
-    about = "MCP server exposing the Aegis policy-gated runtime over stdio"
+    about = "MCP server exposing the Denyx policy-gated runtime over stdio"
 )]
 struct Cli {
     /// Path to the policy TOML file. If omitted (and `--policy-url`
@@ -89,15 +89,15 @@ struct Cli {
     policy: Option<PathBuf>,
 
     /// Append audit events to this file (JSON Lines). Default (when
-    /// AEGIS_AUDIT_URL is also unset): stderr.
+    /// DENYX_AUDIT_URL is also unset): stderr.
     #[arg(long)]
     audit_log: Option<PathBuf>,
 
     // ---- env-var-only fields (no CLI flag, see config cascade in
-    // load_aegis_config_cascade): ----
+    // load_denyx_config_cascade): ----
     //
     // The control-plane URLs and bearer token are read from the
-    // `AEGIS_POLICY_URL`, `AEGIS_AUDIT_URL`, and `AEGIS_AUTH_TOKEN`
+    // `DENYX_POLICY_URL`, `DENYX_AUDIT_URL`, and `DENYX_AUTH_TOKEN`
     // environment variables. We DO NOT take them on the command line
     // because:
     //
@@ -109,21 +109,21 @@ struct Cli {
     //
     // The values are sourced (highest priority first) from:
     //
-    //   1. The process env when aegis-mcp launches (set by the
+    //   1. The process env when denyx-mcp launches (set by the
     //      shell, MCP host's `env` block, k8s pod spec, systemd
     //      unit, etc.).
-    //   2. `$HOME/.config/aegis/.env` — per-user override.
-    //   3. `/etc/aegis/.env` — system-wide, root-managed.
+    //   2. `$HOME/.config/denyx/.env` — per-user override.
+    //   3. `/etc/denyx/.env` — system-wide, root-managed.
     //
     // The agent itself can never read any of them: the variable
-    // names AEGIS_AUTH_TOKEN / AEGIS_TOKEN / AEGIS_SERVER_TOKEN /
-    // AEGIS_JWT / AEGIS_API_KEY / AEGIS_POLICY_URL / AEGIS_AUDIT_URL
+    // names DENYX_AUTH_TOKEN / DENYX_TOKEN / DENYX_SERVER_TOKEN /
+    // DENYX_JWT / DENYX_API_KEY / DENYX_POLICY_URL / DENYX_AUDIT_URL
     // are on the runtime's reserved list (see
-    // `aegis_policy::AEGIS_RESERVED_VAR_NAMES`); they're denied
+    // `denyx_policy::DENYX_RESERVED_VAR_NAMES`); they're denied
     // from `env.read` and stripped from any subprocess env
     // unconditionally, regardless of policy. Both config files are
     // additionally denied at the filesystem level by
-    // `secure-defaults` (`**/.env*` plus `~/.config/aegis/**`).
+    // `secure-defaults` (`**/.env*` plus `~/.config/denyx/**`).
     #[arg(skip)]
     policy_url: Option<String>,
 
@@ -149,7 +149,7 @@ struct Cli {
     ///   approval-required call passes. **Use only for tests and
     ///   demos** — this defeats the purpose of `requires_approval`.
     /// - `auto-deny`: every approval-required call returns a tool
-    ///   result with `isError: true` and an `aegis_error_kind:
+    ///   result with `isError: true` and an `denyx_error_kind:
     ///   "confirm_denied"` tag. The orchestrator can interpret that,
     ///   surface a UI prompt of its own, and edit the policy or
     ///   re-issue the call from a non-gated context.
@@ -158,7 +158,7 @@ struct Cli {
     /// opencode in unattended mode: those modes typically auto-
     /// respond to elicitation prompts without surfacing them to the
     /// user. In that configuration, `auto` effectively degrades to
-    /// whatever the client's auto-response is — Aegis's request
+    /// whatever the client's auto-response is — Denyx's request
     /// gets approved or declined without human review. See
     /// docs/07-claude-code.md and docs/04-policy-file.md for the
     /// honest deployment guidance.
@@ -176,18 +176,18 @@ enum ConfirmModeArg {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Cascade-load Aegis control-plane config (the AEGIS_AUTH_TOKEN,
-    // AEGIS_POLICY_URL, AEGIS_AUDIT_URL env vars) from dedicated
+    // Cascade-load Denyx control-plane config (the DENYX_AUTH_TOKEN,
+    // DENYX_POLICY_URL, DENYX_AUDIT_URL env vars) from dedicated
     // dotenv files. Order: process env > per-user file > system file.
     // Lives in dedicated files at well-known paths — NOT the project's
     // own `.env`, which is for project secrets and is denied to the
-    // agent by `secure-defaults`. See `load_aegis_config_cascade`.
-    load_aegis_config_cascade();
+    // agent by `secure-defaults`. See `load_denyx_config_cascade`.
+    load_denyx_config_cascade();
 
     let mut cli = Cli::parse();
-    cli.auth_token = std::env::var("AEGIS_AUTH_TOKEN").ok();
-    cli.policy_url = std::env::var("AEGIS_POLICY_URL").ok().or(cli.policy_url);
-    cli.audit_url = std::env::var("AEGIS_AUDIT_URL").ok().or(cli.audit_url);
+    cli.auth_token = std::env::var("DENYX_AUTH_TOKEN").ok();
+    cli.policy_url = std::env::var("DENYX_POLICY_URL").ok().or(cli.policy_url);
+    cli.audit_url = std::env::var("DENYX_AUDIT_URL").ok().or(cli.audit_url);
     // Policy source: file > URL > built-in secure-defaults fallback.
     // Clap's ArgGroup already enforced that file and URL aren't both
     // set; here we just dispatch on which one (if either) is.
@@ -197,7 +197,7 @@ fn main() -> anyhow::Result<()> {
         Policy::load(path).map_err(|e| anyhow::anyhow!("load policy {path:?}: {e}"))?
     } else {
         eprintln!(
-            "aegis-mcp: no --policy or --policy-url provided; using built-in \
+            "denyx-mcp: no --policy or --policy-url provided; using built-in \
 `secure-defaults` baseline. This denies every fs/net/subprocess/env capability — \
 every tool call will fail until you launch with --policy <project.toml> or \
 --policy-url <https://policy-server/...>. See examples/policies/ for templates."
@@ -281,17 +281,17 @@ every tool call will fail until you launch with --policy <project.toml> or \
     Ok(())
 }
 
-/// Cascade-load the Aegis control-plane config. The cascade is:
+/// Cascade-load the Denyx control-plane config. The cascade is:
 ///
 /// 1. **Process env** (highest priority). Whatever was already set
 ///    by the calling shell, the MCP host's `env` block (Claude Code's
 ///    `.mcp.json` / opencode equivalent), the systemd unit's
 ///    `EnvironmentFile=`, the k8s pod spec's `env`, etc. Always
 ///    wins — the operator at the top of the chain has the final say.
-/// 2. **Per-user file:** `$HOME/.config/aegis/.env`. The developer's
+/// 2. **Per-user file:** `$HOME/.config/denyx/.env`. The developer's
 ///    own override of system defaults, e.g. switching their personal
 ///    machine to a staging policy server.
-/// 3. **System file:** `/etc/aegis/.env`. SecOps-managed, root-owned.
+/// 3. **System file:** `/etc/denyx/.env`. SecOps-managed, root-owned.
 ///    Pins corporate-wide control-plane URLs across every developer
 ///    machine without each user having to set anything.
 ///
@@ -303,7 +303,7 @@ every tool call will fail until you launch with --policy <project.toml> or \
 ///
 /// Both files live OUTSIDE the project tree. The project's own
 /// `.env` (for application secrets like `DATABASE_URL`) is NOT
-/// loaded by aegis-mcp — that's the IDE / dev tool's job. Mixing
+/// loaded by denyx-mcp — that's the IDE / dev tool's job. Mixing
 /// project secrets with control-plane config in one file would
 /// muddle two trust boundaries: project secrets are agent-relevant
 /// (the agent might legitimately need `DATABASE_URL`), control-plane
@@ -311,30 +311,30 @@ every tool call will fail until you launch with --policy <project.toml> or \
 ///
 /// Both default paths are caught by `secure-defaults`'
 /// `[filesystem].deny = ["**/.env*"]`, so an agent that bypassed
-/// `env.read` (which is itself blocked by the AEGIS_RESERVED_VAR_NAMES
+/// `env.read` (which is itself blocked by the DENYX_RESERVED_VAR_NAMES
 /// runtime invariant) and tried to read the file directly is also
 /// denied.
 ///
 /// Failures are silent — these files are optional. The hard
 /// requirement is "the value must be in process env when we read it",
 /// not "we must successfully parse a file".
-fn load_aegis_config_cascade() {
+fn load_denyx_config_cascade() {
     // Per-user file first (higher priority among files; loaded
     // before /etc so it claims the keys before the system file
     // gets a chance, since the loader skips already-set keys).
     if let Some(home) = std::env::var_os("HOME") {
         let mut path = std::path::PathBuf::from(home);
-        path.push(".config/aegis/.env");
+        path.push(".config/denyx/.env");
         let _ = load_dotenv_into_env(&path);
     }
     // System-wide fallback.
-    let _ = load_dotenv_into_env(std::path::Path::new("/etc/aegis/.env"));
+    let _ = load_dotenv_into_env(std::path::Path::new("/etc/denyx/.env"));
 }
 
 /// Minimal dotenv loader. Reads `path` and sets each `KEY=VALUE`
 /// pair into the process env, skipping any key already present.
 /// Returns the number of new keys set. Silent on missing file or
-/// parse failure — see `load_aegis_config_cascade` for the
+/// parse failure — see `load_denyx_config_cascade` for the
 /// rationale.
 ///
 /// Inline implementation rather than a `dotenvy` dep because the
@@ -384,7 +384,7 @@ fn load_dotenv_into_env(path: &std::path::Path) -> std::io::Result<usize> {
 /// error / parse error / empty body all surface as Err and the
 /// caller (`main`) exits with a clear error before any tool call is
 /// accepted. There is no on-disk cache: the policy is re-fetched on
-/// every aegis-mcp startup. This is intentional — the only
+/// every denyx-mcp startup. This is intentional — the only
 /// tamper-resistant strategy at MVP is "no local artefact to
 /// tamper with."
 ///
@@ -617,14 +617,14 @@ fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Valu
     *counter += 1;
     let task_id = format!("mcp-{counter}");
 
-    if name == "aegis_tool_routing" {
+    if name == "denyx_tool_routing" {
         return handle_tool_routing(runner, id, &args);
     }
 
     let script_result = match dispatch(&name, &args, &task_id) {
         Ok(s) => s,
         Err(msg) => {
-            return tool_error_response(id, &AegisError::Other(msg));
+            return tool_error_response(id, &DenyxError::Other(msg));
         }
     };
 
@@ -642,15 +642,15 @@ fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Valu
     }
 }
 
-fn tool_error_response(id: Value, err: &AegisError) -> Response {
+fn tool_error_response(id: Value, err: &DenyxError) -> Response {
     let kind = match err {
-        AegisError::ConfirmDenied(_) => "confirm_denied",
-        AegisError::Policy(_) => "policy_violation",
-        AegisError::Verifier(_) => "verifier_rejection",
-        AegisError::RuntimeLimit(_) => "runtime_limit",
-        AegisError::Starlark(_) => "starlark_error",
-        AegisError::Io(_) => "io_error",
-        AegisError::Other(_) => "other",
+        DenyxError::ConfirmDenied(_) => "confirm_denied",
+        DenyxError::Policy(_) => "policy_violation",
+        DenyxError::Verifier(_) => "verifier_rejection",
+        DenyxError::RuntimeLimit(_) => "runtime_limit",
+        DenyxError::Starlark(_) => "starlark_error",
+        DenyxError::Io(_) => "io_error",
+        DenyxError::Other(_) => "other",
     };
     Response::ok(
         id,
@@ -659,7 +659,7 @@ fn tool_error_response(id: Value, err: &AegisError) -> Response {
                 { "type": "text", "text": err.to_string() }
             ],
             "isError": true,
-            "aegis_error_kind": kind,
+            "denyx_error_kind": kind,
         }),
     )
 }
@@ -669,9 +669,9 @@ fn handle_tool_routing(runner: &Runner, id: Value, args: &Value) -> Response {
     let name = args.get("name").and_then(|v| v.as_str());
 
     fn record_to_json(
-        policy: &aegis_policy::Policy,
+        policy: &denyx_policy::Policy,
         name: &str,
-        record: &aegis_policy::ToolRecord,
+        record: &denyx_policy::ToolRecord,
     ) -> Value {
         let allowed = policy.check_tool(name).is_ok();
         json!({
@@ -749,7 +749,7 @@ impl ConfirmHook for ElicitConfirm {
             "method": "elicitation/create",
             "params": {
                 "message": format!(
-                    "Aegis: the agent is asking to perform `{cap}`.\n\nDetails: {summary}\nTask: {task}\n\nApprove this single call?",
+                    "Denyx: the agent is asking to perform `{cap}`.\n\nDetails: {summary}\nTask: {task}\n\nApprove this single call?",
                     cap = request.capability,
                     summary = request.summary,
                     task = request.task_id,
@@ -861,25 +861,25 @@ struct ScriptCall {
 
 fn dispatch(name: &str, args: &Value, task_id: &str) -> Result<ScriptCall, String> {
     match name {
-        "aegis_run" => {
+        "denyx_run" => {
             let script = args
                 .get("script")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "aegis_run: missing 'script' argument".to_string())?
+                .ok_or_else(|| "denyx_run: missing 'script' argument".to_string())?
                 .to_string();
             Ok(ScriptCall {
                 script,
                 script_name: format!("{task_id}.star"),
             })
         }
-        "aegis_fs_read" => {
+        "denyx_fs_read" => {
             let path = require_str(args, "path")?;
             Ok(synth(format!(
                 "_r = fs.read({})\nprint(_r)",
                 starlark_str(path)
             )))
         }
-        "aegis_fs_write" => {
+        "denyx_fs_write" => {
             let path = require_str(args, "path")?;
             let content = require_str(args, "content")?;
             Ok(synth(format!(
@@ -888,28 +888,28 @@ fn dispatch(name: &str, args: &Value, task_id: &str) -> Result<ScriptCall, Strin
                 starlark_str(content)
             )))
         }
-        "aegis_fs_delete" => {
+        "denyx_fs_delete" => {
             let path = require_str(args, "path")?;
             Ok(synth(format!(
                 "fs.delete({})\nprint(\"ok\")",
                 starlark_str(path)
             )))
         }
-        "aegis_subprocess_exec" => {
+        "denyx_subprocess_exec" => {
             let argv = require_argv(args)?;
             Ok(synth(format!(
                 "_r = subprocess.exec({})\nprint(_r)",
                 starlark_list(&argv)
             )))
         }
-        "aegis_net_http_get" => {
+        "denyx_net_http_get" => {
             let url = require_str(args, "url")?;
             Ok(synth(format!(
                 "_r = net.http_get({})\nprint(_r)",
                 starlark_str(url)
             )))
         }
-        "aegis_net_http_post" => {
+        "denyx_net_http_post" => {
             let url = require_str(args, "url")?;
             let body = require_str(args, "body")?;
             Ok(synth(format!(
@@ -918,7 +918,7 @@ fn dispatch(name: &str, args: &Value, task_id: &str) -> Result<ScriptCall, Strin
                 starlark_str(body)
             )))
         }
-        "aegis_env_read" => {
+        "denyx_env_read" => {
             let name = require_str(args, "name")?;
             Ok(synth(format!(
                 "_r = env.read({})\nprint(_r)",
@@ -970,8 +970,8 @@ fn starlark_list(items: &[String]) -> String {
 fn tool_definitions() -> Value {
     json!([
         {
-            "name": "aegis_run",
-            "description": "Run a Starlark program under the configured Aegis policy. The program has access to the policy-gated namespaced builtins (fs.read, fs.write, fs.delete, net.http_get, net.http_post, net.http_put, net.http_patch, net.http_delete, subprocess.exec, env.read). Returns the program's printed output. This is the most flexible surface; agents that compose multi-step actions should prefer this over the per-capability tools.",
+            "name": "denyx_run",
+            "description": "Run a Starlark program under the configured Denyx policy. The program has access to the policy-gated namespaced builtins (fs.read, fs.write, fs.delete, net.http_get, net.http_post, net.http_put, net.http_patch, net.http_delete, subprocess.exec, env.read). Returns the program's printed output. This is the most flexible surface; agents that compose multi-step actions should prefer this over the per-capability tools.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -982,7 +982,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_fs_read",
+            "name": "denyx_fs_read",
             "description": "Read a file under the policy's filesystem read_allow.",
             "inputSchema": {
                 "type": "object",
@@ -991,7 +991,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_fs_write",
+            "name": "denyx_fs_write",
             "description": "Write a file under the policy's filesystem write_allow.",
             "inputSchema": {
                 "type": "object",
@@ -1003,7 +1003,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_fs_delete",
+            "name": "denyx_fs_delete",
             "description": "Delete a file under the policy's filesystem delete_allow.",
             "inputSchema": {
                 "type": "object",
@@ -1012,7 +1012,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_subprocess_exec",
+            "name": "denyx_subprocess_exec",
             "description": "Spawn a child process. argv[0] is matched against the policy's subprocess.allow_commands and the joined argv against subprocess.deny_args.",
             "inputSchema": {
                 "type": "object",
@@ -1027,7 +1027,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_net_http_get",
+            "name": "denyx_net_http_get",
             "description": "HTTP GET. URL host is matched against http_get_allow; resolved IPs go through deny_ips.",
             "inputSchema": {
                 "type": "object",
@@ -1036,7 +1036,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_net_http_post",
+            "name": "denyx_net_http_post",
             "description": "HTTP POST with a string body.",
             "inputSchema": {
                 "type": "object",
@@ -1048,7 +1048,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_env_read",
+            "name": "denyx_env_read",
             "description": "Read a named environment variable. Subject to environment.allow_vars / deny_vars.",
             "inputSchema": {
                 "type": "object",
@@ -1057,8 +1057,8 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "aegis_tool_routing",
-            "description": "Read-only policy oracle. Returns the [tools.X] routing record for a given external tool name (e.g. WebSearch, Bash, Read), or every declared tool if no name is provided. The record contains: capabilities (Aegis caps the tool requires), backend_url and backend_method (where the policy expects the call to land), description, and an allowed flag (true iff every required capability is permitted). Bridges and hosts use this to surface the policy's tool surface to a calling agent without re-parsing the TOML.",
+            "name": "denyx_tool_routing",
+            "description": "Read-only policy oracle. Returns the [tools.X] routing record for a given external tool name (e.g. WebSearch, Bash, Read), or every declared tool if no name is provided. The record contains: capabilities (Denyx caps the tool requires), backend_url and backend_method (where the policy expects the call to land), description, and an allowed flag (true iff every required capability is permitted). Bridges and hosts use this to surface the policy's tool surface to a calling agent without re-parsing the TOML.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1082,7 +1082,7 @@ mod tests {
 
     fn write_temp(name: &str, body: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "aegis_dotenv_{}_{}_{}",
+            "denyx_dotenv_{}_{}_{}",
             name,
             std::process::id(),
             std::time::SystemTime::now()
@@ -1099,8 +1099,8 @@ mod tests {
         let path = write_temp("basic", "FOO=bar\nBAZ=qux\n");
         // Use names that aren't already in env to avoid the "process
         // env wins" rule eating the test.
-        let k1 = format!("AEGIS_TEST_DOTENV_BASIC_FOO_{}", std::process::id());
-        let k2 = format!("AEGIS_TEST_DOTENV_BASIC_BAZ_{}", std::process::id());
+        let k1 = format!("DENYX_TEST_DOTENV_BASIC_FOO_{}", std::process::id());
+        let k2 = format!("DENYX_TEST_DOTENV_BASIC_BAZ_{}", std::process::id());
         let body = format!("{k1}=bar\n{k2}=qux\n");
         std::fs::write(&path, body).unwrap();
 
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn dotenv_skips_comments_and_blank_lines() {
-        let k = format!("AEGIS_TEST_DOTENV_CMT_{}", std::process::id());
+        let k = format!("DENYX_TEST_DOTENV_CMT_{}", std::process::id());
         let path = write_temp(
             "comments",
             &format!("# this is a comment\n\n   \n{k}=v\n# trailing comment\n"),
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[test]
     fn dotenv_strips_export_prefix() {
-        let k = format!("AEGIS_TEST_DOTENV_EXPORT_{}", std::process::id());
+        let k = format!("DENYX_TEST_DOTENV_EXPORT_{}", std::process::id());
         let path = write_temp("export", &format!("export {k}=hello\n"));
         load_dotenv_into_env(&path).unwrap();
         assert_eq!(std::env::var(&k).unwrap(), "hello");
@@ -1139,8 +1139,8 @@ mod tests {
 
     #[test]
     fn dotenv_strips_matching_quotes() {
-        let k1 = format!("AEGIS_TEST_DOTENV_DBLQ_{}", std::process::id());
-        let k2 = format!("AEGIS_TEST_DOTENV_SGLQ_{}", std::process::id());
+        let k1 = format!("DENYX_TEST_DOTENV_DBLQ_{}", std::process::id());
+        let k2 = format!("DENYX_TEST_DOTENV_SGLQ_{}", std::process::id());
         let path = write_temp(
             "quotes",
             &format!("{k1}=\"double quoted\"\n{k2}='single quoted'\n"),
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn dotenv_keeps_mismatched_quotes_as_part_of_value() {
-        let k = format!("AEGIS_TEST_DOTENV_MIX_{}", std::process::id());
+        let k = format!("DENYX_TEST_DOTENV_MIX_{}", std::process::id());
         // Mismatched: starts with " but ends with '. Not valid quoting;
         // the function leaves the chars in place rather than guessing.
         let path = write_temp("mixed", &format!("{k}=\"oops'\n"));
@@ -1169,7 +1169,7 @@ mod tests {
     fn dotenv_silently_skips_malformed_lines() {
         // Lines without `=` are skipped, not errors. Important: a
         // typo'd `.env` must not bring the whole agent down.
-        let k = format!("AEGIS_TEST_DOTENV_MALFORMED_{}", std::process::id());
+        let k = format!("DENYX_TEST_DOTENV_MALFORMED_{}", std::process::id());
         let path = write_temp(
             "malformed",
             &format!(
@@ -1190,7 +1190,7 @@ mod tests {
 
     #[test]
     fn dotenv_existing_process_env_wins() {
-        let k = format!("AEGIS_TEST_DOTENV_PRECEDENCE_{}", std::process::id());
+        let k = format!("DENYX_TEST_DOTENV_PRECEDENCE_{}", std::process::id());
         // Pre-set the var in process env. The .env should NOT override.
         std::env::set_var(&k, "from-process-env");
         let path = write_temp("precedence", &format!("{k}=from-dotenv\n"));
@@ -1206,11 +1206,11 @@ mod tests {
         // we read it", not "we must successfully parse a file". Missing
         // files are not errors that should bubble up to the operator.
         let bogus = std::env::temp_dir().join(format!(
-            "aegis_dotenv_does_not_exist_{}",
+            "denyx_dotenv_does_not_exist_{}",
             std::process::id()
         ));
         let result = load_dotenv_into_env(&bogus);
         assert!(result.is_err()); // returns Err, but the caller in
-                                  // load_aegis_config_cascade swallows it
+                                  // load_denyx_config_cascade swallows it
     }
 }

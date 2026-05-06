@@ -1,14 +1,14 @@
-//! Integration tests for `aegis audit verify` and the audit-log
-//! protected-path guard wired into `aegis run`.
+//! Integration tests for `denyx audit verify` and the audit-log
+//! protected-path guard wired into `denyx run`.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_aegis");
+const BIN: &str = env!("CARGO_BIN_EXE_denyx");
 
 fn fresh_dir(prefix: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "aegis_audit_subcmd_{}_{}_{}",
+        "denyx_audit_subcmd_{}_{}_{}",
         prefix,
         std::process::id(),
         std::time::SystemTime::now()
@@ -29,8 +29,8 @@ fn audit_verify_clean_chain_succeeds() {
         "ts": "2026-05-05T00:00:00Z",
         "task_id": "t", "step": 1, "capability": "env.read",
         "status": "allowed", "detail": {"name": "PATH", "error": null},
-        "aegis_seq": 1,
-        "aegis_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "denyx_seq": 1,
+        "denyx_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
     });
     let l1s = serde_json::to_string(&l1).unwrap();
     use sha2::{Digest, Sha256};
@@ -42,8 +42,8 @@ fn audit_verify_clean_chain_succeeds() {
         "ts": "2026-05-05T00:00:01Z",
         "task_id": "t", "step": 2, "capability": "env.read",
         "status": "allowed", "detail": {"name": "USER", "error": null},
-        "aegis_seq": 2,
-        "aegis_prev_hash": l1_hex,
+        "denyx_seq": 2,
+        "denyx_prev_hash": l1_hex,
     });
     let l2s = serde_json::to_string(&l2).unwrap();
     std::fs::write(&log, format!("{l1s}\n{l2s}\n")).unwrap();
@@ -71,15 +71,15 @@ fn audit_verify_tampered_log_fails_with_specific_line_number() {
     let l1 = serde_json::json!({
         "ts": "T", "task_id": "t", "step": 1, "capability": "env.read",
         "status": "allowed", "detail": {},
-        "aegis_seq": 1,
-        "aegis_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "denyx_seq": 1,
+        "denyx_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
     });
     let l1s = serde_json::to_string(&l1).unwrap();
     let l2 = serde_json::json!({
         "ts": "T", "task_id": "t", "step": 2, "capability": "env.read",
         "status": "allowed", "detail": {},
-        "aegis_seq": 999,   // jump
-        "aegis_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",  // wrong
+        "denyx_seq": 999,   // jump
+        "denyx_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",  // wrong
     });
     let l2s = serde_json::to_string(&l2).unwrap();
     std::fs::write(&log, format!("{l1s}\n{l2s}\n")).unwrap();
@@ -96,7 +96,7 @@ fn audit_verify_tampered_log_fails_with_specific_line_number() {
     // Should report at least one of: seq jump and/or prev_hash
     // mismatch (this fixture has both).
     assert!(
-        stderr.contains("aegis_seq jump") || stderr.contains("aegis_prev_hash mismatch"),
+        stderr.contains("denyx_seq jump") || stderr.contains("denyx_prev_hash mismatch"),
         "expected reason in stderr: {stderr}"
     );
 }
@@ -104,7 +104,7 @@ fn audit_verify_tampered_log_fails_with_specific_line_number() {
 #[test]
 fn audit_verify_missing_file_fails_cleanly() {
     let out = Command::new(BIN)
-        .args(["audit", "verify", "/tmp/aegis_does_not_exist_99999.jsonl"])
+        .args(["audit", "verify", "/tmp/denyx_does_not_exist_99999.jsonl"])
         .output()
         .expect("spawn");
     assert!(!out.status.success());
@@ -113,12 +113,12 @@ fn audit_verify_missing_file_fails_cleanly() {
 }
 
 #[test]
-fn aegis_run_refuses_audit_log_path_reachable_to_agent() {
+fn denyx_run_refuses_audit_log_path_reachable_to_agent() {
     // If the policy grants write access to the audit-log path, the
     // run path must refuse to start (the agent could otherwise
     // tamper with its own audit trail).
     let dir = fresh_dir("guard");
-    let policy_path = dir.join("aegis.toml");
+    let policy_path = dir.join("denyx.toml");
     let log = dir.join("audit.jsonl");
     let log_str = log.to_string_lossy().replace('\\', "/");
     let body = format!(

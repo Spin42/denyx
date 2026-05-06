@@ -13,8 +13,8 @@
 
 use std::path::PathBuf;
 
-use aegis_host::Runner;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::Runner;
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str, root: PathBuf) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -25,7 +25,7 @@ fn runner_for(toml: &str, root: PathBuf) -> Runner {
 #[test]
 fn fs_local_only_read_redacts_in_printed_output() {
     let tmp = std::env::temp_dir();
-    let secret_path = tmp.join(format!("aegis_taint_secret_{}.txt", std::process::id()));
+    let secret_path = tmp.join(format!("denyx_taint_secret_{}.txt", std::process::id()));
     let secret_value = "supersecret-fs-token-abc123-XYZ789";
     std::fs::write(&secret_path, secret_value).unwrap();
 
@@ -66,7 +66,7 @@ print("len:", len(x))
 
 #[test]
 fn env_local_only_var_redacts_in_printed_output() {
-    let var = "AEGIS_TAINT_TEST_VAR";
+    let var = "DENYX_TAINT_TEST_VAR";
     let secret_value = "ek-zzz-zzz-this-is-the-key-do-not-leak";
     std::env::set_var(var, secret_value);
 
@@ -102,7 +102,7 @@ fn env_local_only_var_redacts_after_string_concat() {
     // Even when the script tries to wrap or interpolate the value, the
     // substring check on the final printed line catches it because the
     // raw secret is still present as a substring.
-    let var = "AEGIS_TAINT_TEST_CONCAT";
+    let var = "DENYX_TAINT_TEST_CONCAT";
     let secret_value = "raw-concat-secret-value-xyz0123";
     std::env::set_var(var, secret_value);
 
@@ -147,11 +147,11 @@ fn fs_write_with_tainted_content_is_denied_at_arg_check() {
     // This test asserts the new (stricter) behaviour: the round-trip
     // attempt fails with a Policy error and the scratch file is
     // never created.
-    let var = "AEGIS_TAINT_TEST_ROUNDTRIP";
+    let var = "DENYX_TAINT_TEST_ROUNDTRIP";
     let secret_value = "roundtrip-secret-value-9999-abcdef";
     std::env::set_var(var, secret_value);
     let tmp = std::env::temp_dir();
-    let scratch = tmp.join(format!("aegis_taint_rt_{}.txt", std::process::id()));
+    let scratch = tmp.join(format!("denyx_taint_rt_{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&scratch);
 
     let toml = format!(
@@ -226,7 +226,7 @@ print("captured:", out)
 fn plain_allow_does_not_redact() {
     // Sanity check: a regular allow_vars var is NOT tainted, so its
     // value passes through to the printed output unchanged.
-    let var = "AEGIS_TAINT_TEST_PLAIN";
+    let var = "DENYX_TAINT_TEST_PLAIN";
     let value = "plain-not-secret-value-AAAA";
     std::env::set_var(var, value);
 
@@ -261,7 +261,7 @@ fn audit_event_payload_is_also_redacted() {
     // The audit log is one of the output boundaries. Even if a script
     // never `print`s, an audit-event field that happens to contain the
     // secret must be redacted before it reaches the sink.
-    use aegis_host::{AuditEvent, AuditSink};
+    use denyx_host::{AuditEvent, AuditSink};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -272,7 +272,7 @@ fn audit_event_payload_is_also_redacted() {
         }
     }
 
-    let var = "AEGIS_TAINT_AUDIT";
+    let var = "DENYX_TAINT_AUDIT";
     let secret = "audit-secret-do-not-leak-ABCD";
     std::env::set_var(var, secret);
 
@@ -317,7 +317,7 @@ fn subprocess_with_tainted_argv_is_denied_for_public_command() {
     // local-only, passing a tainted value as argv is denied at the
     // arg check. This is the new IFC: the script can't push secret
     // bytes to a host-visible binary's stdout via argv.
-    let var = "AEGIS_TAINT_PUBLIC_ARGV";
+    let var = "DENYX_TAINT_PUBLIC_ARGV";
     let secret = "public-argv-secret-token-9999";
     std::env::set_var(var, secret);
 

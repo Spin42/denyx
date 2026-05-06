@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aegis_host::Runner;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::Runner;
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -18,7 +18,7 @@ fn runner_for(toml: &str) -> Runner {
 fn unique_var(prefix: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("AEGIS_SUBPROC_TEST_{}_{}_{}", prefix, std::process::id(), n)
+    format!("DENYX_SUBPROC_TEST_{}_{}_{}", prefix, std::process::id(), n)
 }
 
 #[test]

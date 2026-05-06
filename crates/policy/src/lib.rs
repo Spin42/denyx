@@ -1,4 +1,4 @@
-//! Aegis policy types and runtime matchers.
+//! Denyx policy types and runtime matchers.
 //!
 //! Policy is parsed configuration data, not executable code, so an agent
 //! script cannot mutate or rewrite the policy from inside the sandbox.
@@ -18,7 +18,7 @@ use url::Url;
 
 pub mod presets;
 
-/// Environment-variable names reserved by the Aegis runtime itself
+/// Environment-variable names reserved by the Denyx runtime itself
 /// for control-plane configuration (the bearer token used to fetch
 /// policies and post audit events; the policy and audit URLs).
 ///
@@ -27,29 +27,29 @@ pub mod presets;
 /// `local_only_vars` entry can put any of them in a child process's
 /// environment. The deny lives in `Policy::check_env_read` and
 /// `Policy::subprocess_env`, so it applies regardless of inheritance,
-/// negation (e.g. `!AEGIS_AUTH_TOKEN`), or directly-authored allow
+/// negation (e.g. `!DENYX_AUTH_TOKEN`), or directly-authored allow
 /// lists.
 ///
-/// The list is an explicit set rather than a prefix (`AEGIS_*`)
+/// The list is an explicit set rather than a prefix (`DENYX_*`)
 /// because well-formed test fixtures, examples, and operator scripts
-/// legitimately use `AEGIS_*`-prefixed env var names that are NOT
-/// runtime credentials (e.g. `AEGIS_DEMO_SECRET` in the exfil probe).
+/// legitimately use `DENYX_*`-prefixed env var names that are NOT
+/// runtime credentials (e.g. `DENYX_DEMO_SECRET` in the exfil probe).
 /// Restricting to a curated list keeps those flows working while
 /// closing the credential-exfiltration surface.
-pub const AEGIS_RESERVED_VAR_NAMES: &[&str] = &[
-    "AEGIS_AUTH_TOKEN",
-    "AEGIS_TOKEN",
-    "AEGIS_SERVER_TOKEN",
-    "AEGIS_JWT",
-    "AEGIS_API_KEY",
-    "AEGIS_POLICY_URL",
-    "AEGIS_AUDIT_URL",
+pub const DENYX_RESERVED_VAR_NAMES: &[&str] = &[
+    "DENYX_AUTH_TOKEN",
+    "DENYX_TOKEN",
+    "DENYX_SERVER_TOKEN",
+    "DENYX_JWT",
+    "DENYX_API_KEY",
+    "DENYX_POLICY_URL",
+    "DENYX_AUDIT_URL",
 ];
 
 /// Whether the given env var name is on the reserved list. See
-/// [`AEGIS_RESERVED_VAR_NAMES`] for the rationale.
-pub fn is_aegis_reserved_var(name: &str) -> bool {
-    AEGIS_RESERVED_VAR_NAMES.contains(&name)
+/// [`DENYX_RESERVED_VAR_NAMES`] for the rationale.
+pub fn is_denyx_reserved_var(name: &str) -> bool {
+    DENYX_RESERVED_VAR_NAMES.contains(&name)
 }
 
 #[derive(Debug, Error)]
@@ -139,7 +139,7 @@ pub struct PolicyFile {
     #[serde(default)]
     pub runtime: RuntimePolicy,
     /// Map from external tool names (as exposed by an MCP host or an
-    /// IDE agent runtime) to the dotted Aegis capability names the
+    /// IDE agent runtime) to the dotted Denyx capability names the
     /// tool requires. A consuming host that receives a tool call (e.g.
     /// `Bash {command: "ls"}`) looks up `Bash` here, gets back
     /// `["subprocess.exec"]`, and verifies each capability against the
@@ -272,7 +272,7 @@ pub struct RuntimePolicy {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ToolRecord {
-    /// Aegis capabilities the tool requires. The tool is permitted iff
+    /// Denyx capabilities the tool requires. The tool is permitted iff
     /// every entry here has a populated resource section.
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -362,7 +362,7 @@ pub struct SubprocessPolicy {
     /// bubblewrap, building a fresh namespaced jail per call whose
     /// view of the filesystem is exactly what the policy permits —
     /// at the OS layer, not just at the argv-scan layer. The child
-    /// literally cannot reach paths Aegis didn't bind in.
+    /// literally cannot reach paths Denyx didn't bind in.
     ///
     /// Linux-only for v1. macOS / Windows operators get the
     /// language-runtime defenses (argv path gate + deny lists);
@@ -379,7 +379,7 @@ pub struct SubprocessPolicy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
-    /// Run the child as a regular process. Aegis's argv path-gate
+    /// Run the child as a regular process. Denyx's argv path-gate
     /// + deny lists are the defense. Cross-platform.
     #[default]
     None,
@@ -679,7 +679,7 @@ impl Policy {
     /// Load a policy file, anchoring relative path patterns at the
     /// **policy file's own directory**. This is the portable default:
     /// `read_allow = ["src/**"]` means "the `src/` next to this
-    /// policy file", regardless of where the operator invoked aegis
+    /// policy file", regardless of where the operator invoked denyx
     /// from. A policy file shipped with a project keeps working when
     /// the project moves, gets cloned, or runs in CI; the user does
     /// not need to leak their personal directory structure into the
@@ -735,16 +735,16 @@ impl Policy {
                     // with bwrap inside, not a native bwrap port.
                     let hint = if cfg!(target_os = "macos") {
                         "You're on macOS, where bwrap doesn't run natively. The \
-                         supported path is to run `aegis-mcp` inside a Lima VM \
+                         supported path is to run `denyx-mcp` inside a Lima VM \
                          that has bubblewrap installed — see \
                          docs/macos-deployment.md for the full guide and a \
                          ready-made Lima template at \
-                         examples/macos/aegis.lima.yaml. \
+                         examples/macos/denyx.lima.yaml. \
                          To opt out of OS-level isolation entirely, set \
                          `sandbox = \"none\"`."
                     } else if cfg!(target_os = "windows") {
                         "You're on Windows, where bwrap doesn't run natively. The \
-                         supported path is to run `aegis-mcp` inside WSL2 \
+                         supported path is to run `denyx-mcp` inside WSL2 \
                          (`wsl --install -d Ubuntu-24.04`) and install \
                          bubblewrap there — see docs/windows-deployment.md for \
                          the full guide. To opt out of OS-level isolation \
@@ -924,7 +924,7 @@ impl Policy {
     /// permitted by `[functions].allow`. Default-deny: an undeclared
     /// tool is rejected.
     ///
-    /// This is the entry point for hosts that consult Aegis as a
+    /// This is the entry point for hosts that consult Denyx as a
     /// policy oracle — they receive a tool call by name (Bash, Read,
     /// Edit, WebFetch, WebSearch...) and want a yes/no plus the full
     /// [`ToolRecord`] (capabilities + routing hints) to act on.
@@ -1122,19 +1122,19 @@ impl Policy {
 
     pub fn check_env_read(&self, name: &str) -> Result<(), PolicyError> {
         // Runtime invariant: a fixed list of variable names is
-        // reserved for the runtime itself (AEGIS_AUTH_TOKEN,
-        // AEGIS_POLICY_URL, AEGIS_AUDIT_URL, and a few aliases for
+        // reserved for the runtime itself (DENYX_AUTH_TOKEN,
+        // DENYX_POLICY_URL, DENYX_AUDIT_URL, and a few aliases for
         // the bearer token). These MUST NOT be readable by an agent
         // script under any policy. The check fires BEFORE any
         // allow_vars / local_only_vars / negation logic — there is no
         // way for an inherited or user-authored policy to undo this.
-        // A `!AEGIS_AUTH_TOKEN` negation in a user file removes the
+        // A `!DENYX_AUTH_TOKEN` negation in a user file removes the
         // entry from `deny_vars` but cannot reach this hard-coded
-        // gate. See [`AEGIS_RESERVED_VAR_NAMES`].
-        if is_aegis_reserved_var(name) {
+        // gate. See [`DENYX_RESERVED_VAR_NAMES`].
+        if is_denyx_reserved_var(name) {
             return Err(PolicyError::EnvDenied {
                 name: name.to_string(),
-                reason: "name is on the reserved-variable list (Aegis runtime \
+                reason: "name is on the reserved-variable list (Denyx runtime \
                          control-plane credentials); cannot be read by agent \
                          scripts under any policy"
                     .into(),
@@ -1244,8 +1244,8 @@ impl Policy {
             // Runtime invariant: same as check_env_read — reserved
             // names are never propagated to children, even if a
             // policy somehow lists them in allow_vars / local_only_vars.
-            // See [`AEGIS_RESERVED_VAR_NAMES`].
-            if is_aegis_reserved_var(name) {
+            // See [`DENYX_RESERVED_VAR_NAMES`].
+            if is_denyx_reserved_var(name) {
                 continue;
             }
             if self.env_deny.iter().any(|d| d == name) {
@@ -1549,7 +1549,7 @@ impl Policy {
     }
 }
 
-/// Heuristic: does this argv element look like a path Aegis should
+/// Heuristic: does this argv element look like a path Denyx should
 /// gate? Conservative — we'd rather miss a bare-name file than
 /// reject `git log` (which has "log" as a subcommand, not a path).
 ///

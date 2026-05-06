@@ -1,11 +1,11 @@
-//! Integration tests for `aegis_policy`. Exercises only the public API:
+//! Integration tests for `denyx_policy`. Exercises only the public API:
 //! `PolicyFile::from_toml_str`, `Policy::from_file`, `Policy::check_*`,
 //! preset inheritance, and `PolicyFile::merge_with`.
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -794,7 +794,7 @@ write_allow = ["/tmp/**"]   # only write enabled
 
 fn write_temp_policy(name: &str, body: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "aegis_self_test_{}_{}",
+        "denyx_self_test_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -811,7 +811,7 @@ fn write_temp_policy(name: &str, body: &str) -> PathBuf {
 fn rejects_policy_that_allows_writing_to_itself_via_broad_glob() {
     // Relative patterns now anchor at the policy file's own directory
     // (the portable default), so `**` reaches the policy file itself.
-    let path = write_temp_policy("aegis.toml", "PLACEHOLDER");
+    let path = write_temp_policy("denyx.toml", "PLACEHOLDER");
     let body = r#"
 [filesystem]
 read_allow = ["**"]
@@ -832,14 +832,14 @@ allow = ["fs.read", "fs.write"]
 
 #[test]
 fn rejects_policy_that_allows_writing_to_itself_via_exact_name() {
-    // A bare `aegis.toml` pattern would (per gitignore semantics)
+    // A bare `denyx.toml` pattern would (per gitignore semantics)
     // match anywhere under the policy root, including the policy
     // file itself.
-    let path = write_temp_policy("aegis.toml", "PLACEHOLDER");
+    let path = write_temp_policy("denyx.toml", "PLACEHOLDER");
     let body = r#"
 [filesystem]
-read_allow = ["aegis.toml"]
-write_allow = ["aegis.toml"]
+read_allow = ["denyx.toml"]
+write_allow = ["denyx.toml"]
 
 [functions]
 allow = ["fs.read", "fs.write"]
@@ -856,7 +856,7 @@ allow = ["fs.read", "fs.write"]
 
 #[test]
 fn rejects_policy_that_allows_deleting_itself() {
-    let path = write_temp_policy("aegis.toml", "PLACEHOLDER");
+    let path = write_temp_policy("denyx.toml", "PLACEHOLDER");
     let body = r#"
 [filesystem]
 delete_allow = ["**"]
@@ -880,7 +880,7 @@ fn explicit_deny_on_policy_file_satisfies_the_guard() {
     // file is a sound pattern — runtime enforcement honors deny-wins,
     // and the guard probes via the real check_fs_* methods, so it
     // sees the file as not writable and lets the policy load.
-    let path = write_temp_policy("aegis.toml", "PLACEHOLDER");
+    let path = write_temp_policy("denyx.toml", "PLACEHOLDER");
     // Substitute the actual path into the deny entry so the match is
     // exact regardless of where the temp directory lives.
     let abs = path.to_string_lossy().replace('\\', "/");
@@ -915,7 +915,7 @@ write_allow = ["src/**", "/tmp/build/**"]
 [functions]
 allow = ["fs.read", "fs.write"]
 "#;
-    let path = write_temp_policy("aegis.toml", body);
+    let path = write_temp_policy("denyx.toml", body);
     let res = Policy::load(&path);
     assert!(res.is_ok(), "narrow write_allow should not trip the guard");
     let _ = std::fs::remove_file(&path);
@@ -928,11 +928,11 @@ fn mixes_relative_and_absolute_patterns_in_one_policy() {
     //   "/tmp/**"  — absolute, used as-is
     //   "~/cache/" — tilde-expanded, used as-is
     // All three coexist in the same list.
-    let path = write_temp_policy("aegis.toml", "PLACEHOLDER");
+    let path = write_temp_policy("denyx.toml", "PLACEHOLDER");
     let body = r#"
 [filesystem]
-read_allow  = ["src/**", "/tmp/**", "~/.cache/aegis/**"]
-write_allow = ["src/**", "/tmp/aegis_demo/**"]
+read_allow  = ["src/**", "/tmp/**", "~/.cache/denyx/**"]
+write_allow = ["src/**", "/tmp/denyx_demo/**"]
 
 [functions]
 allow = ["fs.read", "fs.write"]
@@ -956,7 +956,7 @@ allow = ["fs.read", "fs.write"]
     );
     assert!(
         policy
-            .check_fs_write(Path::new("/tmp/aegis_demo/out.txt"))
+            .check_fs_write(Path::new("/tmp/denyx_demo/out.txt"))
             .is_ok(),
         "absolute write"
     );
@@ -981,7 +981,7 @@ read_allow = ["**"]
 [functions]
 allow = ["fs.read"]
 "#;
-    let path = write_temp_policy("aegis.toml", body);
+    let path = write_temp_policy("denyx.toml", body);
     let res = Policy::load(&path);
     assert!(res.is_ok(), "read-only policy match should be allowed");
     let _ = std::fs::remove_file(&path);

@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use aegis_policy::{Policy, PolicyFile};
+use denyx_policy::{Policy, PolicyFile};
 
 fn build(toml: &str) -> Policy {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -153,7 +153,7 @@ allow_commands = ["echo"]
 
 #[test]
 fn check_subprocess_argv_paths_accepts_path_inside_read_allow() {
-    let dir = std::env::temp_dir().join(format!("aegis_argv_gate_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("denyx_argv_gate_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let allowed_path = dir.join("ok.txt");
     std::fs::write(&allowed_path, "x").unwrap();
@@ -286,7 +286,7 @@ timeout_seconds = 5
     assert_eq!(p.network_timeout(), std::time::Duration::from_secs(5));
 
     let p_default = build("");
-    // Default in Aegis is 30 seconds; pin that here so a mutation
+    // Default in Denyx is 30 seconds; pin that here so a mutation
     // returning Default::default() (which would be 0) fails.
     assert_eq!(
         p_default.network_timeout(),

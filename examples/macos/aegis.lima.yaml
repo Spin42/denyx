@@ -1,14 +1,14 @@
-# Lima VM template for running aegis-mcp under bubblewrap on macOS.
+# Lima VM template for running denyx-mcp under bubblewrap on macOS.
 #
 # Usage:
 #   brew install lima
-#   limactl start --name=aegis examples/macos/aegis.lima.yaml
-#   limactl shell aegis -- bash -lc 'cd ~/Projects/post-sigil && cargo build --release'
+#   limactl start --name=denyx examples/macos/denyx.lima.yaml
+#   limactl shell denyx -- bash -lc 'cd ~/Projects/post-sigil && cargo build --release'
 #
 # Then point Claude Code (or any MCP-aware host) at:
 #   command = "limactl"
-#   args    = ["shell", "aegis", "<host-path-to>/target/release/aegis-mcp",
-#              "--policy", "<host-path-to>/aegis.toml"]
+#   args    = ["shell", "denyx", "<host-path-to>/target/release/denyx-mcp",
+#              "--policy", "<host-path-to>/denyx.toml"]
 #
 # The host's $HOME is mirrored at the same absolute path inside the VM,
 # so you write paths once and they resolve identically on both sides.
@@ -38,11 +38,11 @@ mounts:
   # /tmp is the default scratch dir for the example harnesses; explicit
   # mount keeps audit logs / fixtures persistent across VM restarts only
   # if you care about it. Comment out for ephemeral /tmp.
-  - location: "/tmp/aegis_demo"
+  - location: "/tmp/denyx_demo"
     writable: true
 
 # System-level provisioning: bubblewrap + the build dependencies for
-# Aegis. Runs once on first boot.
+# Denyx. Runs once on first boot.
 provision:
   - mode: system
     script: |

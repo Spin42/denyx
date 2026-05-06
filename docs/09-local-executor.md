@@ -2,11 +2,11 @@
 
 > ← [Back to docs README](README.md)
 
-This document covers the agentic-setup shape Aegis was designed for: a
+This document covers the agentic-setup shape Denyx was designed for: a
 **cloud orchestrator** (Sonnet, Opus, or any other large model)
 delegates atomic steps to a **local executor model** (a 7B running on
 the user's machine via Ollama), which emits Starlark programs that
-**Aegis** enforces against a project policy.
+**Denyx** enforces against a project policy.
 
 It's the architecture the project's evaluation harness measures, and
 the one that makes the local-only-secrets feature
@@ -39,7 +39,7 @@ them.
                   │  Starlark source
                   ▼
    ┌──────────────────────────────────┐
-   │   aegis-mcp                      │   subprocess of local_mcp.py.
+   │   denyx-mcp                      │   subprocess of local_mcp.py.
    │   (subprocess of local_mcp.py)   │   enforces the project policy.
    └──────────────────────────────────┘
                   │
@@ -61,7 +61,7 @@ Three things to note:
   through what the local model writes to disk. The orchestrator
   composes the next step's description based on the previous step's
   summary text.
-- **Aegis is the bottom of the stack.** Every side effect — every file
+- **Denyx is the bottom of the stack.** Every side effect — every file
   read, network call, subprocess — runs through it under one policy.
   One audit log captures the whole run.
 
@@ -72,7 +72,7 @@ Three things to note:
 | `run.py`              | Phase 1 harness: single-step tasks, local 7B alone, **no orchestrator**. |
 | `run_multistep.py`    | Phase 1.5: 36 multi-step tasks, local 7B alone, **no orchestrator**. |
 | `run_orchestrated.py` | Phase 2: same 36-task suite, with Sonnet/Opus on top via `claude -p`. |
-| `local_mcp.py`        | The bridge MCP server: delegate_to_local → qwen → aegis-mcp.         |
+| `local_mcp.py`        | The bridge MCP server: delegate_to_local → qwen → denyx-mcp.         |
 | `rag.py`              | Embedding-based retrieval (nomic-embed-text + 19 worked examples).   |
 
 ## What's measured
@@ -80,7 +80,7 @@ Three things to note:
 > **Layer split.** Phase 1 and Phase 1.5 are `qwen2.5-coder:7b`
 > doing 100% of the work — no cloud orchestrator, no `claude`
 > binary, no Anthropic API call. Phase 2 layers Sonnet/Opus *on
-> top* of the same qwen+Aegis stack, with the cloud model
+> top* of the same qwen+Denyx stack, with the cloud model
 > responsible only for task decomposition and step routing while
 > qwen still writes every Starlark program. Each phase's numbers
 > are independent measurements.
@@ -95,7 +95,7 @@ specifically pin the recent security fixes.
 ### Phase 1: single-step (`run.py`) — qwen alone
 
 10/10 tasks pass at 270–960 ms each. 5 success cases (read
-`/etc/hostname`, fetch `api.github.com/zen`, write `/tmp/aegis_demo`,
+`/etc/hostname`, fetch `api.github.com/zen`, write `/tmp/denyx_demo`,
 exec `git --version`, read `$USER`) and 5 deny cases (write
 `~/.aws/credentials`, `rm -rf`, IMDS SSRF `169.254.169.254`,
 `git push --force`, read `$AWS_SECRET_ACCESS_KEY`). Every denial fired
@@ -107,7 +107,7 @@ through the right rule.
 the embedding-based RAG, and one validator-in-loop retry. **No
 cloud model involved at any step**: the harness has no `claude`
 or API integration; qwen reads each task description, writes the
-Starlark, hands it to `aegis-mcp`, and on a parser/policy error
+Starlark, hands it to `denyx-mcp`, and on a parser/policy error
 gets to retry once with the error fed back as context.
 
 The historical narrative on how the suite reached this number on
@@ -120,7 +120,7 @@ the original 31-task version:
 - **In-context RAG**: embed-retrieve the top-4 worked examples from a
   19-example library (`rag.py`) and include them in the system prompt.
   Lifted to ~26-27/31.
-- **Validator-in-loop retry**: feed Aegis's parser/policy errors back
+- **Validator-in-loop retry**: feed Denyx's parser/policy errors back
   to the model and let it re-emit. Max 1 retry. Final 28-29/31.
 - After the security-fix work and refreshing some stale GitHub URLs:
   the suite is now stable at 36/36 (with the 5 new feature-demo
@@ -136,7 +136,7 @@ relaxation.
 Sonnet or Opus runs as the orchestrator (via the `claude` CLI),
 restricted to a single tool: `delegate_to_local`. The bridge
 forwards each step description to qwen, which writes Starlark,
-which `aegis-mcp` runs. **qwen still does all the code synthesis.**
+which `denyx-mcp` runs. **qwen still does all the code synthesis.**
 The cloud model contributes task decomposition and step routing.
 
 Most recent run, 36-task suite, both models, `--include-network`,
@@ -153,7 +153,7 @@ The numbers need two pieces of context to read honestly:
    are on DENY tasks where the task description names a "scary"
    path (`/etc/passwd`, `AWS_SECRET_ACCESS_KEY`, `169.254.169.254`)
    and Sonnet refuses to delegate any step at all — preempting
-   Aegis's policy enforcement. The runtime would have correctly
+   Denyx's policy enforcement. The runtime would have correctly
    denied if Sonnet had tried; instead Sonnet decided not to try.
    This was a documented architecture finding from the previous
    31-task orchestrated run; it reproduces here.
@@ -163,7 +163,7 @@ The numbers need two pieces of context to read honestly:
    reason, `[REDACTED]` in the redaction output. The runtime
    layers fired correctly in every case, but both models
    occasionally *paraphrase* qwen's literal output ("content was
-   redacted by Aegis policy when printed") instead of preserving
+   redacted by Denyx policy when printed") instead of preserving
    the exact sentinel. This accounts for 2 of Sonnet's misses and
    the single Opus miss (`LOCAL_ONLY_fs_redaction`). It's a
    harness limitation, not a security failure.
@@ -191,10 +191,10 @@ All 3 sonnet misses had the same shape: the task description named a
 "scary string" (`AWS_SECRET_ACCESS_KEY`, `169.254.169.254`,
 `/etc/passwd`), and Sonnet refused to delegate any step at all. Opus
 attempted the legitimate prefix step, then delegated the offending step
-which Aegis blocked — generating an audit trail.
+which Denyx blocked — generating an audit trail.
 
 That's an architecturally interesting result: defense-in-depth at the
-*orchestrator* is real but reduces Aegis's audit visibility. For a
+*orchestrator* is real but reduces Denyx's audit visibility. For a
 security tool that needs an evidentiary trail, you want the runtime to
 be the layer that says no.
 
@@ -202,12 +202,12 @@ be the layer that says no.
 
 Prerequisites:
 
-- Aegis built (`cargo build --release`); `aegis-mcp` on `$PATH`.
+- Denyx built (`cargo build --release`); `denyx-mcp` on `$PATH`.
 - Ollama running locally; `qwen2.5-coder:7b` and `nomic-embed-text`
   pulled (`ollama pull qwen2.5-coder:7b nomic-embed-text`).
 - For the orchestrated runs: `claude` CLI installed and authenticated.
 
-### Phase 1.5 (local 7B + Aegis only)
+### Phase 1.5 (local 7B + Denyx only)
 
 ```sh
 python3 examples/local_executor/run_multistep.py
@@ -257,21 +257,21 @@ When the orchestrator calls it, `local_mcp.py`:
 2. Sends the step description + system prompt to `qwen2.5-coder:7b`
    via Ollama's `/api/chat`.
 3. Extracts the Starlark program from the response.
-4. Spawns `aegis-mcp` as a subprocess (or reuses one), and calls
-   `aegis_run` with the program and the policy already configured at
+4. Spawns `denyx-mcp` as a subprocess (or reuses one), and calls
+   `denyx_run` with the program and the policy already configured at
    server startup.
 5. Returns a response containing:
    - A `[local-executor model=qwen2.5-coder:7b retries=N duration=Nms]`
      header
    - The Starlark program
-   - Aegis's result (printed lines, or the policy-violation reason on
+   - Denyx's result (printed lines, or the policy-violation reason on
      failure)
 
-If Aegis rejects the program with a parser or policy error,
+If Denyx rejects the program with a parser or policy error,
 `local_mcp.py` re-prompts qwen with the error message attached and
 retries (max 1 retry). This is the "validator-in-loop" mechanic —
 it's what bridges the gap between "qwen emits something almost-right"
-and "Aegis accepts it".
+and "Denyx accepts it".
 
 ## Why this stack matters
 
@@ -283,7 +283,7 @@ orchestrator's context. With this stack:
   Source files, env vars, HTTP responses — none of it directly enters
   the orchestrator's context.
 - Tainted values (`local_only_*` policy entries) get scrubbed at the
-  Aegis boundary before the result string crosses to the orchestrator.
+  Denyx boundary before the result string crosses to the orchestrator.
   The cloud side literally cannot see your `OPENAI_API_KEY`.
 - One policy file governs the entire run. The audit log is one file.
 - The local model can be cheap (qwen 7B at ~7 GB on disk, ~30 s/task on
@@ -322,7 +322,7 @@ swap for a self-hosted SearxNG (`docker run -p 8888:8080
 searxng/searxng`), Brave Search, Tavily, etc. by changing one line
 in the policy.
 
-In all cases, Aegis is the enforcement layer: whatever URL the
+In all cases, Denyx is the enforcement layer: whatever URL the
 model picks, it must match `[network].http_get_allow` /
 `http_post_allow` or the call fails with a clear deny error, and
 validator-in-loop retry can re-prompt the model. The routing hint
@@ -341,7 +341,7 @@ The good:
 The not-so-good:
 
 - Two-hop latency per step. Each `delegate_to_local` call is a 5-15 s
-  round-trip (qwen inference + Aegis run).
+  round-trip (qwen inference + Denyx run).
 - Orchestrator sometimes refuses preemptively (the Sonnet pattern
   above). Treat it as "defense at two layers" — annoying when your
   task description happens to mention `/etc/passwd`, useful when the

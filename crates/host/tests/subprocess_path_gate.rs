@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
-use aegis_host::{AegisError, Runner};
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::{DenyxError, Runner};
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str, root: PathBuf) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -18,7 +18,7 @@ fn runner_for(toml: &str, root: PathBuf) -> Runner {
 fn cat_etc_passwd_is_blocked_by_argv_gate() {
     // The classic bypass: cat is allowed, /etc/passwd is in fs deny.
     // Without the argv gate, `subprocess.exec(["cat","/etc/passwd"])`
-    // would succeed because the OS opens the file, not Aegis.
+    // would succeed because the OS opens the file, not Denyx.
     let toml = r#"
 [filesystem]
 read_allow = ["src/**"]
@@ -37,7 +37,7 @@ print(out)
     let err = runner.run("t", src, "test.star").unwrap_err();
     let msg = err.to_string();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "expected Policy violation, got: {err:?}"
     );
     assert!(
@@ -69,7 +69,7 @@ allow_commands = ["cat"]
     let src = r#"subprocess.exec(["cat", "/var/log/syslog"])"#;
     let err = runner.run("t", src, "test.star").unwrap_err();
     let msg = err.to_string();
-    assert!(matches!(err, AegisError::Policy(_)), "got: {err:?}");
+    assert!(matches!(err, DenyxError::Policy(_)), "got: {err:?}");
     assert!(
         msg.contains("not in any [filesystem] allow list") || msg.contains("allow_list"),
         "error should explain the missing allow: {msg}"
@@ -82,7 +82,7 @@ fn tee_to_unwritable_path_is_blocked() {
     // in write_allow.
     let toml = r#"
 [filesystem]
-write_allow = ["/tmp/aegis_path_gate_test/**"]
+write_allow = ["/tmp/denyx_path_gate_test/**"]
 
 [environment]
 allow_vars = ["PATH"]
@@ -91,9 +91,9 @@ allow_vars = ["PATH"]
 allow_commands = ["tee"]
 "#;
     let runner = runner_for(toml, std::env::temp_dir());
-    let src = r#"subprocess.exec(["tee", "/etc/aegis_should_fail"])"#;
+    let src = r#"subprocess.exec(["tee", "/etc/denyx_should_fail"])"#;
     let err = runner.run("t", src, "test.star").unwrap_err();
-    assert!(matches!(err, AegisError::Policy(_)));
+    assert!(matches!(err, DenyxError::Policy(_)));
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn cp_with_one_unwritable_target_blocked() {
     let toml = r#"
 [filesystem]
 read_allow  = ["src/**"]
-write_allow = ["/tmp/aegis_path_gate_test/**"]
+write_allow = ["/tmp/denyx_path_gate_test/**"]
 
 [environment]
 allow_vars = ["PATH"]
@@ -111,15 +111,15 @@ allow_vars = ["PATH"]
 allow_commands = ["cp"]
 "#;
     let runner = runner_for(toml, std::env::temp_dir());
-    let src = r#"subprocess.exec(["cp", "src/main.py", "/etc/aegis_should_fail"])"#;
+    let src = r#"subprocess.exec(["cp", "src/main.py", "/etc/denyx_should_fail"])"#;
     let err = runner.run("t", src, "test.star").unwrap_err();
-    assert!(matches!(err, AegisError::Policy(_)));
+    assert!(matches!(err, DenyxError::Policy(_)));
 }
 
 #[test]
 fn cat_file_inside_allow_succeeds() {
     // Sanity: cat'ing a file in read_allow should still work.
-    let dir = std::env::temp_dir().join(format!("aegis_path_gate_ok_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("denyx_path_gate_ok_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let target = dir.join("hello.txt");
     std::fs::write(&target, "hello world").unwrap();

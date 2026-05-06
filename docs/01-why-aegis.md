@@ -1,4 +1,4 @@
-# Why Aegis
+# Why Denyx
 
 > ← [Back to docs README](README.md)
 
@@ -32,9 +32,9 @@ Each of these is a **system-level authorization failure**. None of them
 should be solved by asking the model nicely or hoping it doesn't choose to
 do the bad thing.
 
-## The Aegis approach: safe by design
+## The Denyx approach: safe by design
 
-Aegis is built as a **safe-by-design local tooling layer for agentic
+Denyx is built as a **safe-by-design local tooling layer for agentic
 AI**. The whole point of the runtime is that the operator decides
 what an agent can do — through a policy file — and the runtime enforces
 that decision structurally, not advisorily. There is no "soft-warn"
@@ -48,19 +48,19 @@ system layer — before execution, during execution, or both. The model
 literally cannot construct code that bypasses the policy by clever
 phrasing, because the rejection happens in Rust, not in a wrapper that
 asks the model nicely. And the policy file itself is protected: at
-load time Aegis refuses any policy whose `write_allow` or
+load time Denyx refuses any policy whose `write_allow` or
 `delete_allow` matches the policy file — an agent that can rewrite the
 policy that controls it has nullified every other rule.
 
-Concretely, an Aegis-enforced agent run looks like this:
+Concretely, an Denyx-enforced agent run looks like this:
 
-1. Operator (or developer, or CI) writes a policy: `aegis.toml`.
+1. Operator (or developer, or CI) writes a policy: `denyx.toml`.
 2. The agent host (Claude Code, opencode, custom orchestrator, ...) hands a
-   piece of code to Aegis, either by spawning the `aegis` CLI or by calling
-   `aegis-mcp` over MCP.
-3. Aegis pre-scans the code, rejects any reference to a capability the
+   piece of code to Denyx, either by spawning the `denyx` CLI or by calling
+   `denyx-mcp` over MCP.
+3. Denyx pre-scans the code, rejects any reference to a capability the
    policy forbids (the **verifier**).
-4. Aegis evaluates the code in an embedded Starlark interpreter — Python's
+4. Denyx evaluates the code in an embedded Starlark interpreter — Python's
    safe subset. Every effecting call (`fs.read`, `net.http_get`,
    `subprocess.exec`, `env.read`) goes through a typed builtin that
    re-checks the policy at call time and emits an **audit event**.
@@ -71,11 +71,11 @@ Concretely, an Aegis-enforced agent run looks like this:
 Three lines of defense, all in the runtime: pre-execution verifier, runtime
 capability gate, and output-boundary redaction. None depends on prompting.
 
-## What Aegis is NOT
+## What Denyx is NOT
 
-- **Not a sandbox in the OS sense.** Aegis enforces a policy at the
+- **Not a sandbox in the OS sense.** Denyx enforces a policy at the
   language-runtime layer; it does not isolate processes with seccomp,
-  namespaces, or VMs. If you need OS-level isolation, run Aegis inside a
+  namespaces, or VMs. If you need OS-level isolation, run Denyx inside a
   container or jail.
 - **Not a replacement for code review.** A policy file is a contract about
   what the agent *can do*; reviewing the actual scripts the agent emits

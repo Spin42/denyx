@@ -1,11 +1,11 @@
-# Aegis
+# Denyx — _previously known as Aegis_
 
 **A safe-by-design local tooling layer for agentic AI, with deliberate
 control over permissions through a policy file.**
 
-[![CI](https://github.com/mlainez/aegis/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mlainez/aegis/actions/workflows/ci.yml)
-[![Mutation testing (weekly)](https://github.com/mlainez/aegis/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/mlainez/aegis/actions/workflows/mutants.yml)
-[![codecov](https://codecov.io/gh/mlainez/aegis/branch/main/graph/badge.svg)](https://codecov.io/gh/mlainez/aegis)
+[![CI](https://github.com/mlainez/denyx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mlainez/denyx/actions/workflows/ci.yml)
+[![Mutation testing (weekly)](https://github.com/mlainez/denyx/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/mlainez/denyx/actions/workflows/mutants.yml)
+[![codecov](https://codecov.io/gh/mlainez/denyx/branch/main/graph/badge.svg)](https://codecov.io/gh/mlainez/denyx)
 
 > Badge meaning, since "passing" is doing a lot of work in those
 > labels: **CI** is the per-PR build + test + fmt + clippy +
@@ -17,7 +17,7 @@ control over permissions through a policy file.**
 > coverage percentage uploaded by the `coverage` CI job on every
 > push to `main`.
 
-Aegis embeds Starlark (Python's safe subset), exposes a small set of
+Denyx embeds Starlark (Python's safe subset), exposes a small set of
 effecting builtins (`fs.read`, `net.http_get`, `subprocess.exec`,
 `env.read`, ...), and enforces a TOML-declared policy at every call.
 The runtime is default-deny end-to-end; what an agent can do is
@@ -69,7 +69,7 @@ not in a wrapper that asks the model nicely.
 >   `[subprocess].sandbox = "bwrap"`. macOS: Lima VM
 >   ([docs/macos-deployment.md](docs/macos-deployment.md)). Windows:
 >   WSL2 ([docs/windows-deployment.md](docs/windows-deployment.md)).
->   Without one of these, Aegis is the language-level gate only.
+>   Without one of these, Denyx is the language-level gate only.
 
 ## The problem
 
@@ -96,7 +96,7 @@ Specifically, today's agentic stacks struggle with:
 None of these should be solved by hoping the model doesn't choose to
 do the bad thing.
 
-## How Aegis solves it: safe by design
+## How Denyx solves it: safe by design
 
 The whole runtime is built around one rule: **what's not in the policy
 doesn't happen**. There is no "best-effort" mode, no soft-warn, no
@@ -161,7 +161,7 @@ Three visibility levels per resource: **forbidden** / **local-only** /
 
 > **Start from a limited language the models already know the syntax of, then extend only with what we need.**
 
-That sentence is the load-bearing decision the rest of Aegis follows
+That sentence is the load-bearing decision the rest of Denyx follows
 from. Two properties, both load-bearing on their own:
 
 **"A limited language the models already know"** means we get to
@@ -170,9 +170,9 @@ on day one because Starlark is Python with three rules removed. The
 remaining gap is closed with prompting + retrieval + retry, not
 months of fine-tuning. (We tried the fine-tuning path in the
 predecessor project, [Sigil](docs/02-from-sigil.md). It plateaued at
-7/30 multi-step tasks. Aegis with **stock qwen-7B alone** (no cloud
+7/30 multi-step tasks. Denyx with **stock qwen-7B alone** (no cloud
 orchestrator) reaches 36/36 on the current 36-task suite. Layered
-with Sonnet/Opus orchestration on top of qwen+Aegis on the same
+with Sonnet/Opus orchestration on top of qwen+Denyx on the same
 36-task suite: Sonnet 30/36, Opus 35/36 — the orchestrated misses
 are model-side artifacts (Sonnet preemptively refuses some DENY
 tasks; Opus paraphrases the literal `[REDACTED]` sentinel one
@@ -200,40 +200,40 @@ explicitly granted.
 On Linux, native install:
 
 ```sh
-cargo build --release                     # builds aegis + aegis-mcp
-aegis init --lang python                  # generates a starter policy
-aegis run --policy aegis.toml my.star     # runs the script under it
+cargo build --release                     # builds denyx + denyx-mcp
+denyx init --lang python                  # generates a starter policy
+denyx run --policy denyx.toml my.star     # runs the script under it
 ```
 
 On **macOS**, run inside a Lima VM (one-time `brew install lima` plus
-[`examples/macos/aegis.lima.yaml`](examples/macos/aegis.lima.yaml)) —
+[`examples/macos/denyx.lima.yaml`](examples/macos/denyx.lima.yaml)) —
 full guide at [docs/macos-deployment.md](docs/macos-deployment.md).
 
 On **Windows**, run inside WSL2 (one-time `wsl --install -d Ubuntu-24.04`)
 — full guide at [docs/windows-deployment.md](docs/windows-deployment.md).
 
 The same policy file, MCP surface, and audit-log shape work on all
-three; only the bridge between your MCP host and `aegis-mcp` differs.
+three; only the bridge between your MCP host and `denyx-mcp` differs.
 
-`aegis init` supports `python`, `node`, `ruby`, `rust`, `go`, with
+`denyx init` supports `python`, `node`, `ruby`, `rust`, `go`, with
 language-appropriate toolchain allowlists and git-destructive denies
 baked in.
 
-If you skip `--policy`, Aegis falls back to the built-in
+If you skip `--policy`, Denyx falls back to the built-in
 `secure-defaults` baseline (no allow lists, every effect denied) and
 prints a banner explaining how to grant capabilities. Loud-and-safe.
 
-For agentic hosts, `aegis-mcp` is an MCP server (stdio JSON-RPC 2.0)
+For agentic hosts, `denyx-mcp` is an MCP server (stdio JSON-RPC 2.0)
 that exposes the same enforcement to Claude Code, opencode, or any
 MCP-aware orchestrator.
 
 ## Three deliverables
 
-- **`aegis`** — CLI binary. `aegis run` evaluates a script under a
-  policy. `aegis init` generates a starter policy.
-- **`aegis-host`** — embeddable Rust crate. Anything that wants
+- **`denyx`** — CLI binary. `denyx run` evaluates a script under a
+  policy. `denyx init` generates a starter policy.
+- **`denyx-host`** — embeddable Rust crate. Anything that wants
   policy-gated Starlark in-process pulls this in.
-- **`aegis-mcp`** — MCP server. Wires Aegis into Claude Code,
+- **`denyx-mcp`** — MCP server. Wires Denyx into Claude Code,
   opencode, Cursor, custom orchestrators.
 
 ## Documentation
@@ -243,7 +243,7 @@ The deep dive lives in [`docs/`](docs/) — start with the
 filename:
 
 - **Numbered (`NN-...md`)** are the reading path: read 01 → 10 in
-  order to understand Aegis end-to-end.
+  order to understand Denyx end-to-end.
 - **Lowercase reference (`name.md`)** is looked up, not read in
   sequence: specifications, security writeups, historical artifacts.
 
@@ -251,23 +251,23 @@ filename:
 
 | #  | Doc                                                | What's in it |
 |----|----------------------------------------------------|--------------|
-| 01 | [why-aegis](docs/01-why-aegis.md)                  | Problem statement and threat-model framing. |
-| 02 | [from-sigil](docs/02-from-sigil.md)                | What the predecessor Sigil project taught us; why Aegis looks the way it does. |
+| 01 | [why-denyx](docs/01-why-denyx.md)                  | Problem statement and threat-model framing. |
+| 02 | [from-sigil](docs/02-from-sigil.md)                | What the predecessor Sigil project taught us; why Denyx looks the way it does. |
 | 03 | [architecture](docs/03-architecture.md)            | Capability typing, the three lines of defense, the crate layout. |
-| 04 | [policy-file](docs/04-policy-file.md)              | **The most important read.** Every section, every option, with examples. The `aegis init` generator and the local-only-reads feature. |
+| 04 | [policy-file](docs/04-policy-file.md)              | **The most important read.** Every section, every option, with examples. The `denyx init` generator and the local-only-reads feature. |
 | 05 | [install](docs/05-install.md)                      | Prerequisites: Rust, Ollama, Claude Code / opencode. |
 | 06 | [quickstart](docs/06-quickstart.md)                | 5-minute walkthrough — generate, run, audit. |
-| 07 | [claude-code](docs/07-claude-code.md)              | Wire `aegis-mcp` into Claude Code. |
+| 07 | [claude-code](docs/07-claude-code.md)              | Wire `denyx-mcp` into Claude Code. |
 | 08 | [opencode](docs/08-opencode.md)                    | Same for opencode. |
-| 09 | [local-executor](docs/09-local-executor.md)        | The full agentic stack: cloud orchestrator → local 7B → Aegis. Includes evaluation results. |
+| 09 | [local-executor](docs/09-local-executor.md)        | The full agentic stack: cloud orchestrator → local 7B → Denyx. Includes evaluation results. |
 | 10 | [running-examples](docs/10-running-examples.md)    | Reproduction guide for the three eval harnesses. |
 
 ### Reference
 
 | Doc                                                       | What's in it |
 |-----------------------------------------------------------|--------------|
-| [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec, **v1.0.0**. Tool-agnostic; implement in non-Aegis runtimes. |
-| [security-threat-model](docs/security-threat-model.md)    | One-page review companion. What Aegis claims to defend; what it explicitly does *not*. Read first if you're auditing. |
+| [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec, **v1.0.0**. Tool-agnostic; implement in non-Denyx runtimes. |
+| [security-threat-model](docs/security-threat-model.md)    | One-page review companion. What Denyx claims to defend; what it explicitly does *not*. Read first if you're auditing. |
 | [security-audit](docs/security-audit.md)                  | The 16-surface bypass-assessment writeup. Findings + fixes. |
 | [security-pentest-report](docs/security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). 2 High findings, both remediated. |
 | [macos-deployment](docs/macos-deployment.md)              | macOS deployment guide: Lima VM + bubblewrap. |
@@ -275,13 +275,13 @@ filename:
 | [conclusions](docs/conclusions.md)                        | Sigil retrospective notes (background for `02-from-sigil.md`). |
 | [project-plan](docs/project-plan.md)                      | Initial design plan; historical artifact. |
 
-## Why "Aegis"?
+## Why "Denyx"?
 
-The aegis (αἰγίς) is the protective shield of Zeus and Athena in Greek
+The denyx (αἰγίς) is the protective shield of Zeus and Athena in Greek
 mythology — Hephaestus-forged, sometimes described as a goatskin
 breastplate, occasionally bearing the head of the Gorgon Medusa to
-ward off threats. In English, "an aegis" still means a protective
-covering, sponsorship, or guarantee of safety ("under the aegis of...").
+ward off threats. In English, "an denyx" still means a protective
+covering, sponsorship, or guarantee of safety ("under the denyx of...").
 
 That's the role this project plays for an agentic-AI workflow: a
 protective layer that sits between the model's intent and the system
@@ -295,7 +295,7 @@ numbers (qwen 7B alone: **36/36** on the current 36-task suite, which
 includes 5 feature-demo tasks pinning specific runtime layers;
 Sonnet-orchestrated on the same suite: **30/36 / $1.37**;
 Opus-orchestrated: **35/36 / $2.83**). The orchestrated gap is
-model-side, not runtime-side — Aegis denies and redacts correctly
+model-side, not runtime-side — Denyx denies and redacts correctly
 in every case; Sonnet sometimes preemptively refuses DENY tasks
 it should attempt, and the single Opus miss is a verify-hook
 substring strictness issue where the orchestrator paraphrased
@@ -306,7 +306,7 @@ The policy spec is portable and documented. APIs may still change.
 
 ## Roadmap to production-readiness
 
-Aegis is a serious prototype with end-to-end functionality, but
+Denyx is a serious prototype with end-to-end functionality, but
 **not yet hardened enough to be your default for unattended
 agentic work**. These are the open items between today and "drop
 this on three machines and standardize." Listed roughly by
@@ -323,7 +323,7 @@ operational items (◇) gate easy adoption.
   modes: `auto` (default; sends MCP `elicitation/create` to the
   client when it advertises elicitation capability, falls back to
   `auto-deny` otherwise), `elicit` (force elicitation), `auto-deny`
-  (return `aegis_error_kind: "confirm_denied"` for the orchestrator
+  (return `denyx_error_kind: "confirm_denied"` for the orchestrator
   to handle), `auto-allow` (tests and demos only). Bidirectional
   JSON-RPC dispatch is implemented and tested
   (`crates/mcp/tests/elicitation.rs`); whether a real user prompt
@@ -332,7 +332,7 @@ operational items (◇) gate easy adoption.
   advertise elicitation, so the dominant deployment shape today is
   "runtime denies the call, orchestrator surfaces the structured
   tag." See [docs/07-claude-code.md](docs/07-claude-code.md#empirical-findings-what-claude-code-actually-does).
-- ✅ `aegis policy validate` + `aegis policy show` (CI lint and
+- ✅ `denyx policy validate` + `denyx policy show` (CI lint and
   operator visibility)
 - ✅ Per-call HTTP timeout (`[network].timeout_seconds`, default 30s)
 - ✅ Self-writable guard (refuses policies that grant write/delete on
@@ -359,8 +359,8 @@ operational items (◇) gate easy adoption.
   typed error on 3xx so the script must reissue against the new
   URL — gate fires)
 - ✅ Taint-redaction now covers the error path (`fail(secret)`
-  no longer leaks via `AegisError::Display`)
-- ✅ SHA-256-chained audit log + `aegis audit verify <path>`
+  no longer leaks via `DenyxError::Display`)
+- ✅ SHA-256-chained audit log + `denyx audit verify <path>`
   subcommand (in-place mutation, line removal, seq jumps all
   detectable)
 - ✅ Audit-log protected-path guard (the agent cannot have
@@ -368,7 +368,7 @@ operational items (◇) gate easy adoption.
   self-writable guard for the policy file)
 - ✅ One-page security threat-model doc
   ([docs/security-threat-model.md](docs/security-threat-model.md))
-  — what Aegis defends against, what it does *not*, the trust
+  — what Denyx defends against, what it does *not*, the trust
   boundaries, the assumptions
 - ✅ Adversarial exfiltration probe
   ([examples/local_executor/run_exfil.py](examples/local_executor/run_exfil.py))
@@ -387,7 +387,7 @@ operational items (◇) gate easy adoption.
 - ✅ AI-driven pentest harness
   ([examples/local_executor/run_pentest.py](examples/local_executor/run_pentest.py))
   — drives `claude-sonnet-4-6` and `claude-opus-4-7` as adversarial
-  testers against `aegis-mcp`. Round 1 surfaced two **High** findings
+  testers against `denyx-mcp`. Round 1 surfaced two **High** findings
   (custom base64 encoding and ROT-N — both bypassed the substring
   scrub independently in <15 turns from each model); both
   remediated by extending the transform set in
@@ -403,9 +403,9 @@ operational items (◇) gate easy adoption.
   regression sweep that runs in plain `cargo test` on every CI
   build (200 000 iterations across the same surfaces, no panics
   or non-idempotent decisions found).
-- ✅ `aegis-mcp` surfaces `[tools.X]` routing hints
-  (`aegis_tool_routing` MCP tool) so Claude Code calling
-  `aegis_run` directly can read `backend_url` / capabilities /
+- ✅ `denyx-mcp` surfaces `[tools.X]` routing hints
+  (`denyx_tool_routing` MCP tool) so Claude Code calling
+  `denyx_run` directly can read `backend_url` / capabilities /
   allowed flag without re-parsing the policy TOML
 
 ### Still open
@@ -426,11 +426,11 @@ operational items (◇) gate easy adoption.
   pre-built tarballs. Build-from-source is fine for evaluation, not
   for "ship to three machines and standardize."
 - ◇ **Policy schema migration tool.** When the schema changes
-  pre-1.0, existing policies are hand-edited. An `aegis policy
+  pre-1.0, existing policies are hand-edited. An `denyx policy
   migrate` would smooth this.
 
-For today: use Aegis for experimental setups, in containers, on
-machines where the cost of an Aegis bug is "I have to recover a VM"
+For today: use Denyx for experimental setups, in containers, on
+machines where the cost of an Denyx bug is "I have to recover a VM"
 not "my SSH key got exfiltrated." For default-on-everything use,
 the external security review (the one ☐ item above) is the real
 gating list — every byte-level bypass the exfil probe could
@@ -443,12 +443,12 @@ CI build.
 crates/
   policy/    types, matchers, presets, inheritance
   host/      Starlark embedding, builtins, audit, verifier, taint
-  cli/       `aegis` binary (run + init)
-  mcp/       `aegis-mcp` MCP server
+  cli/       `denyx` binary (run + init)
+  mcp/       `denyx-mcp` MCP server
 docs/        documentation (links above)
 examples/
   policies/        reference policies (FastAPI, Rails, ...)
-  local_executor/  evaluation harness (Ollama + qwen + aegis-mcp)
+  local_executor/  evaluation harness (Ollama + qwen + denyx-mcp)
 ```
 
 ## License

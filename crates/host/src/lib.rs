@@ -1,4 +1,4 @@
-//! Aegis host: embeds Starlark, registers capability-typed builtins,
+//! Denyx host: embeds Starlark, registers capability-typed builtins,
 //! enforces a [`Policy`] at every effecting call, and emits an audit log.
 //!
 //! The integration shape is:
@@ -16,8 +16,8 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 
-use aegis_policy::Policy;
-pub use aegis_policy::PolicyError;
+use denyx_policy::Policy;
+pub use denyx_policy::PolicyError;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
@@ -57,7 +57,7 @@ fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "(no Location header)".to_string());
         anyhow::bail!(
-            "HTTP {status} redirect to {location:?}; Aegis does not auto-follow \
+            "HTTP {status} redirect to {location:?}; Denyx does not auto-follow \
              redirects to prevent bypass of [network] policy. Call net.http_get / \
              net.http_post again with the redirected URL if your policy permits \
              that host."
@@ -77,7 +77,7 @@ pub use taint::{redact, redact_lines, TaintRegistry, REDACTED};
 ///
 /// `name` is the dotted form policy files and audit events use
 /// (`fs.read`). `raw` is the underscored name of the Starlark global
-/// the host actually registers (`_aegis_fs_read`); a small prelude
+/// the host actually registers (`_denyx_fs_read`); a small prelude
 /// binds the dotted access onto these via Starlark `struct()` values.
 #[derive(Copy, Clone, Debug)]
 pub struct Capability {
@@ -88,43 +88,43 @@ pub struct Capability {
 pub const CAPABILITIES: &[Capability] = &[
     Capability {
         name: "fs.read",
-        raw: "_aegis_fs_read",
+        raw: "_denyx_fs_read",
     },
     Capability {
         name: "fs.write",
-        raw: "_aegis_fs_write",
+        raw: "_denyx_fs_write",
     },
     Capability {
         name: "fs.delete",
-        raw: "_aegis_fs_delete",
+        raw: "_denyx_fs_delete",
     },
     Capability {
         name: "net.http_get",
-        raw: "_aegis_net_http_get",
+        raw: "_denyx_net_http_get",
     },
     Capability {
         name: "net.http_post",
-        raw: "_aegis_net_http_post",
+        raw: "_denyx_net_http_post",
     },
     Capability {
         name: "net.http_put",
-        raw: "_aegis_net_http_put",
+        raw: "_denyx_net_http_put",
     },
     Capability {
         name: "net.http_patch",
-        raw: "_aegis_net_http_patch",
+        raw: "_denyx_net_http_patch",
     },
     Capability {
         name: "net.http_delete",
-        raw: "_aegis_net_http_delete",
+        raw: "_denyx_net_http_delete",
     },
     Capability {
         name: "subprocess.exec",
-        raw: "_aegis_subprocess_exec",
+        raw: "_denyx_subprocess_exec",
     },
     Capability {
         name: "env.read",
-        raw: "_aegis_env_read",
+        raw: "_denyx_env_read",
     },
 ];
 
@@ -135,27 +135,27 @@ pub const CAPABILITIES: &[Capability] = &[
 /// traces.
 const PRELUDE: &str = "\
 fs = struct(\n\
-    read = _aegis_fs_read,\n\
-    write = _aegis_fs_write,\n\
-    delete = _aegis_fs_delete,\n\
+    read = _denyx_fs_read,\n\
+    write = _denyx_fs_write,\n\
+    delete = _denyx_fs_delete,\n\
 )\n\
 net = struct(\n\
-    http_get = _aegis_net_http_get,\n\
-    http_post = _aegis_net_http_post,\n\
-    http_put = _aegis_net_http_put,\n\
-    http_patch = _aegis_net_http_patch,\n\
-    http_delete = _aegis_net_http_delete,\n\
+    http_get = _denyx_net_http_get,\n\
+    http_post = _denyx_net_http_post,\n\
+    http_put = _denyx_net_http_put,\n\
+    http_patch = _denyx_net_http_patch,\n\
+    http_delete = _denyx_net_http_delete,\n\
 )\n\
 subprocess = struct(\n\
-    exec = _aegis_subprocess_exec,\n\
+    exec = _denyx_subprocess_exec,\n\
 )\n\
 env = struct(\n\
-    read = _aegis_env_read,\n\
+    read = _denyx_env_read,\n\
 )\n\
 ";
 
 #[derive(Debug, Error)]
-pub enum AegisError {
+pub enum DenyxError {
     #[error("starlark error: {0}")]
     Starlark(String),
     #[error("policy violation: {0}")]
@@ -172,15 +172,15 @@ pub enum AegisError {
     Other(String),
 }
 
-impl From<PolicyError> for AegisError {
+impl From<PolicyError> for DenyxError {
     fn from(e: PolicyError) -> Self {
-        AegisError::Policy(e.to_string())
+        DenyxError::Policy(e.to_string())
     }
 }
 
 /// CapturedKind extended with `RuntimeLimit` so a deadline-exceeded
 /// signal raised inside a builtin can be surfaced as the right
-/// AegisError variant (and exit code) past Starlark's wrapping.
+/// DenyxError variant (and exit code) past Starlark's wrapping.
 /// Captured error stashed on HostCtx so Runner::run can recover the
 /// original error kind after Starlark wraps everything in its own type.
 #[derive(Clone, Debug)]
@@ -239,14 +239,14 @@ impl Runner {
         task_id: &str,
         source: &str,
         script_name: &str,
-    ) -> Result<RunOutcome, AegisError> {
-        verifier::verify(source, &self.policy).map_err(|e| AegisError::Verifier(e.to_string()))?;
+    ) -> Result<RunOutcome, DenyxError> {
+        verifier::verify(source, &self.policy).map_err(|e| DenyxError::Verifier(e.to_string()))?;
 
         let prelude_ast =
-            AstModule::parse("__aegis_prelude__", PRELUDE.to_string(), &Dialect::Standard)
-                .map_err(|e| AegisError::Other(format!("prelude parse failed: {e}")))?;
+            AstModule::parse("__denyx_prelude__", PRELUDE.to_string(), &Dialect::Standard)
+                .map_err(|e| DenyxError::Other(format!("prelude parse failed: {e}")))?;
         let ast = AstModule::parse(script_name, source.to_string(), &Dialect::Standard)
-            .map_err(|e| AegisError::Starlark(e.to_string()))?;
+            .map_err(|e| DenyxError::Starlark(e.to_string()))?;
 
         let ctx = HostCtx {
             policy: self.policy.clone(),
@@ -280,10 +280,10 @@ impl Runner {
             // Apply optional runtime caps from the policy.
             if let Some(stack) = ctx.policy.runtime_max_callstack_size() {
                 eval.set_max_callstack_size(stack)
-                    .map_err(|e| AegisError::Other(format!("set_max_callstack_size: {e}")))?;
+                    .map_err(|e| DenyxError::Other(format!("set_max_callstack_size: {e}")))?;
             }
             eval.eval_module(prelude_ast, &globals)
-                .map_err(|e| format!("aegis prelude failed: {e}"))
+                .map_err(|e| format!("denyx prelude failed: {e}"))
                 .and_then(|_| {
                     eval.eval_module(ast, &globals)
                         .map(|_| ())
@@ -304,11 +304,11 @@ impl Runner {
             // it, surface that — the kind drives exit-code mapping.
             //
             // ALL error messages on this path are scrubbed for taint
-            // before becoming AegisError. Without this, a script
+            // before becoming DenyxError. Without this, a script
             // could leak a tainted value via `fail(secret)` —
             // Starlark's error rendering would include the secret
             // in `starlark_msg`, and the unscrubbed string would
-            // flow out through AegisError to the caller (CLI
+            // flow out through DenyxError to the caller (CLI
             // stderr, MCP tool result, etc.). Same boundary
             // discipline as outcome.printed; the error path is
             // just another way bytes leave the runtime.
@@ -316,12 +316,12 @@ impl Runner {
                 Some(c) => {
                     let scrubbed = redact(&c.message, &taints);
                     match c.kind {
-                        CapturedKind::Policy => AegisError::Policy(scrubbed),
-                        CapturedKind::ConfirmDenied => AegisError::ConfirmDenied(scrubbed),
-                        CapturedKind::RuntimeLimit => AegisError::RuntimeLimit(scrubbed),
+                        CapturedKind::Policy => DenyxError::Policy(scrubbed),
+                        CapturedKind::ConfirmDenied => DenyxError::ConfirmDenied(scrubbed),
+                        CapturedKind::RuntimeLimit => DenyxError::RuntimeLimit(scrubbed),
                     }
                 }
-                None => AegisError::Starlark(redact(&starlark_msg, &taints)),
+                None => DenyxError::Starlark(redact(&starlark_msg, &taints)),
             });
         }
 
@@ -356,7 +356,7 @@ impl HostCtx {
     /// Every effecting builtin opens with `let step = ctx.begin_call(<cap>)?;`
     /// so deadline-exceeded scripts fail before any audit event is
     /// emitted or any work begins.
-    fn begin_call(&self, capability: &str) -> Result<u32, AegisError> {
+    fn begin_call(&self, capability: &str) -> Result<u32, DenyxError> {
         self.check_deadline(capability)?;
         let mut s = self.step.borrow_mut();
         *s += 1;
@@ -368,7 +368,7 @@ impl HostCtx {
     /// before any audit event or work begins, so a delayed agent
     /// fails cleanly with a typed error instead of running the
     /// effect.
-    fn check_deadline(&self, capability: &str) -> Result<(), AegisError> {
+    fn check_deadline(&self, capability: &str) -> Result<(), DenyxError> {
         let Some(max_seconds) = self.policy.runtime_max_seconds() else {
             return Ok(());
         };
@@ -389,10 +389,10 @@ impl HostCtx {
             &msg,
         ));
         self.capture(CapturedKind::RuntimeLimit, &msg);
-        Err(AegisError::RuntimeLimit(msg))
+        Err(DenyxError::RuntimeLimit(msg))
     }
 
-    fn require_confirm(&self, capability: &str, summary: String) -> Result<(), AegisError> {
+    fn require_confirm(&self, capability: &str, summary: String) -> Result<(), DenyxError> {
         if !self.policy.requires_approval(capability) {
             return Ok(());
         }
@@ -414,7 +414,7 @@ impl HostCtx {
                 ));
                 let msg = capability.to_string();
                 self.capture(CapturedKind::ConfirmDenied, &msg);
-                Err(AegisError::ConfirmDenied(msg))
+                Err(DenyxError::ConfirmDenied(msg))
             }
         }
     }
@@ -451,7 +451,7 @@ impl HostCtx {
         step: u32,
         summary: &str,
         args: &[(&str, &str)],
-    ) -> Result<(), AegisError> {
+    ) -> Result<(), DenyxError> {
         if self.taint.is_empty() {
             return Ok(());
         }
@@ -471,7 +471,7 @@ impl HostCtx {
                     &msg,
                 ));
                 self.capture(CapturedKind::Policy, &msg);
-                return Err(AegisError::Policy(msg));
+                return Err(DenyxError::Policy(msg));
             }
         }
         Ok(())
@@ -490,9 +490,9 @@ impl<'a> starlark::PrintHandler for PrintCapture<'a> {
 
 fn ctx_from_eval<'a, 'v>(eval: &'a Evaluator<'v, '_, '_>) -> anyhow::Result<&'a HostCtx> {
     eval.extra
-        .ok_or_else(|| anyhow::anyhow!("aegis: missing host context"))?
+        .ok_or_else(|| anyhow::anyhow!("denyx: missing host context"))?
         .downcast_ref::<HostCtx>()
-        .ok_or_else(|| anyhow::anyhow!("aegis: wrong context type in evaluator extra slot"))
+        .ok_or_else(|| anyhow::anyhow!("denyx: wrong context type in evaluator extra slot"))
 }
 
 /// Resolve a hostname (not an IP literal) to its A/AAAA records via the
@@ -518,7 +518,7 @@ fn dns_check(
     ctx: &HostCtx,
     action: &'static str,
     host: &str,
-) -> Result<(), aegis_policy::PolicyError> {
+) -> Result<(), denyx_policy::PolicyError> {
     if host.parse::<IpAddr>().is_ok() {
         return Ok(());
     }
@@ -532,14 +532,14 @@ fn dns_check(
 // Capability builtins.
 //
 // All effecting builtins live under underscored Starlark names (e.g.
-// `_aegis_fs_read`). The Aegis prelude binds these to the dotted
+// `_denyx_fs_read`). The Denyx prelude binds these to the dotted
 // namespaces user code actually writes (`fs.read`, `net.http_get`, ...).
 // Audit events and policy checks always speak the dotted form.
 // ---------------------------------------------------------------------
 
 #[starlark_module]
 fn register_builtins(builder: &mut GlobalsBuilder) {
-    fn _aegis_fs_read<'v>(path: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
+    fn _denyx_fs_read<'v>(path: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("fs.read")?;
         match ctx.policy.check_fs_read(Path::new(path)) {
@@ -576,7 +576,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_fs_write<'v>(
+    fn _denyx_fs_write<'v>(
         path: &str,
         content: &str,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -627,7 +627,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_fs_delete<'v>(
+    fn _denyx_fs_delete<'v>(
         path: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
@@ -669,7 +669,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_subprocess_exec<'v>(
+    fn _denyx_subprocess_exec<'v>(
         argv: UnpackList<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
@@ -751,7 +751,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         // says the child should see.
         let env_pairs = ctx.policy.subprocess_env(&argv[0]);
         let output = match ctx.policy.sandbox_mode() {
-            aegis_policy::SandboxMode::None => {
+            denyx_policy::SandboxMode::None => {
                 // Default mode: spawn directly with filtered env.
                 let mut cmd = std::process::Command::new(&argv[0]);
                 cmd.args(&argv[1..]);
@@ -761,7 +761,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 }
                 cmd.output()
             }
-            aegis_policy::SandboxMode::Bwrap => {
+            denyx_policy::SandboxMode::Bwrap => {
                 // Sandboxed mode: bubblewrap builds a fresh
                 // namespaced jail per call, with bind mounts derived
                 // from the policy. The child's filesystem view is
@@ -820,7 +820,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_net_http_get<'v>(
+    fn _denyx_net_http_get<'v>(
         url: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
@@ -889,7 +889,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_net_http_post<'v>(
+    fn _denyx_net_http_post<'v>(
         url: &str,
         body: &str,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -962,7 +962,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_net_http_put<'v>(
+    fn _denyx_net_http_put<'v>(
         url: &str,
         body: &str,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -1035,7 +1035,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_net_http_patch<'v>(
+    fn _denyx_net_http_patch<'v>(
         url: &str,
         body: &str,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -1108,7 +1108,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_net_http_delete<'v>(
+    fn _denyx_net_http_delete<'v>(
         url: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
@@ -1177,7 +1177,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         }
     }
 
-    fn _aegis_env_read<'v>(name: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
+    fn _denyx_env_read<'v>(name: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("env.read")?;
         match ctx.policy.check_env_read(name) {

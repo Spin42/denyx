@@ -25,8 +25,8 @@
 
 use std::path::PathBuf;
 
-use aegis_host::verifier::verify;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::verifier::verify;
+use denyx_policy::{Policy, PolicyFile};
 
 /// Deterministic xorshift64* PRNG. We don't need cryptographic
 /// quality — just a stream of bytes that explores the input space
@@ -65,8 +65,8 @@ fn synthesize(rng: &mut Rng) -> String {
         "fs.read",
         "fs.write",
         "fs.delete",
-        "_aegis_fs_read",
-        "_aegis_net_http_get",
+        "_denyx_fs_read",
+        "_denyx_net_http_get",
         "subprocess.exec",
         "env.read",
         "net.http_post",
@@ -114,7 +114,7 @@ fn empty_policy() -> Policy {
 fn verifier_does_not_panic_on_random_inputs() {
     let policy = empty_policy();
     // Seed has uneven digit groups on purpose (a memorable hex word
-    // — "AEGIS" + "SEED_DEAD"); the readability beats the lint.
+    // — "DENYX" + "SEED_DEAD"); the readability beats the lint.
     #[allow(clippy::unusual_byte_groupings)]
     let mut rng = Rng::new(0xA51A_5_5EED_DEAD);
     for i in 0..100_000 {

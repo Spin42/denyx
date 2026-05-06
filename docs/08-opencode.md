@@ -1,38 +1,51 @@
-# Using Aegis with opencode
+# Using Denyx with opencode
 
 > ← [Back to docs README](README.md)
 
 [opencode](https://opencode.ai/) is an open-source agentic IDE with an
-MCP-aware tool surface. The Aegis integration shape is the same as
-Claude Code's: launch `aegis-mcp` as a project-level MCP server and
-either let opencode keep its built-in tools (Aegis is *one of* its
-tools) or restrict it so Aegis is the *only* path to side-effects.
+MCP-aware tool surface. The Denyx integration shape is the same as
+Claude Code's: launch `denyx-mcp` as a project-level MCP server and
+either let opencode keep its built-in tools (Denyx is *one of* its
+tools) or restrict it so Denyx is the *only* path to side-effects.
 
 Most of what's in [07-claude-code.md](07-claude-code.md) applies here.
 This doc covers the opencode-specific configuration.
 
 ## Prerequisites
 
-- `aegis` and `aegis-mcp` built and on `$PATH` (see
+- `denyx` and `denyx-mcp` built and on `$PATH` (see
   [05-install.md](05-install.md)).
 - opencode installed. See [opencode.ai](https://opencode.ai/) for
   current install instructions.
-- A policy file. `aegis init --lang <lang>` is the fastest start.
+- A policy file. `denyx init --lang <lang>` is the fastest start.
+
+## Quick start: paste the setup prompt
+
+For the project you want to gate, the fastest path is to paste the
+contents of [`examples/denyx-setup-prompt.md`](../examples/denyx-setup-prompt.md)
+as your first message in opencode from the project's root
+directory. The assistant will detect your stack, generate
+`denyx.toml`, wire a project-local opencode MCP config, and smoke-
+test the result. Project-specific by design — nothing is written
+outside the current working directory.
+
+The rest of this section walks through the same setup manually, in
+case you want to understand each step or do it without the prompt.
 
 ## Configure the MCP server
 
 opencode reads MCP server configuration from its workspace settings.
-Add an `aegis` server (consult opencode's current docs for the exact
+Add an `denyx` server (consult opencode's current docs for the exact
 file path; older versions used `~/.config/opencode/config.json`,
 recent versions use a project-local `opencode.json` or similar):
 
 ```json
 {
   "mcpServers": {
-    "aegis": {
-      "command": "aegis-mcp",
+    "denyx": {
+      "command": "denyx-mcp",
       "args": [
-        "--policy", "/absolute/path/to/your/aegis.toml",
+        "--policy", "/absolute/path/to/your/denyx.toml",
         "--audit-log", "/absolute/path/to/audit.jsonl"
       ]
     }
@@ -41,7 +54,7 @@ recent versions use a project-local `opencode.json` or similar):
 ```
 
 Restart opencode. The server's tools should appear in the tool list,
-typically prefixed `aegis__` or similar (opencode's exact namespacing
+typically prefixed `denyx__` or similar (opencode's exact namespacing
 may differ from Claude Code's).
 
 ## Available tools
@@ -51,16 +64,16 @@ Same as the Claude Code integration — see
 for the list. The only naming difference is the host's namespace
 prefix.
 
-## Restricting opencode to Aegis-only
+## Restricting opencode to Denyx-only
 
 opencode has a notion of allowed tools per workspace. To force every
-side effect through Aegis, disable opencode's built-in `Bash`, `Read`,
-`Write`, `Edit` and similar tools and explicitly allow only the Aegis
+side effect through Denyx, disable opencode's built-in `Bash`, `Read`,
+`Write`, `Edit` and similar tools and explicitly allow only the Denyx
 tools. The exact configuration syntax depends on the opencode version
 — check its `tools` or `allowedTools` settings.
 
 The principle: opencode must not have a path to side-effects that
-bypasses `aegis-mcp`. If it has a built-in `Bash` tool, that tool is
+bypasses `denyx-mcp`. If it has a built-in `Bash` tool, that tool is
 not policy-gated, and the model can call it directly.
 
 ## Local-executor relay (the agentic stack)
@@ -74,8 +87,8 @@ opencode. Configure it as an MCP server:
     "local-executor": {
       "command": "python3",
       "args": [
-        "/path/to/aegis/examples/local_executor/local_mcp.py",
-        "--policy", "/path/to/aegis.toml"
+        "/path/to/denyx/examples/local_executor/local_mcp.py",
+        "--policy", "/path/to/denyx.toml"
       ]
     }
   }
@@ -85,7 +98,7 @@ opencode. Configure it as an MCP server:
 opencode's reasoning model (whatever you've configured it to use) now
 sees one tool: `delegate_to_local`. It decomposes a task into atomic
 steps and delegates each to the local 7B; the local model emits a
-Starlark program that Aegis enforces.
+Starlark program that Denyx enforces.
 
 See [09-local-executor.md](09-local-executor.md) for what this
 architecture looks like end-to-end and the evaluation results.
@@ -97,7 +110,7 @@ common issues from
 [07-claude-code.md#troubleshooting](07-claude-code.md#troubleshooting)
 apply here too:
 
-- `aegis-mcp: no --policy provided` banner → you forgot the
+- `denyx-mcp: no --policy provided` banner → you forgot the
   `--policy` arg.
 - Every tool call fails with `Verifier rejected` → the resource
   section that derives that capability is empty (e.g. `fs.read`
@@ -110,7 +123,7 @@ opencode-specific gotchas:
 - **Tool listings are cached.** If you change the policy file, restart
   opencode (or trigger a tool-listing refresh) so it sees the updated
   capability set.
-- **Working directory.** `aegis-mcp` resolves relative paths in the
+- **Working directory.** `denyx-mcp` resolves relative paths in the
   policy against its CWD at startup. opencode may launch the MCP server
   from the workspace root, but if you see "path not in read_allow" for a
   path you expected to match, double-check the relative-path anchoring.

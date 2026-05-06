@@ -1,43 +1,56 @@
-# Using Aegis with Claude Code
+# Using Denyx with Claude Code
 
 > ← [Back to docs README](README.md)
 
 [Claude Code](https://claude.com/claude-code) is Anthropic's official CLI
 for Claude. It supports MCP — the [Model Context Protocol](https://modelcontextprotocol.io)
-— which is exactly the integration shape Aegis is designed for. This
-guide covers the two ways to wire Aegis in:
+— which is exactly the integration shape Denyx is designed for. This
+guide covers the two ways to wire Denyx in:
 
-1. **As a policy-gated tool surface** — Claude Code calls Aegis tools
-   through an MCP server, and only Aegis-permitted operations succeed.
+1. **As a policy-gated tool surface** — Claude Code calls Denyx tools
+   through an MCP server, and only Denyx-permitted operations succeed.
 2. **As a remote-orchestrator → local-executor relay** — Sonnet/Opus in
    Claude Code delegates tasks to a local 7B model that runs the actual
-   code through Aegis. This is the architecture the project's evaluation
+   code through Denyx. This is the architecture the project's evaluation
    harness measures (see [09-local-executor.md](09-local-executor.md)).
 
 ## Prerequisites
 
-- `aegis` and `aegis-mcp` built and on `$PATH` (see
+- `denyx` and `denyx-mcp` built and on `$PATH` (see
   [05-install.md](05-install.md)).
 - `claude` CLI installed and authenticated.
-- A policy file. `aegis init --lang <lang>` is the fastest start — see
-  [04-policy-file.md](04-policy-file.md#the-aegis-init-generator).
+- A policy file. `denyx init --lang <lang>` is the fastest start — see
+  [04-policy-file.md](04-policy-file.md#the-denyx-init-generator).
 
-## Approach 1: Aegis as a policy-gated tool surface
+## Approach 1: Denyx as a policy-gated tool surface
 
-Wire `aegis-mcp` into Claude Code as a project-level MCP server.
+Wire `denyx-mcp` into Claude Code as a project-level MCP server.
+
+### Quick start: paste the setup prompt
+
+For the project you want to gate, the fastest path is to paste the
+contents of [`examples/denyx-setup-prompt.md`](../examples/denyx-setup-prompt.md)
+as your first message in Claude Code from the project's root
+directory. The assistant will detect your stack, generate
+`denyx.toml`, write a project-local `.mcp.json`, and smoke-test the
+result. Project-specific by design — nothing is written outside the
+current working directory.
+
+The rest of this section walks through the same setup manually, in
+case you want to understand each step or do it without the prompt.
 
 ### Configure the MCP server
 
 Claude Code reads MCP server configuration from your settings (per-user
 or per-project; see Claude Code's docs for the exact location on your
-platform). Add an `aegis` server entry:
+platform). Add an `denyx` server entry:
 
 ```json
 {
   "mcpServers": {
-    "aegis": {
-      "command": "aegis-mcp",
-      "args": ["--policy", "/absolute/path/to/your/aegis.toml"]
+    "denyx": {
+      "command": "denyx-mcp",
+      "args": ["--policy", "/absolute/path/to/your/denyx.toml"]
     }
   }
 }
@@ -49,34 +62,34 @@ your project root.
 ### Available tools
 
 Once configured, Claude Code sees these tools (all prefixed
-`mcp__aegis__` by Claude Code's MCP namespacing):
+`mcp__denyx__` by Claude Code's MCP namespacing):
 
-- `mcp__aegis__aegis_run` — primary surface. Pass a Starlark program;
+- `mcp__denyx__denyx_run` — primary surface. Pass a Starlark program;
   the server runs it under the policy. Result is the printed lines,
   already taint-scrubbed.
-- `mcp__aegis__aegis_fs_read`, `mcp__aegis__aegis_fs_write`,
-  `mcp__aegis__aegis_fs_delete` — sugar tools that synthesize a
+- `mcp__denyx__denyx_fs_read`, `mcp__denyx__denyx_fs_write`,
+  `mcp__denyx__denyx_fs_delete` — sugar tools that synthesize a
   one-statement Starlark program. Useful for hosts that prefer one
   call per action.
-- `mcp__aegis__aegis_subprocess_exec` — same.
-- `mcp__aegis__aegis_net_http_get`, `mcp__aegis__aegis_net_http_post`
+- `mcp__denyx__denyx_subprocess_exec` — same.
+- `mcp__denyx__denyx_net_http_get`, `mcp__denyx__denyx_net_http_post`
   — same.
-- `mcp__aegis__aegis_env_read` — same.
+- `mcp__denyx__denyx_env_read` — same.
 
-### Restrict Claude Code to only the Aegis tools
+### Restrict Claude Code to only the Denyx tools
 
 If you want a hardened setup where Claude Code can *only* affect the
-system through Aegis (no built-in `Bash`, no built-in `Edit`), launch it
+system through Denyx (no built-in `Bash`, no built-in `Edit`), launch it
 with `--tools` cleared and `--allowedTools` restricted:
 
 ```sh
 claude \
-  --mcp-config '{"mcpServers":{"aegis":{"command":"aegis-mcp","args":["--policy","/path/to/aegis.toml"]}}}' \
+  --mcp-config '{"mcpServers":{"denyx":{"command":"denyx-mcp","args":["--policy","/path/to/denyx.toml"]}}}' \
   --tools "" \
-  --allowedTools "mcp__aegis__aegis_run,mcp__aegis__aegis_fs_read,mcp__aegis__aegis_fs_write,mcp__aegis__aegis_subprocess_exec,mcp__aegis__aegis_net_http_get,mcp__aegis__aegis_env_read"
+  --allowedTools "mcp__denyx__denyx_run,mcp__denyx__denyx_fs_read,mcp__denyx__denyx_fs_write,mcp__denyx__denyx_subprocess_exec,mcp__denyx__denyx_net_http_get,mcp__denyx__denyx_env_read"
 ```
 
-Now Claude Code's *only* path to side-effects is through Aegis. Every
+Now Claude Code's *only* path to side-effects is through Denyx. Every
 fs/net/subprocess/env call goes through the policy gate and lands in the
 audit log.
 
@@ -87,10 +100,10 @@ To collect audit events to a file:
 ```json
 {
   "mcpServers": {
-    "aegis": {
-      "command": "aegis-mcp",
+    "denyx": {
+      "command": "denyx-mcp",
       "args": [
-        "--policy", "/path/to/aegis.toml",
+        "--policy", "/path/to/denyx.toml",
         "--audit-log", "/path/to/audit.jsonl"
       ]
     }
@@ -119,7 +132,7 @@ capabilities escalate to the caller on every call. The MCP server's
   implement elicitation, the request times out (300 s) and denies
   safely.
 - **`--confirm-mode auto-deny`** — every approval-required call
-  fails with `isError: true`, `aegis_error_kind: "confirm_denied"`,
+  fails with `isError: true`, `denyx_error_kind: "confirm_denied"`,
   naming the capability. The orchestrator (Sonnet/Opus) can read
   that error and surface its own out-of-band prompt before
   retrying. This is the most broadly-deployed shape today (see the
@@ -131,10 +144,10 @@ capabilities escalate to the caller on every call. The MCP server's
 ```json
 {
   "mcpServers": {
-    "aegis": {
-      "command": "aegis-mcp",
+    "denyx": {
+      "command": "denyx-mcp",
       "args": [
-        "--policy", "/path/to/aegis.toml",
+        "--policy", "/path/to/denyx.toml",
         "--confirm-mode", "auto"
       ]
     }
@@ -145,15 +158,15 @@ capabilities escalate to the caller on every call. The MCP server's
 #### Empirical findings: what Claude Code actually does
 
 We drove a real `claude -p ... --permission-mode auto` session
-against `aegis-mcp --confirm-mode auto`, with a policy declaring
+against `denyx-mcp --confirm-mode auto`, with a policy declaring
 `requires_approval = ["fs.delete"]` and a script that calls
 `fs.delete("/tmp/.../target.txt")`. The transcript shows:
 
 - Claude Code (2.1.x) **does not advertise the `elicitation`
   capability** in its MCP `initialize` handshake.
-- aegis-mcp's `auto` mode therefore correctly falls back to
+- denyx-mcp's `auto` mode therefore correctly falls back to
   `auto-deny`, returning `isError: true`,
-  `aegis_error_kind: "confirm_denied"`,
+  `denyx_error_kind: "confirm_denied"`,
   `text: "confirm hook denied capability fs.delete"`.
 - The agent surfaced that text in its response.
 - The runtime correctly enforced the deny — `target.txt` was not
@@ -169,7 +182,7 @@ prompt.
 
 If you need a real prompt, today the deployment options are:
 
-1. **Use the CLI** (`aegis run`) when there's a human at the
+1. **Use the CLI** (`denyx run`) when there's a human at the
    terminal. The CLI prompts on stdin and the user actually sees
    the question.
 2. **Use `--confirm-mode auto-deny` and let the orchestrator's UX
@@ -180,7 +193,7 @@ If you need a real prompt, today the deployment options are:
    then either edits the policy or re-issues from a sibling tool.
 3. **Use a client that supports MCP elicitation.** As of mid-2026
    that's a small set; verify your specific client advertises
-   `capabilities.elicitation` at handshake. The aegis-mcp side of
+   `capabilities.elicitation` at handshake. The denyx-mcp side of
    the protocol is implemented and tested (see
    `crates/mcp/tests/elicitation.rs`); the gap is the client.
 
@@ -204,7 +217,7 @@ way, regardless of how the model is prompted:
   `local_only_vars`, the key bytes are scrubbed before crossing the MCP
   boundary.
 
-## Approach 2: Sonnet → local-executor → Aegis
+## Approach 2: Sonnet → local-executor → Denyx
 
 This is the architecture from
 [09-local-executor.md](09-local-executor.md). It's worth a quick
@@ -223,7 +236,7 @@ The shape:
    qwen2.5-coder:7b  (via Ollama)
         │  emits a Starlark program
         ▼
-   aegis-mcp  (subprocess of local_mcp.py)
+   denyx-mcp  (subprocess of local_mcp.py)
         │  runs the program under your policy
         ▼
    The actual side effects (fs/net/subprocess/env)
@@ -233,7 +246,7 @@ The bridge piece — `local_mcp.py` — is in `examples/local_executor/`. It
 exposes a single MCP tool, `delegate_to_local(step)`. The cloud
 orchestrator decomposes the task into atomic steps and delegates each
 one; the local executor synthesizes Starlark for that step and runs it
-through `aegis-mcp`.
+through `denyx-mcp`.
 
 To launch this from Claude Code:
 
@@ -245,8 +258,8 @@ claude -p "Refactor src/foo.py to remove duplication" \
       "local-executor": {
         "command": "python3",
         "args": [
-          "/path/to/aegis/examples/local_executor/local_mcp.py",
-          "--policy", "/path/to/aegis.toml"
+          "/path/to/denyx/examples/local_executor/local_mcp.py",
+          "--policy", "/path/to/denyx.toml"
         ]
       }
     }
@@ -258,7 +271,7 @@ claude -p "Refactor src/foo.py to remove duplication" \
 
 Sonnet sees only one tool: `delegate_to_local`. It cannot directly
 write files, run shells, or fetch URLs — every side effect has to flow
-through the local model and Aegis.
+through the local model and Denyx.
 
 The `examples/local_executor/run_orchestrated.py` harness automates this
 pattern across a 36-task evaluation suite, so you can reproduce the
@@ -268,39 +281,39 @@ sonnet opus --all`.
 ### Why this shape
 
 - **The cloud orchestrator never sees raw secrets.** The local model
-  reads the user's `OPENAI_API_KEY` (marked `local_only_vars`); Aegis
+  reads the user's `OPENAI_API_KEY` (marked `local_only_vars`); Denyx
   scrubs it before the MCP response reaches Sonnet.
 - **The cloud orchestrator never sees the file contents.** Whatever the
   local model does with `fs.read` results stays local; only the
   printed summary it composes (and its taint-scrubbed bytes) travels
   back.
 - **The audit log is one file.** Every action across every step lands in
-  `aegis-mcp`'s audit log, regardless of which orchestrator, which
+  `denyx-mcp`'s audit log, regardless of which orchestrator, which
   local model, which task — one source of truth.
 
 ## Trying it locally
 
-If you just want to confirm Aegis is wired correctly without the full
+If you just want to confirm Denyx is wired correctly without the full
 local-executor flow, a one-shot test:
 
 ```sh
-echo 'print("hello from aegis")' > /tmp/hello.star
+echo 'print("hello from denyx")' > /tmp/hello.star
 claude --mcp-config '{
   "mcpServers": {
-    "aegis": {
-      "command": "aegis-mcp",
-      "args": ["--policy", "/path/to/aegis.toml"]
+    "denyx": {
+      "command": "denyx-mcp",
+      "args": ["--policy", "/path/to/denyx.toml"]
     }
   }
-}' "Run mcp__aegis__aegis_run with this Starlark: $(cat /tmp/hello.star)"
+}' "Run mcp__denyx__denyx_run with this Starlark: $(cat /tmp/hello.star)"
 ```
 
 You should see Sonnet acknowledge the tool result containing `"hello
-from aegis"`.
+from denyx"`.
 
 ## Troubleshooting
 
-**`aegis-mcp: no --policy provided` banner showing up:** you forgot to
+**`denyx-mcp: no --policy provided` banner showing up:** you forgot to
 pass `--policy` in `args`. The fallback is the deny-everything
 `secure-defaults` baseline; every tool call will fail. Add the path.
 

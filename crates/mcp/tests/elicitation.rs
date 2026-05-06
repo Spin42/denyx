@@ -1,12 +1,12 @@
-//! Integration tests for `aegis-mcp --confirm-mode elicit`.
+//! Integration tests for `denyx-mcp --confirm-mode elicit`.
 //!
 //! Drives the MCP server end-to-end as if we were a client that
 //! supports the MCP `elicitation/create` capability:
 //!
-//! 1. Spawn `aegis-mcp --confirm-mode elicit`.
+//! 1. Spawn `denyx-mcp --confirm-mode elicit`.
 //! 2. Send `initialize` with `capabilities.elicitation: {}`.
 //! 3. Send `notifications/initialized`.
-//! 4. Send `tools/call aegis_run` with a script that fires an
+//! 4. Send `tools/call denyx_run` with a script that fires an
 //!    approval-required capability.
 //! 5. Read the next line — it should be the `elicitation/create`
 //!    request from the server.
@@ -27,11 +27,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-const BIN: &str = env!("CARGO_BIN_EXE_aegis-mcp");
+const BIN: &str = env!("CARGO_BIN_EXE_denyx-mcp");
 
 fn write_policy(suffix: &str, body: &str) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
-        "aegis_mcp_elicit_{}_{}_{}",
+        "denyx_mcp_elicit_{}_{}_{}",
         suffix,
         std::process::id(),
         std::time::SystemTime::now()
@@ -40,7 +40,7 @@ fn write_policy(suffix: &str, body: &str) -> (PathBuf, PathBuf) {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("aegis.toml");
+    let path = dir.join("denyx.toml");
     std::fs::write(&path, body).unwrap();
     (dir, path)
 }
@@ -63,7 +63,7 @@ impl Session {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn aegis-mcp");
+            .expect("spawn denyx-mcp");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Session {
@@ -120,7 +120,7 @@ write_allow = ["{write_dir}/**"]
 
 #[test]
 fn elicit_accept_allows_call_through() {
-    let work = std::env::temp_dir().join(format!("aegis_elicit_accept_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_accept_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let abs = work.to_string_lossy().replace('\\', "/");
     let (dir, policy) = write_policy("accept", &approval_policy(&abs));
@@ -128,12 +128,12 @@ fn elicit_accept_allows_call_through() {
     let mut s = Session::spawn(&policy, "elicit");
     s.handshake_with_elicitation();
 
-    // tools/call aegis_run — script writes a file, which is gated by
+    // tools/call denyx_run — script writes a file, which is gated by
     // `requires_approval = ["fs.write"]`.
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": { "script": format!("fs.write({:?}, \"hi\")", format!("{abs}/x.txt")) }
         }
     }));
@@ -183,7 +183,7 @@ fn elicit_accept_allows_call_through() {
 
 #[test]
 fn elicit_decline_blocks_call_with_confirm_denied() {
-    let work = std::env::temp_dir().join(format!("aegis_elicit_decline_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_decline_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let abs = work.to_string_lossy().replace('\\', "/");
     let (dir, policy) = write_policy("decline", &approval_policy(&abs));
@@ -193,7 +193,7 @@ fn elicit_decline_blocks_call_with_confirm_denied() {
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": { "script": format!("fs.write({:?}, \"hi\")", format!("{abs}/x.txt")) }
         }
     }));
@@ -210,7 +210,7 @@ fn elicit_decline_blocks_call_with_confirm_denied() {
     let result = &tools_resp["result"];
     assert_eq!(result["isError"], true, "decline should fail: {result}");
     assert_eq!(
-        result["aegis_error_kind"], "confirm_denied",
+        result["denyx_error_kind"], "confirm_denied",
         "decline should tag confirm_denied: {result}"
     );
 
@@ -231,7 +231,7 @@ fn elicit_accept_without_approved_flag_is_treated_as_deny() {
     // requested schema (e.g. `approved: false`). In that case we
     // must NOT treat the call as authorised — the user said "submit"
     // but didn't tick the approval box.
-    let work = std::env::temp_dir().join(format!("aegis_elicit_unticked_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_unticked_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let abs = work.to_string_lossy().replace('\\', "/");
     let (dir, policy) = write_policy("unticked", &approval_policy(&abs));
@@ -241,7 +241,7 @@ fn elicit_accept_without_approved_flag_is_treated_as_deny() {
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": { "script": format!("fs.write({:?}, \"hi\")", format!("{abs}/x.txt")) }
         }
     }));
@@ -255,7 +255,7 @@ fn elicit_accept_without_approved_flag_is_treated_as_deny() {
     let tools_resp = s.recv();
     let result = &tools_resp["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(result["aegis_error_kind"], "confirm_denied");
+    assert_eq!(result["denyx_error_kind"], "confirm_denied");
     s.close();
     let _ = std::fs::remove_dir_all(&work);
     let _ = std::fs::remove_file(&policy);
@@ -268,7 +268,7 @@ fn elicit_error_response_is_treated_as_deny() {
     // elicitation request (e.g. "method not found" because it
     // doesn't actually implement elicitation despite advertising
     // it), we must deny — never treat an error as approval.
-    let work = std::env::temp_dir().join(format!("aegis_elicit_error_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_error_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let abs = work.to_string_lossy().replace('\\', "/");
     let (dir, policy) = write_policy("error", &approval_policy(&abs));
@@ -278,7 +278,7 @@ fn elicit_error_response_is_treated_as_deny() {
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": { "script": format!("fs.write({:?}, \"hi\")", format!("{abs}/x.txt")) }
         }
     }));
@@ -292,7 +292,7 @@ fn elicit_error_response_is_treated_as_deny() {
     let tools_resp = s.recv();
     let result = &tools_resp["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(result["aegis_error_kind"], "confirm_denied");
+    assert_eq!(result["denyx_error_kind"], "confirm_denied");
     s.close();
     let _ = std::fs::remove_dir_all(&work);
     let _ = std::fs::remove_file(&policy);
@@ -306,7 +306,7 @@ fn auto_mode_falls_back_to_deny_when_client_lacks_elicitation_capability() {
     // deny (matching the old auto-deny behaviour). No elicitation
     // request should be sent in this case — the next line after
     // tools/call is the tool result directly.
-    let work = std::env::temp_dir().join(format!("aegis_elicit_fallback_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_fallback_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let abs = work.to_string_lossy().replace('\\', "/");
     let (dir, policy) = write_policy("fallback", &approval_policy(&abs));
@@ -330,7 +330,7 @@ fn auto_mode_falls_back_to_deny_when_client_lacks_elicitation_capability() {
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": { "script": format!("fs.write({:?}, \"hi\")", format!("{abs}/x.txt")) }
         }
     }));
@@ -343,7 +343,7 @@ fn auto_mode_falls_back_to_deny_when_client_lacks_elicitation_capability() {
     );
     let result = &tools_resp["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(result["aegis_error_kind"], "confirm_denied");
+    assert_eq!(result["denyx_error_kind"], "confirm_denied");
     s.close();
     let _ = std::fs::remove_dir_all(&work);
     let _ = std::fs::remove_file(&policy);
@@ -356,7 +356,7 @@ fn elicit_unrelated_call_does_not_fire_elicitation() {
     // requires_approval-listed capability must complete without
     // sending an elicitation. Otherwise the elicit hook would have
     // false-positive interruptions on every call.
-    let work = std::env::temp_dir().join(format!("aegis_elicit_unrelated_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_unrelated_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let (dir, policy) = write_policy(
         "unrelated",
@@ -377,7 +377,7 @@ write_allow = ["{abs}/**"]
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": {
                 "script": format!(
                     "x = fs.read({:?})\nprint(x)",
@@ -407,7 +407,7 @@ fn elicit_timeout_behavior_documented() {
     // the elicitation/create request is on stdout, and the tools/call
     // hasn't responded. Then we close stdin to force the server to
     // exit; the tools/call response (if any) should be confirm_denied.
-    let work = std::env::temp_dir().join(format!("aegis_elicit_timeout_{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!("denyx_elicit_timeout_{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let abs = work.to_string_lossy().replace('\\', "/");
     let (dir, policy) = write_policy("timeout", &approval_policy(&abs));
@@ -417,7 +417,7 @@ fn elicit_timeout_behavior_documented() {
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {
-            "name": "aegis_run",
+            "name": "denyx_run",
             "arguments": { "script": format!("fs.write({:?}, \"hi\")", format!("{abs}/x.txt")) }
         }
     }));

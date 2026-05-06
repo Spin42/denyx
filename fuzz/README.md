@@ -1,7 +1,7 @@
-# Aegis fuzz harnesses
+# Denyx fuzz harnesses
 
 Three coverage-guided fuzz targets for the load-bearing parsers /
-matchers in the Aegis runtime:
+matchers in the Denyx runtime:
 
 | Target          | What it fuzzes                                          |
 |-----------------|---------------------------------------------------------|
@@ -23,8 +23,8 @@ cargo +nightly fuzz run policy_globs
 
 ## Run on stable (regression sweep)
 
-`cargo test -p aegis-host --test fuzz_stable` and
-`cargo test -p aegis-policy --test fuzz_stable` drive the same three
+`cargo test -p denyx-host --test fuzz_stable` and
+`cargo test -p denyx-policy --test fuzz_stable` drive the same three
 surfaces with a deterministic 100 000-iteration random sweep using a
 hand-rolled xorshift PRNG. This runs in CI on stable — it doesn't
 have libFuzzer's coverage feedback, but it catches the same class of

@@ -1,9 +1,9 @@
-# Aegis Security Audit — Bypass Assessment
+# Denyx Security Audit — Bypass Assessment
 
 > ← [Back to docs README](README.md)
 
 This document records a deliberate, hostile-eyes review of every way
-an agent script running under Aegis could subvert a policy that
+an agent script running under Denyx could subvert a policy that
 the operator wrote in good faith. The assessment was triggered by
 finding the **subprocess argv-bypass** (where `subprocess.exec(["cat",
 "/etc/passwd"])` could reach files the policy denied for `fs.read`)
@@ -37,11 +37,11 @@ record a finding.
 | 5 | Starlark error messages can leak tainted values past the redaction boundary | 🔧 Fixed in this audit | (this audit) |
 | 6 | URL parsing tricks (userinfo, fragments) | ✅ Safe — `url` crate parses correctly |  |
 | 7 | Path traversal via `..` from policy root | ✅ Safe — allow patterns are root-anchored |  |
-| 8 | Raw `_aegis_*` builtin name access | ✅ Safe — verifier rejects, runtime gate fires anyway |  |
+| 8 | Raw `_denyx_*` builtin name access | ✅ Safe — verifier rejects, runtime gate fires anyway |  |
 | 9 | Starlark struct monkey-patching (`fs = struct(read=fake)`) | ✅ Safe — doesn't grant new powers |  |
 | 10 | Reflection / `dir(globals())` exposure of internals | ✅ Safe — Starlark has no reflection over Rust-side `Evaluator::extra` |  |
 | 11 | Env reads via name-only check | ✅ Safe — no path resolution involved |  |
-| 12 | TOCTOU between policy check and operation (single-script) | ✅ Safe — Aegis evaluation is single-threaded |  |
+| 12 | TOCTOU between policy check and operation (single-script) | ✅ Safe — Denyx evaluation is single-threaded |  |
 | 13 | Audit log floods | 📖 Bounded by `[runtime].max_seconds` |  |
 | 14 | Pure-CPU busy loops | 📖 Documented limitation; container is the answer |  |
 | 15 | Unicode normalization (path/URL) | 📖 Operator's responsibility — patterns must match the byte form they expect |  |
@@ -57,7 +57,7 @@ focused commit; each has a regression test pinning the closure.
 ### 1. `subprocess.exec` argv reaching denied paths — fixed earlier
 
 Before the fix: `subprocess.exec(["cat", "/etc/passwd"])` succeeded
-because the OS opens the file in the child, where Aegis has no
+because the OS opens the file in the child, where Denyx has no
 visibility. The script's own `fs.read("/etc/passwd")` would
 correctly be denied; the agent could route around the gate by
 going through any file-touching binary.
@@ -73,7 +73,7 @@ match. See commit `9e53bf0`.
 The argv path-gate from #1 catches paths that appear *as separate
 argv elements*. It cannot catch paths constructed inside an inline
 interpreter string: `python3 -c "open(chr(47)+'etc'+chr(47)+'passwd').read()"`
-contains no literal `/`, the path is computed at runtime, and Aegis
+contains no literal `/`, the path is computed at runtime, and Denyx
 has no visibility into the Python heap.
 
 Fix: opt-in `[subprocess].sandbox = "bwrap"` mode wraps every call
@@ -110,10 +110,10 @@ the policy check ever runs.
 
 **Found**: `ureq` follows up to 5 redirects by default. After the
 initial URL check passes, a 302 to `http://10.0.0.1/` is followed
-without Aegis re-running the host / IP check on the new URL. An
+without Denyx re-running the host / IP check on the new URL. An
 allowed origin server can hand the agent any internal URL it likes.
 
-**Fix**: configure ureq's agent with `redirects(0)`. Aegis no longer
+**Fix**: configure ureq's agent with `redirects(0)`. Denyx no longer
 auto-follows. If the script wants to follow a redirect, it has to
 read the `Location` header from the response and call `net.http_get`
 again — at which point the policy check fires on the new URL.
@@ -127,13 +127,13 @@ registry, and audit-event payloads are scrubbed at emit time. But
 the **Starlark error path** is not. A script that does
 `secret = env.read("OPENAI_API_KEY"); fail(secret)` raises a
 Starlark error whose message contains the secret. That message
-flows out through `AegisError::Starlark(msg)` to the caller — and
+flows out through `DenyxError::Starlark(msg)` to the caller — and
 in the CLI, lands on stderr. Same for any error whose rendering
 happens to include a value derived from a tainted source.
 
 **Fix**: `Runner::run` scrubs `starlark_msg` and any captured
 error message through `redact()` against the taint registry before
-constructing the `AegisError`. The error path now respects the same
+constructing the `DenyxError`. The error path now respects the same
 boundary as the printed-line path.
 
 ### 6-16. Verified safe / documented limitations
@@ -151,19 +151,19 @@ root-anchored (`src/**` translates to `<root>/**/src/**`), so a
 resolved path of `/etc/passwd` won't match. Net effect: the escape
 exists but the policy-check still rejects. Tested.
 
-**8. Raw `_aegis_*` builtin names.** The pre-execution verifier
+**8. Raw `_denyx_*` builtin names.** The pre-execution verifier
 strips strings/comments and word-boundary-scans for any registered
 capability name (both dotted `fs.read` and underscored
-`_aegis_fs_read`). Calling a raw name still goes through the same
-runtime gate. Aliasing (`r = _aegis_fs_read; r(...)`) trips the
-verifier (`_aegis_fs_read` is a token in the source).
+`_denyx_fs_read`). Calling a raw name still goes through the same
+runtime gate. Aliasing (`r = _denyx_fs_read; r(...)`) trips the
+verifier (`_denyx_fs_read` is a token in the source).
 
 **9. Struct monkey-patching.** `fs = struct(read = lambda: "fake")`
 replaces the prelude's binding in the script's local scope. This
 doesn't *grant* new capabilities — the script's monkey-patched
 `fs.read` is just a lambda that returns "fake". To call the real
 gated builtin under a different binding, the script has to
-reference `_aegis_fs_read` (caught by the verifier) or pass the
+reference `_denyx_fs_read` (caught by the verifier) or pass the
 function value through a chain — and at every actual invocation,
 the runtime gate fires.
 
@@ -177,11 +177,11 @@ is opaque to script.
 `env.read("PATH")` returns the env value as a Starlark string.
 Subject to the local-only-vars taint mechanism (already audited).
 
-**12. TOCTOU.** Aegis evaluation is single-threaded inside one run.
+**12. TOCTOU.** Denyx evaluation is single-threaded inside one run.
 A fs.read at time T returns content as of T; nothing in the same
 script can race with itself. Cross-run TOCTOU exists (an agent run
 reads a path, a later run sees a swapped path) but that's a
-property of the filesystem, not Aegis.
+property of the filesystem, not Denyx.
 
 **13. Audit log floods.** Each effecting call emits one event. A
 script that calls `fs.read` in a tight loop could grow the log
@@ -198,7 +198,7 @@ isolation, run inside a container.
 
 **15. Unicode normalization.** Different byte sequences for
 visually-identical paths (NFC vs NFD on macOS HFS+, IDN homograph
-in URLs). Aegis matches against the byte sequence the policy
+in URLs). Denyx matches against the byte sequence the policy
 provides. Operators who care about Unicode confusion need to
 normalize their patterns themselves.
 
@@ -215,7 +215,7 @@ agent-runtime layer pinning the resolved IP.
 For future audits or external review:
 
 - **Walk every effecting builtin top-down** in `crates/host/src/lib.rs:register_builtins`. For each, ask: what argument shapes are checked, what shapes aren't, what happens on the side of the underlying syscall after the check.
-- **Walk every output boundary** for taint coverage: `outcome.printed` (scrubbed), `AuditEvent` payloads at emit (scrubbed), MCP tool result text (joined from outcome.printed, so transitively scrubbed), AegisError messages on the error path (NOW scrubbed after fix #5), Starlark stack traces (subject to the same fix).
+- **Walk every output boundary** for taint coverage: `outcome.printed` (scrubbed), `AuditEvent` payloads at emit (scrubbed), MCP tool result text (joined from outcome.printed, so transitively scrubbed), DenyxError messages on the error path (NOW scrubbed after fix #5), Starlark stack traces (subject to the same fix).
 - **Walk every external library** for behavior the policy can't see: `url::Url::parse` parsing semantics, `ureq` redirect behavior (now disabled), `globset` matching semantics, `std::fs` symlink behavior (now canonicalized).
 - **Walk every Starlark surface** for reflection or escape: `LibraryExtension` enables (Print, StructType, NamespaceType, Json, Map, Filter, Debug). None expose `Evaluator::extra` or arbitrary FS/network/exec.
 - **Build adversarial test cases**, not just happy-path tests: a test for "this attack is blocked" carries more value than ten tests for "this legitimate use works".

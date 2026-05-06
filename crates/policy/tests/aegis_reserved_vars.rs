@@ -1,4 +1,4 @@
-//! Pentest-style unit tests for the AEGIS_RESERVED_VAR_NAMES
+//! Pentest-style unit tests for the DENYX_RESERVED_VAR_NAMES
 //! invariant.
 //!
 //! The runtime denies a fixed list of variable names — the bearer
@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use aegis_policy::{is_aegis_reserved_var, Policy, PolicyFile, AEGIS_RESERVED_VAR_NAMES};
+use denyx_policy::{is_denyx_reserved_var, Policy, PolicyFile, DENYX_RESERVED_VAR_NAMES};
 
 fn build(toml: &str) -> Policy {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -22,32 +22,32 @@ fn reserved_list_includes_token_url_and_aliases() {
     // Spec sanity: the curated list must include the obvious names.
     // If a future change accidentally drops one of these, this test
     // surfaces the regression before it ships.
-    let must_include = ["AEGIS_AUTH_TOKEN", "AEGIS_POLICY_URL", "AEGIS_AUDIT_URL"];
+    let must_include = ["DENYX_AUTH_TOKEN", "DENYX_POLICY_URL", "DENYX_AUDIT_URL"];
     for name in must_include {
         assert!(
-            AEGIS_RESERVED_VAR_NAMES.contains(&name),
-            "AEGIS_RESERVED_VAR_NAMES should contain {name}; current set: {:?}",
-            AEGIS_RESERVED_VAR_NAMES
+            DENYX_RESERVED_VAR_NAMES.contains(&name),
+            "DENYX_RESERVED_VAR_NAMES should contain {name}; current set: {:?}",
+            DENYX_RESERVED_VAR_NAMES
         );
-        assert!(is_aegis_reserved_var(name), "{name} should be reserved");
+        assert!(is_denyx_reserved_var(name), "{name} should be reserved");
     }
 }
 
 #[test]
 fn reserved_names_denied_when_listed_in_allow_vars() {
     // Attack: a hostile (or careless) policy explicitly grants
-    // `env.read("AEGIS_AUTH_TOKEN")` via allow_vars. The runtime
+    // `env.read("DENYX_AUTH_TOKEN")` via allow_vars. The runtime
     // invariant fires before allow_vars is consulted, so the read
     // is denied regardless.
     let policy = build(
         r#"
 [environment]
-allow_vars = ["AEGIS_AUTH_TOKEN", "PATH"]
+allow_vars = ["DENYX_AUTH_TOKEN", "PATH"]
 "#,
     );
     assert!(
-        policy.check_env_read("AEGIS_AUTH_TOKEN").is_err(),
-        "AEGIS_AUTH_TOKEN must be denied even when listed in allow_vars"
+        policy.check_env_read("DENYX_AUTH_TOKEN").is_err(),
+        "DENYX_AUTH_TOKEN must be denied even when listed in allow_vars"
     );
     // Sanity: the non-reserved name in the same allow list still works.
     assert!(policy.check_env_read("PATH").is_ok());
@@ -55,23 +55,23 @@ allow_vars = ["AEGIS_AUTH_TOKEN", "PATH"]
 
 #[test]
 fn reserved_names_denied_when_listed_in_local_only_vars() {
-    // Attack: the policy lists AEGIS_AUTH_TOKEN under local_only_vars,
+    // Attack: the policy lists DENYX_AUTH_TOKEN under local_only_vars,
     // hoping the local-only-tainted-but-readable semantics apply.
     // Same answer: the runtime invariant denies the read outright.
     let policy = build(
         r#"
 [environment]
-local_only_vars = ["AEGIS_AUTH_TOKEN"]
+local_only_vars = ["DENYX_AUTH_TOKEN"]
 "#,
     );
-    assert!(policy.check_env_read("AEGIS_AUTH_TOKEN").is_err());
+    assert!(policy.check_env_read("DENYX_AUTH_TOKEN").is_err());
 }
 
 #[test]
 fn reserved_names_denied_with_negation_attack() {
     // Attack: the policy inherits secure-defaults (which has
-    // AEGIS_AUTH_TOKEN in deny_vars) but tries to lift the deny via
-    // gitignore-style negation — `!AEGIS_AUTH_TOKEN` removes the
+    // DENYX_AUTH_TOKEN in deny_vars) but tries to lift the deny via
+    // gitignore-style negation — `!DENYX_AUTH_TOKEN` removes the
     // entry from the inherited deny_vars list. THEN puts the same
     // name in allow_vars, hoping to get net access. The runtime
     // invariant doesn't read deny_vars at all for the reserved
@@ -81,28 +81,28 @@ fn reserved_names_denied_with_negation_attack() {
 inherits = "secure-defaults"
 
 [environment]
-deny_vars = ["!AEGIS_AUTH_TOKEN"]
-allow_vars = ["AEGIS_AUTH_TOKEN"]
+deny_vars = ["!DENYX_AUTH_TOKEN"]
+allow_vars = ["DENYX_AUTH_TOKEN"]
 "#,
     );
     assert!(
-        policy.check_env_read("AEGIS_AUTH_TOKEN").is_err(),
+        policy.check_env_read("DENYX_AUTH_TOKEN").is_err(),
         "negation cannot circumvent the reserved-name invariant"
     );
 }
 
 #[test]
 fn subprocess_env_filters_reserved_names_even_in_allow_vars() {
-    // Attack: the policy lists AEGIS_AUTH_TOKEN in allow_vars AND
+    // Attack: the policy lists DENYX_AUTH_TOKEN in allow_vars AND
     // declares a subprocess command. A naive port might pass the
     // token through to the child env (since allow_vars is the
     // primary list `subprocess_env` consults). The runtime
     // filters reserved names out unconditionally.
-    std::env::set_var("AEGIS_AUTH_TOKEN", "this-must-not-leak");
+    std::env::set_var("DENYX_AUTH_TOKEN", "this-must-not-leak");
     let policy = build(
         r#"
 [environment]
-allow_vars = ["AEGIS_AUTH_TOKEN", "PATH"]
+allow_vars = ["DENYX_AUTH_TOKEN", "PATH"]
 
 [subprocess]
 allow_commands = ["echo"]
@@ -111,8 +111,8 @@ allow_commands = ["echo"]
     let env_pairs = policy.subprocess_env("echo");
     let names: Vec<&str> = env_pairs.iter().map(|(k, _)| k.as_str()).collect();
     assert!(
-        !names.contains(&"AEGIS_AUTH_TOKEN"),
-        "AEGIS_AUTH_TOKEN must NOT be in child env; got: {names:?}"
+        !names.contains(&"DENYX_AUTH_TOKEN"),
+        "DENYX_AUTH_TOKEN must NOT be in child env; got: {names:?}"
     );
     // Sanity: PATH (a non-reserved name in the same allow list)
     // still passes through.
@@ -120,14 +120,14 @@ allow_commands = ["echo"]
         names.contains(&"PATH"),
         "PATH should still propagate to children"
     );
-    std::env::remove_var("AEGIS_AUTH_TOKEN");
+    std::env::remove_var("DENYX_AUTH_TOKEN");
 }
 
 #[test]
 fn all_reserved_names_consistently_denied() {
     // For every name on the reserved list, all three attack paths
     // (allow_vars, local_only_vars, both) must fail.
-    for name in AEGIS_RESERVED_VAR_NAMES {
+    for name in DENYX_RESERVED_VAR_NAMES {
         for clause in [
             format!("[environment]\nallow_vars = [\"{name}\"]"),
             format!("[environment]\nlocal_only_vars = [\"{name}\"]"),
@@ -146,23 +146,23 @@ fn all_reserved_names_consistently_denied() {
 fn similarly_named_but_not_reserved_vars_still_work() {
     // The reserved list is an explicit set, NOT a prefix. Test
     // fixtures and operator-managed conventions sometimes use
-    // names that start with `AEGIS_` (the exfil probe uses
-    // `AEGIS_DEMO_SECRET`). Those must continue to work — only
+    // names that start with `DENYX_` (the exfil probe uses
+    // `DENYX_DEMO_SECRET`). Those must continue to work — only
     // the curated list is reserved.
     let policy = build(
         r#"
 [environment]
-allow_vars = ["AEGIS_DEMO_SECRET", "AEGIS_TAINT_TEST_VAR", "AEGIS_NOT_A_RESERVED_NAME"]
+allow_vars = ["DENYX_DEMO_SECRET", "DENYX_TAINT_TEST_VAR", "DENYX_NOT_A_RESERVED_NAME"]
 "#,
     );
     for name in [
-        "AEGIS_DEMO_SECRET",
-        "AEGIS_TAINT_TEST_VAR",
-        "AEGIS_NOT_A_RESERVED_NAME",
+        "DENYX_DEMO_SECRET",
+        "DENYX_TAINT_TEST_VAR",
+        "DENYX_NOT_A_RESERVED_NAME",
     ] {
         assert!(
             policy.check_env_read(name).is_ok(),
-            "non-reserved {name} (despite AEGIS_ prefix) should be readable when in allow_vars"
+            "non-reserved {name} (despite DENYX_ prefix) should be readable when in allow_vars"
         );
     }
 }

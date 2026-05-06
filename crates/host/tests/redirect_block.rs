@@ -1,5 +1,5 @@
 //! Tests for redirect-blocking. The headline property: a redirect
-//! returned by an allowed origin is NOT auto-followed by Aegis. The
+//! returned by an allowed origin is NOT auto-followed by Denyx. The
 //! script sees a clear error pointing at the Location header and
 //! must call net.http_get / post again with the new URL — which
 //! goes through the [network] policy gate, including the deny_ips
@@ -7,15 +7,15 @@
 //!
 //! Without this fix, a permissive origin (`https://example.com`)
 //! could redirect to an internal IP (`http://10.0.0.1/`) and ureq's
-//! default 5-redirect policy would follow it without Aegis having
+//! default 5-redirect policy would follow it without Denyx having
 //! any visibility into the new URL.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use aegis_host::Runner;
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::Runner;
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();

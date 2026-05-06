@@ -38,7 +38,7 @@ EXAMPLES: list[dict[str, Any]] = [
             "to a file. Pattern: wrap a for/if loop inside a def, then "
             "call the def. Top-level for/if is REJECTED."
         ),
-        "code": """log = fs.read("/tmp/aegis_demo/log.txt")
+        "code": """log = fs.read("/tmp/denyx_demo/log.txt")
 
 def count_errors(text):
     n = 0
@@ -59,7 +59,7 @@ print("errors: " + str(errors))""",
             "(comprehensions ARE allowed at top level — only `for` "
             "statements are not)."
         ),
-        "code": """log = fs.read("/tmp/aegis_demo/log.txt")
+        "code": """log = fs.read("/tmp/denyx_demo/log.txt")
 lines = log.split("\\n")
 matches = [l for l in lines if "[ERROR]" in l]
 fs.write("/tmp/out/errors.txt", "\\n".join(matches))
@@ -73,7 +73,7 @@ print("found " + str(len(matches)) + " matching lines")""",
             "Pattern: def with for+if, returning the extracted value; "
             "use string .replace and .strip to clean."
         ),
-        "code": """body = fs.read("/tmp/aegis_demo/manifest.toml")
+        "code": """body = fs.read("/tmp/denyx_demo/manifest.toml")
 
 def find_version(text):
     for line in text.split("\\n"):
@@ -93,8 +93,8 @@ print(v)""",
             "or equal. Pattern: inline ternary `a if cond else b` works "
             "at top level. Top-level `if` statements do NOT work."
         ),
-        "code": """a = fs.read("/tmp/aegis_demo/file_a.txt")
-b = fs.read("/tmp/aegis_demo/file_b.txt")
+        "code": """a = fs.read("/tmp/denyx_demo/file_a.txt")
+b = fs.read("/tmp/denyx_demo/file_b.txt")
 result = "match" if a == b else "differ"
 fs.write("/tmp/out/cmp.txt", result)
 print(result)""",
@@ -196,7 +196,7 @@ print(body)""",
             "the integer count to a file. Pattern: subprocess.exec + "
             ".split + filter empties + len."
         ),
-        "code": """out = subprocess.exec(["find", "/tmp/aegis_demo", "-name", "*.txt", "-type", "f"])
+        "code": """out = subprocess.exec(["find", "/tmp/denyx_demo", "-name", "*.txt", "-type", "f"])
 lines = [l for l in out.split("\\n") if l.strip() != ""]
 fs.write("/tmp/out/count.txt", str(len(lines)))
 print("count: " + str(len(lines)))""",
@@ -209,7 +209,7 @@ print("count: " + str(len(lines)))""",
             "→ '7 file'). Extract the first whitespace-separated token "
             "as an integer string."
         ),
-        "code": """out = subprocess.exec(["wc", "-l", "/tmp/aegis_demo/log.txt"]).strip()
+        "code": """out = subprocess.exec(["wc", "-l", "/tmp/denyx_demo/log.txt"]).strip()
 first = out.split()[0]
 fs.write("/tmp/out/n.txt", first)
 print("n: " + first)""",
@@ -236,7 +236,7 @@ print(encoded)""",
             "(env vars or computed), write the rendered output. Pattern: "
             "str.replace, NOT f-strings."
         ),
-        "code": """tpl = fs.read("/tmp/aegis_demo/template.txt")
+        "code": """tpl = fs.read("/tmp/denyx_demo/template.txt")
 user = env.read("USER")
 home = env.read("HOME")
 rendered = tpl.replace("{USER}", user).replace("{HOME}", home)
@@ -250,7 +250,7 @@ print(rendered)""",
             "(e.g. with an env var value), encode and write back. "
             "Pattern: json.decode + dict assignment + json.encode."
         ),
-        "code": """body = fs.read("/tmp/aegis_demo/config.json")
+        "code": """body = fs.read("/tmp/denyx_demo/config.json")
 cfg = json.decode(body)
 cfg["home_dir"] = env.read("HOME")
 fs.write("/tmp/out/config_merged.json", json.encode(cfg))
@@ -264,7 +264,7 @@ print(json.encode(cfg))""",
             "dict, encode as JSON and write. Pattern: def with for "
             "loop accumulating into a dict."
         ),
-        "code": """body = fs.read("/tmp/aegis_demo/data.csv")
+        "code": """body = fs.read("/tmp/denyx_demo/data.csv")
 
 def count_by_kind(text):
     counts = {}
@@ -289,9 +289,9 @@ print(json.encode(result))""",
             "with header. Pattern: .format() for formatting numbers; "
             "string concatenation for the body."
         ),
-        "code": """a = fs.read("/tmp/aegis_demo/a.txt")
-b = fs.read("/tmp/aegis_demo/b.txt")
-c = fs.read("/tmp/aegis_demo/c.txt")
+        "code": """a = fs.read("/tmp/denyx_demo/a.txt")
+b = fs.read("/tmp/denyx_demo/b.txt")
+c = fs.read("/tmp/denyx_demo/c.txt")
 header = "file\\twords\\n"
 rows = (
     "a.txt\\t{}\\n".format(len(a.split())) +
@@ -308,7 +308,7 @@ print(table)""",
             "read an existing log/audit file, append a new line, write "
             "back. Pattern: fs.read + concatenate with new line + fs.write."
         ),
-        "code": """existing = fs.read("/tmp/aegis_demo/audit.txt")
+        "code": """existing = fs.read("/tmp/denyx_demo/audit.txt")
 extended = existing + "2026-05-04 entry-3\\n"
 fs.write("/tmp/out/audit_extended.txt", extended)
 print(str(len(extended.split("\\n")) - 1) + " lines")""",
@@ -322,7 +322,7 @@ print(str(len(extended.split("\\n")) - 1) + " lines")""",
             "one per line. Pattern: def scanning lines, tracking "
             "in-section state, splitting on '='."
         ),
-        "code": """body = fs.read("/tmp/aegis_demo/manifest.toml")
+        "code": """body = fs.read("/tmp/denyx_demo/manifest.toml")
 
 def deps_from_toml(text):
     out = []

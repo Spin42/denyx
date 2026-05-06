@@ -1,4 +1,4 @@
-//! Integration tests for `aegis-mcp` in policy-server / audit-server
+//! Integration tests for `denyx-mcp` in policy-server / audit-server
 //! mode. Drives the binary via JSON-RPC against an in-process mock
 //! HTTP server that serves a fixed policy and records audit POSTs.
 //!
@@ -8,9 +8,9 @@
 //!   - audit 5xx degrades gracefully (AUDIT GAP, MVP behaviour)
 //!
 //! Pentest-style cases (verified end-to-end through the binary):
-//!   - agent script cannot read AEGIS_AUTH_TOKEN (env reserved)
-//!   - agent script cannot read AEGIS_POLICY_URL (env reserved)
-//!   - agent script cannot read AEGIS_AUDIT_URL (env reserved)
+//!   - agent script cannot read DENYX_AUTH_TOKEN (env reserved)
+//!   - agent script cannot read DENYX_POLICY_URL (env reserved)
+//!   - agent script cannot read DENYX_AUDIT_URL (env reserved)
 //!   - agent cannot reach the policy URL via net.http_get unless the
 //!     policy server itself listed it in http_get_allow (it doesn't)
 
@@ -24,12 +24,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-const BIN: &str = env!("CARGO_BIN_EXE_aegis-mcp");
+const BIN: &str = env!("CARGO_BIN_EXE_denyx-mcp");
 
 /// In-process mock HTTP server. Responds to `GET /policy` with a
 /// configurable status + body, and `POST /audit` with a configurable
 /// status. Records every audit POST body so tests can assert on
-/// what aegis-mcp sent.
+/// what denyx-mcp sent.
 struct MockServer {
     addr: SocketAddr,
     state: Arc<MockState>,
@@ -211,7 +211,7 @@ fn handle_request(mut stream: TcpStream, state: Arc<MockState>) -> std::io::Resu
     Ok(())
 }
 
-/// Driver for an `aegis-mcp` subprocess running in server mode.
+/// Driver for an `denyx-mcp` subprocess running in server mode.
 struct Session {
     child: Child,
     stdin: ChildStdin,
@@ -231,7 +231,7 @@ impl Session {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().expect("spawn aegis-mcp");
+        let mut child = cmd.spawn().expect("spawn denyx-mcp");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Session {
@@ -286,7 +286,7 @@ fn wait_until<F: Fn() -> bool>(check: F, timeout: Duration) -> bool {
 #[test]
 fn happy_path_policy_fetch_and_audit_post() {
     let server = MockServer::new();
-    let scratch = std::env::temp_dir().join(format!("aegis_srv_happy_{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("denyx_srv_happy_{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     std::fs::write(scratch.join("hello.txt"), "hi from disk").unwrap();
     let path = scratch.join("hello.txt");
@@ -303,9 +303,9 @@ read_allow = ["{abs}/**"]
     ));
 
     let mut s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUDIT_URL", &server.audit_url()),
-        ("AEGIS_AUTH_TOKEN", "happy-token"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUDIT_URL", &server.audit_url()),
+        ("DENYX_AUTH_TOKEN", "happy-token"),
     ]);
     s.handshake();
 
@@ -316,7 +316,7 @@ print(x)"#
     );
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "aegis_run", "arguments": {"script": script}}
+        "params": {"name": "denyx_run", "arguments": {"script": script}}
     }));
     let resp = s.recv();
     let result = &resp["result"];
@@ -357,8 +357,8 @@ fn policy_404_fails_closed() {
     let server = MockServer::new();
     server.set_policy_status(404);
     let s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUTH_TOKEN", "any"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUTH_TOKEN", "any"),
     ]);
     let child = s.child;
     let _ = child.wait_with_output();
@@ -370,8 +370,8 @@ fn policy_5xx_fails_closed() {
     let server = MockServer::new();
     server.set_policy_status(503);
     let s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUTH_TOKEN", "any"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUTH_TOKEN", "any"),
     ]);
     let child = s.child;
     let _ = child.wait_with_output();
@@ -382,8 +382,8 @@ fn policy_empty_body_fails_closed() {
     let server = MockServer::new();
     server.set_policy_body("");
     let s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUTH_TOKEN", "any"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUTH_TOKEN", "any"),
     ]);
     let child = s.child;
     let _ = child.wait_with_output();
@@ -394,8 +394,8 @@ fn policy_malformed_toml_fails_closed() {
     let server = MockServer::new();
     server.set_policy_body("this is === not toml [[broken");
     let s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUTH_TOKEN", "any"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUTH_TOKEN", "any"),
     ]);
     let child = s.child;
     let _ = child.wait_with_output();
@@ -406,8 +406,8 @@ fn policy_url_unreachable_fails_closed() {
     // Unbound port (1 is privileged on Linux + likely-rejected) is
     // basically guaranteed to fail to connect.
     let s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", "http://127.0.0.1:1/nope"),
-        ("AEGIS_AUTH_TOKEN", "any"),
+        ("DENYX_POLICY_URL", "http://127.0.0.1:1/nope"),
+        ("DENYX_AUTH_TOKEN", "any"),
     ]);
     let child = s.child;
     let _ = child.wait_with_output();
@@ -421,7 +421,7 @@ fn audit_5xx_logs_gap_but_does_not_block_call() {
     // honestly in the threat model.
     let server = MockServer::new();
     server.set_audit_status(503);
-    let scratch = std::env::temp_dir().join(format!("aegis_srv_gap_{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("denyx_srv_gap_{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     std::fs::write(scratch.join("a.txt"), "x").unwrap();
     server.set_policy_body(&format!(
@@ -437,9 +437,9 @@ read_allow = ["{abs}/**"]
     let path = scratch.join("a.txt");
     let path_str = path.to_string_lossy().replace('\\', "/");
     let mut s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUDIT_URL", &server.audit_url()),
-        ("AEGIS_AUTH_TOKEN", "x"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUDIT_URL", &server.audit_url()),
+        ("DENYX_AUTH_TOKEN", "x"),
     ]);
     s.handshake();
     let script = format!(
@@ -448,7 +448,7 @@ print(x)"#
     );
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "aegis_run", "arguments": {"script": script}}
+        "params": {"name": "denyx_run", "arguments": {"script": script}}
     }));
     let resp = s.recv();
     // The tools/call STILL succeeds; audit gap is the documented MVP
@@ -461,7 +461,7 @@ print(x)"#
 // ---- Pentest tests ---------------------------------------------------------
 
 #[test]
-fn pentest_agent_cannot_read_aegis_auth_token_env() {
+fn pentest_agent_cannot_read_denyx_auth_token_env() {
     let server = MockServer::new();
     // Policy must enable env.read for ANY var (otherwise the verifier
     // rejects the script before the runtime invariant fires); we
@@ -475,9 +475,9 @@ allow_vars = ["PATH"]
 "#,
     );
     let mut s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUDIT_URL", &server.audit_url()),
-        ("AEGIS_AUTH_TOKEN", "supersecret-token-do-not-leak"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUDIT_URL", &server.audit_url()),
+        ("DENYX_AUTH_TOKEN", "supersecret-token-do-not-leak"),
     ]);
     s.handshake();
     // Single-line Starlark; using `;` separator avoids rustfmt
@@ -485,19 +485,19 @@ allow_vars = ["PATH"]
     // the script's whitespace structure.
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "aegis_run", "arguments": {
-            "script": r#"t = env.read("AEGIS_AUTH_TOKEN"); print(t)"#
+        "params": {"name": "denyx_run", "arguments": {
+            "script": r#"t = env.read("DENYX_AUTH_TOKEN"); print(t)"#
         }}
     }));
     let resp = s.recv();
     let result = &resp["result"];
     assert_eq!(
         result["isError"], true,
-        "agent must NOT be able to read AEGIS_AUTH_TOKEN: {resp}"
+        "agent must NOT be able to read DENYX_AUTH_TOKEN: {resp}"
     );
     let text = result["content"][0]["text"].as_str().unwrap_or("");
     assert!(
-        text.contains("AEGIS_AUTH_TOKEN") && text.to_lowercase().contains("denies"),
+        text.contains("DENYX_AUTH_TOKEN") && text.to_lowercase().contains("denies"),
         "denial should name the variable; got: {text}"
     );
     // The actual token value must NEVER appear in any output channel.
@@ -509,7 +509,7 @@ allow_vars = ["PATH"]
 }
 
 #[test]
-fn pentest_agent_cannot_read_aegis_policy_url_env() {
+fn pentest_agent_cannot_read_denyx_policy_url_env() {
     let server = MockServer::new();
     server.set_policy_body(
         r#"
@@ -520,14 +520,14 @@ allow_vars = ["PATH"]
 "#,
     );
     let mut s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUTH_TOKEN", "x"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUTH_TOKEN", "x"),
     ]);
     s.handshake();
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "aegis_run", "arguments": {
-            "script": r#"u = env.read("AEGIS_POLICY_URL"); print(u)"#
+        "params": {"name": "denyx_run", "arguments": {
+            "script": r#"u = env.read("DENYX_POLICY_URL"); print(u)"#
         }}
     }));
     let resp = s.recv();
@@ -541,7 +541,7 @@ allow_vars = ["PATH"]
 }
 
 #[test]
-fn pentest_agent_cannot_read_aegis_audit_url_env() {
+fn pentest_agent_cannot_read_denyx_audit_url_env() {
     let server = MockServer::new();
     server.set_policy_body(
         r#"
@@ -552,15 +552,15 @@ allow_vars = ["PATH"]
 "#,
     );
     let mut s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUDIT_URL", &server.audit_url()),
-        ("AEGIS_AUTH_TOKEN", "x"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUDIT_URL", &server.audit_url()),
+        ("DENYX_AUTH_TOKEN", "x"),
     ]);
     s.handshake();
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "aegis_run", "arguments": {
-            "script": r#"u = env.read("AEGIS_AUDIT_URL"); print(u)"#
+        "params": {"name": "denyx_run", "arguments": {
+            "script": r#"u = env.read("DENYX_AUDIT_URL"); print(u)"#
         }}
     }));
     let resp = s.recv();
@@ -574,34 +574,34 @@ allow_vars = ["PATH"]
 }
 
 #[test]
-fn pentest_policy_with_aegis_auth_token_in_allow_vars_still_denies() {
+fn pentest_policy_with_denyx_auth_token_in_allow_vars_still_denies() {
     // Even if a hostile policy tries to grant env.read of the token,
     // the runtime invariant denies. End-to-end version of the unit
-    // test in crates/policy/tests/aegis_reserved_vars.rs.
+    // test in crates/policy/tests/denyx_reserved_vars.rs.
     let server = MockServer::new();
     server.set_policy_body(
         r#"
 inherits = "secure-defaults"
 
 [environment]
-allow_vars = ["AEGIS_AUTH_TOKEN", "PATH"]
+allow_vars = ["DENYX_AUTH_TOKEN", "PATH"]
 "#,
     );
     let mut s = Session::spawn_with_env(&[
-        ("AEGIS_POLICY_URL", &server.policy_url()),
-        ("AEGIS_AUTH_TOKEN", "deeply-secret"),
+        ("DENYX_POLICY_URL", &server.policy_url()),
+        ("DENYX_AUTH_TOKEN", "deeply-secret"),
     ]);
     s.handshake();
     s.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "aegis_run", "arguments": {
-            "script": r#"t = env.read("AEGIS_AUTH_TOKEN"); print(t)"#
+        "params": {"name": "denyx_run", "arguments": {
+            "script": r#"t = env.read("DENYX_AUTH_TOKEN"); print(t)"#
         }}
     }));
     let resp = s.recv();
     assert_eq!(
         resp["result"]["isError"], true,
-        "even a policy with allow_vars=AEGIS_AUTH_TOKEN must not expose the token: {resp}"
+        "even a policy with allow_vars=DENYX_AUTH_TOKEN must not expose the token: {resp}"
     );
     let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(

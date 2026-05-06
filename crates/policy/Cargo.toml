@@ -1,10 +1,10 @@
 [package]
-name = "aegis-policy"
+name = "denyx-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Aegis policy types and runtime-parsed policy file format."
+description = "Denyx policy types and runtime-parsed policy file format."
 
 [dependencies]
 anyhow.workspace = true

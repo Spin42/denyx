@@ -1,12 +1,12 @@
-//! Integration tests for `aegis_host`. Exercises the public `Runner`
+//! Integration tests for `denyx_host`. Exercises the public `Runner`
 //! surface end-to-end against synthetic policies: each test loads a
 //! TOML policy, runs a small Starlark script, and asserts on the
-//! outcome (printed output, or one of the typed `AegisError` variants).
+//! outcome (printed output, or one of the typed `DenyxError` variants).
 
 use std::path::PathBuf;
 
-use aegis_host::{AegisError, Runner};
-use aegis_policy::{Policy, PolicyFile};
+use denyx_host::{DenyxError, Runner};
+use denyx_policy::{Policy, PolicyFile};
 
 fn runner_for(toml: &str, root: PathBuf) -> Runner {
     let file = PolicyFile::from_toml_str(toml).unwrap();
@@ -17,8 +17,8 @@ fn runner_for(toml: &str, root: PathBuf) -> Runner {
 #[test]
 fn allowed_read_succeeds() {
     let tmp = std::env::temp_dir();
-    let f = tmp.join("aegis_test_input.txt");
-    std::fs::write(&f, "hello aegis").unwrap();
+    let f = tmp.join("denyx_test_input.txt");
+    std::fs::write(&f, "hello denyx").unwrap();
 
     let toml = r#"
 [filesystem]
@@ -34,7 +34,7 @@ allow = ["fs.read"]
 print(x)"#
     );
     let outcome = runner.run("t1", &src, "test.star").unwrap();
-    assert_eq!(outcome.printed, vec!["hello aegis".to_string()]);
+    assert_eq!(outcome.printed, vec!["hello denyx".to_string()]);
 }
 
 #[test]
@@ -51,7 +51,7 @@ allow = ["fs.write"]
     let src = r#"fs.write("/etc/passwd", "x")"#;
     let err = runner.run("t1", src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "expected policy violation, got: {err:?}"
     );
 }
@@ -66,7 +66,7 @@ allow = ["fs.read"]
     let src = r#"subprocess.exec(["echo", "hi"])"#;
     let err = runner.run("t1", src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Verifier(_)),
+        matches!(err, DenyxError::Verifier(_)),
         "expected pre-execution verifier rejection, got: {err:?}"
     );
 }
@@ -87,7 +87,7 @@ allow = ["subprocess.exec"]
     let src = r#"subprocess.exec(["git", "push", "--force", "origin", "main"])"#;
     let err = runner.run("t1", src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "expected policy violation for forbidden args, got: {err:?}"
     );
     let msg = err.to_string();
@@ -110,7 +110,7 @@ allow = ["subprocess.exec"]
     let src = r#"subprocess.exec(["rm", "-rf", "/tmp"])"#;
     let err = runner.run("t1", src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "expected policy violation for unknown command, got: {err:?}"
     );
 }
@@ -132,7 +132,7 @@ allow = ["net.http_get"]
     let src = r#"net.http_get("http://localhost:1/")"#;
     let err = runner.run("t1", src, "test.star").unwrap_err();
     assert!(
-        matches!(err, AegisError::Policy(_)),
+        matches!(err, DenyxError::Policy(_)),
         "expected policy violation from DNS-resolved deny, got: {err:?}"
     );
     let msg = err.to_string();
@@ -160,5 +160,5 @@ print("path-prefix:", p[:1])
     runner.run("t1", src, "test.star").unwrap();
     let denied_src = r#"env.read("AWS_SECRET_ACCESS_KEY")"#;
     let err = runner.run("t1", denied_src, "test.star").unwrap_err();
-    assert!(matches!(err, AegisError::Policy(_)));
+    assert!(matches!(err, DenyxError::Policy(_)));
 }
