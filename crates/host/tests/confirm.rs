@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use denyx_host::{DenyxError, ConfirmDecision, ConfirmHook, ConfirmRequest, Runner};
+use denyx_host::{ConfirmDecision, ConfirmHook, ConfirmRequest, DenyxError, Runner};
 use denyx_policy::{Policy, PolicyFile};
 
 struct Recording {

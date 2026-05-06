@@ -116,9 +116,8 @@ fn triple_quoted_with_inner_single_quotes_does_not_close_early() {
     let src = r#"x = """it's a docstring with fs.read('foo') as text"""
 y = 1
 "#;
-    verify(src, &empty_policy()).unwrap_or_else(|e| {
-        panic!("triple-quote with inner single quote false-positive: {e}")
-    });
+    verify(src, &empty_policy())
+        .unwrap_or_else(|e| panic!("triple-quote with inner single quote false-positive: {e}"));
 }
 
 #[test]
@@ -133,8 +132,8 @@ fn triple_quoted_then_real_capability_call_flags_only_real_call() {
     let src = r#"docstring = """this script will fs.read a file"""
 result = fs.read("path")
 "#;
-    let err = verify(src, &empty_policy())
-        .expect_err("real fs.read call must be flagged by verifier");
+    let err =
+        verify(src, &empty_policy()).expect_err("real fs.read call must be flagged by verifier");
     assert_eq!(err.capability, "fs.read");
 }
 
@@ -159,9 +158,8 @@ fn triple_single_quoted_string_strips_capability_name() {
     let src = r#"x = '''this docstring uses fs.read and subprocess.exec'''
 y = 1
 "#;
-    verify(src, &empty_policy()).unwrap_or_else(|e| {
-        panic!("triple-single-quoted string false-positive: {e}")
-    });
+    verify(src, &empty_policy())
+        .unwrap_or_else(|e| panic!("triple-single-quoted string false-positive: {e}"));
 }
 
 #[test]

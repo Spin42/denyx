@@ -320,10 +320,7 @@ sandbox = "bwrap"
 fn pure_policy_bwrap_argv_keeps_net_when_http_post_allowed() {
     pure_policy_keeps_net_for_each_individual_allow_list(
         r#"[network]
-http_post_allow = ["api.example.com"]
-"#
-            .trim_end_matches('"')
-            .into(),
+http_post_allow = ["api.example.com"]"#,
         "http_post_allow",
     );
 }

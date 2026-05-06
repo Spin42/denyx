@@ -23,12 +23,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use clap::{Parser, Subcommand};
 use denyx_host::{
-    DenyxError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
-    DenyAllConfirm, JsonlAuditSink, Runner,
+    AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm,
+    DenyxError, JsonlAuditSink, Runner,
 };
 use denyx_policy::Policy;
-use clap::{Parser, Subcommand};
 
 use crate::init::Lang;
 

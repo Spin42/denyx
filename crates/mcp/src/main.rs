@@ -48,12 +48,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use clap::Parser;
 use denyx_host::{
-    DenyxError, AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest,
-    DenyAllConfirm, HttpAuditSink, JsonlAuditSink, Runner,
+    AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm,
+    DenyxError, HttpAuditSink, JsonlAuditSink, Runner,
 };
 use denyx_policy::{Policy, PolicyFile};
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 

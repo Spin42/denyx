@@ -794,8 +794,8 @@ mod tests {
         // mutations diverge from the real division behaviour.
         let r = TaintRegistry::default();
         r.add("MNOP4321zzzzMNOP4321"); // 20 chars, all unusual chars
-        // Print each char interleaved with 4 cover chars (a real
-        // chunking exfil pattern).
+                                       // Print each char interleaved with 4 cover chars (a real
+                                       // chunking exfil pattern).
         let chunks: Vec<String> = "MNOP4321zzzzMNOP4321"
             .chars()
             .map(|c| format!("aaaa{c}"))
@@ -827,12 +827,9 @@ mod tests {
         // characters in order.
         let r = TaintRegistry::default();
         r.add("abcd"); // 4 chars: shorter than CHUNKING_MIN_LEN (=8)
-        // Prose that contains a, b, c, d in order — would be a chunking
-        // false positive if the length check is wrong.
-        let prose = vec![
-            "Here is a banana.".into(),
-            "And a cake of dates.".into(),
-        ];
+                       // Prose that contains a, b, c, d in order — would be a chunking
+                       // false positive if the length check is wrong.
+        let prose = vec!["Here is a banana.".into(), "And a cake of dates.".into()];
         let out = redact_lines(prose.clone(), &r);
         // No clobbering: chunking detection MUST skip the short taint.
         // (The lines may still get redacted by the substring scrub if
