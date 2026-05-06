@@ -2,15 +2,54 @@
 
 > ← [Back to docs README](README.md)
 
-Five minutes from a freshly built `denyx` to a script running under a
-real policy.
+Five minutes from "I have an agentic host" to "every effecting tool
+call is gated by a TOML policy I control."
 
-Assumes you've already followed [07-install.md](07-install.md) (Rust +
-`cargo build --release` + `denyx` on `$PATH`).
+Assumes you've already followed [07-install.md](07-install.md) (so
+`denyx` and `denyx-mcp` are on `$PATH` — typically via
+`cargo install denyx-cli denyx-mcp`).
 
-## 1. Generate a starter policy
+## 1. The fast path: let your agent set Denyx up for you
 
-In a project directory you want to play with:
+If you're already running **Claude Code** or **opencode**, the
+fastest way to get Denyx wired into your project is to have the
+agent do it. From the project directory you want to gate, paste the
+[setup prompt](../examples/denyx-setup-prompt.md) as your first
+message of a fresh session.
+
+The agent will:
+
+1. Detect your stack (Python / Node / Rust / Ruby / Go).
+2. Run `denyx init --lang <detected>` and show you the generated
+   `denyx.toml`.
+3. Walk you through five questions about filesystem reads, network
+   hosts, env vars, subprocess commands, and approval gates —
+   editing `denyx.toml` as you answer.
+4. Write a project-local MCP config (`.mcp.json` for Claude Code,
+   `opencode.json` for opencode) that wires `denyx-mcp` into your
+   project for future sessions.
+5. Smoke-test by running an allowed read and a deliberately-denied
+   read so you can see the gate fire.
+6. Tell you what to commit to git (`denyx.toml`, optionally
+   `.mcp.json`) and what not to.
+
+Two-minute setup, project-specific, nothing in `~/.config/`,
+nothing system-wide. After it finishes, restart your agent host
+and every subsequent tool call goes through the policy gate.
+
+The prompt itself is committed in the repo at
+[`examples/denyx-setup-prompt.md`](../examples/denyx-setup-prompt.md);
+it's safe to read end-to-end before pasting.
+
+> **What if you're not running Claude Code or opencode?** Skip to
+> §2 below for the manual walkthrough. The remaining sections of
+> this quickstart (writing a script, running it, watching a denial,
+> approval gates, MCP, policy inspection) apply to either path.
+
+## 2. Or, do it manually
+
+If you'd rather drive each step yourself, in the project directory
+you want to play with:
 
 ```sh
 cd ~/myproject
@@ -27,7 +66,7 @@ what you may want to extend.
 If your project isn't Python, swap in `--lang node`, `ruby`, `rust`, or
 `go`.
 
-## 2. Write a tiny Starlark script
+## 3. Write a tiny Starlark script
 
 Create `count_lines.star`:
 
@@ -54,7 +93,7 @@ The full notes are in `examples/local_executor/run_multistep.py`'s
 `SYSTEM_PROMPT_TEMPLATE`, which is the same prompt the evaluation harness
 gives a 7B model.
 
-## 3. Run it
+## 4. Run it
 
 ```sh
 denyx run --policy denyx.toml count_lines.star
@@ -76,7 +115,7 @@ tail -1 /tmp/audit.jsonl
 # {"ts":"2026-05-05T07:50:00...","task_id":"count_lines.star","step":1,"capability":"fs.read","status":"allowed","detail":{"path":"...README.md","error":null}}
 ```
 
-## 4. Watch a denial happen
+## 5. Watch a denial happen
 
 Edit `count_lines.star` to read something the policy doesn't allow:
 
@@ -121,7 +160,7 @@ The exit codes:
 | 5    | I/O or configuration error                        |
 | 6    | Runtime cap exceeded (wall-time / call-stack)     |
 
-## 5. Try a confirm-prompted capability
+## 6. Try a confirm-prompted capability
 
 Edit your `denyx.toml`:
 
@@ -159,7 +198,7 @@ the script fails with exit code 4.
 In CI / non-TTY, the default confirm hook is `DenyAllConfirm` — same
 script would fail with exit code 4 unless you pass `--yes` to override.
 
-## 6. Run without a policy file (loud-and-safe fallback)
+## 7. Run without a policy file (loud-and-safe fallback)
 
 ```sh
 denyx run /tmp/random.star
@@ -178,7 +217,7 @@ denyx run /tmp/safe.star
 prints `hello 3`. Useful for quick experiments where you want guarantee-
 nothing-effecting behavior.
 
-## 7. The MCP server
+## 8. The MCP server (manual hand-test)
 
 The same enforcement is available over MCP (JSON-RPC 2.0 on stdio).
 
@@ -200,7 +239,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 You'll get back the server's capability advertisement. The two methods
 that matter operationally are `tools/list` and `tools/call`.
 
-## 8. Inspect or validate the policy
+## 9. Inspect or validate the policy
 
 Two CLI subcommands let you reason about a policy without running
 anything against it:
