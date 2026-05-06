@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-flight runs for the same ref when a new push lands. Saves
+# minutes on rapid pushes; CI catches up to the latest commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only by default — this workflow only builds and tests.
+permissions:
+  contents: read
+
+jobs:
+  # Build + test the Rust workspace. Scope: pure-cargo work that runs
+  # in process (the 4 crates' unit + integration tests, plus the
+  # stable randomized fuzz sweep). Out of scope by design: the Python
+  # eval harnesses under examples/local_executor/ (they invoke
+  # `claude` and Ollama and would burn budget / require a local
+  # model server) and anything else that depends on cloud-API
+  # credentials.
+  test:
+    name: Build & test (cargo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # bubblewrap is a runtime dep for the sandbox tests
+      # (crates/host/tests/sandbox_bwrap.rs). The runner image doesn't
+      # ship it; we install via apt before the build.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bubblewrap
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # Caches ~/.cargo/{registry,git} and target/. Rerun cost on a
+      # warm cache is dominated by recompiling our crates only.
+      - name: Cache cargo registry + build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --workspace --locked --verbose
+
+      - name: cargo test
+        run: cargo test --workspace --locked --no-fail-fast --verbose
