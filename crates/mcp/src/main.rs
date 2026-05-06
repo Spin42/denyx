@@ -205,16 +205,33 @@ every tool call will fail until you launch with --policy <project.toml> or \
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Policy::secure_defaults_at(cwd)?
     };
-    // Audit sink: URL > file > stderr default.
+    // Audit sink: URL > file > stderr default. Print a startup
+    // banner so the operator can see where audit events are going —
+    // the alternative (silent stderr-by-default) makes the audit
+    // feature look broken when the host captures stderr into its own
+    // MCP-server log directory and mixes Denyx events with everything
+    // else's noise. Real bug reported by users: "the audit log
+    // wasn't created by the prompt." It was — to stderr — they just
+    // couldn't find it.
     let audit: Arc<dyn AuditSink> = if let Some(url) = cli.audit_url.as_deref() {
+        eprintln!("denyx-mcp: audit -> POST {url}");
         Arc::new(HttpAuditSink::new(url, cli.auth_token.as_deref()))
     } else if let Some(path) = cli.audit_log.as_deref() {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         policy
             .guard_audit_log(&canon)
             .map_err(|e| anyhow::anyhow!("audit-log path is reachable to the agent: {e}"))?;
+        eprintln!("denyx-mcp: audit -> file {}", canon.display());
         Arc::new(JsonlAuditSink::file(path)?)
     } else {
+        eprintln!(
+            "denyx-mcp: WARNING: neither --audit-log nor DENYX_AUDIT_URL set; \
+             audit events will be written to stderr — most MCP hosts capture stderr \
+             into their own log directory mixed with other servers' output, making \
+             Denyx events hard to find. Pass --audit-log <path> to capture them to \
+             a file (recommended: <project>/.denyx/audit.jsonl with .denyx/ in \
+             .gitignore), or set DENYX_AUDIT_URL=<url> for centralised audit."
+        );
         Arc::new(JsonlAuditSink::stderr())
     };
 
