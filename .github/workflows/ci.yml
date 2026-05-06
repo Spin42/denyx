@@ -141,3 +141,21 @@ jobs:
             lcov.info
             coverage.json
           retention-days: 14
+
+      # Push the LCOV report to codecov.io so the README badge has a
+      # live percentage. Public repos can use OIDC tokenless uploads
+      # via codecov-action v5 (no secret required); if the repo is
+      # later flipped private or codecov starts enforcing tokens, set
+      # a CODECOV_TOKEN repo secret and this step picks it up
+      # automatically. `if: always()` runs the upload even if the
+      # 80%-floor check above failed — losing the data point would
+      # make the regression harder to diagnose, not easier.
+      - name: Upload coverage to codecov.io
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          # Don't fail the CI job on a codecov-side hiccup — the
+          # 80%-floor check is the gate; codecov is reporting only.
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
