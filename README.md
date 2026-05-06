@@ -453,4 +453,4 @@ examples/
 
 ## License
 
-[MIT](LICENSE) © 2026 Marc Lainez.
+[MIT](LICENSE) © 2026 Spin42.
