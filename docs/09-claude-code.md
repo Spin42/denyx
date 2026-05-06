@@ -50,14 +50,34 @@ platform). Add an `denyx` server entry:
   "mcpServers": {
     "denyx": {
       "command": "denyx-mcp",
-      "args": ["--policy", "/absolute/path/to/your/denyx.toml"]
+      "args": [
+        "--policy",     "/absolute/path/to/your/project/denyx.toml",
+        "--audit-log",  "/absolute/path/to/your/project/.denyx/audit.jsonl",
+        "--confirm-mode", "auto"
+      ]
     }
   }
 }
 ```
 
 Use absolute paths — the MCP server's working directory may not match
-your project root.
+your project root. Create the `.denyx/` directory and gitignore it
+before launching:
+
+```sh
+mkdir -p /absolute/path/to/your/project/.denyx
+echo '.denyx/' >> /absolute/path/to/your/project/.gitignore
+```
+
+> **`--audit-log` is effectively required.** Without it,
+> `denyx-mcp` writes audit events to stderr, which Claude Code
+> captures into its own MCP-server log directory mixed with every
+> other server's noise — making the audit feature look broken
+> from the operator's perspective. The path doesn't have to be
+> `./.denyx/audit.jsonl`; that's just the recommended default
+> for project-local audit. What matters is that *some* path is
+> set so the events go to a file you can `tail -f` and `jq`
+> against.
 
 ### Available tools
 
@@ -289,23 +309,27 @@ supports the whitelist semantics Claude Code currently doesn't.
 
 ### Audit log
 
-To collect audit events to a file:
+`--audit-log` is already in the recommended config above. Each
+tool call produces one JSON Lines record per effecting action,
+written to the path you specified. Useful queries:
 
-```json
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "denyx-mcp",
-      "args": [
-        "--policy", "/path/to/denyx.toml",
-        "--audit-log", "/path/to/audit.jsonl"
-      ]
-    }
-  }
-}
+```sh
+# Tail the audit live as the agent works:
+tail -f /absolute/path/to/your/project/.denyx/audit.jsonl
+
+# Extract every denied operation:
+jq -c 'select(.status == "denied")' .denyx/audit.jsonl
+
+# Hash-chain integrity check (catches in-place modification,
+# insertion, or deletion of any line):
+denyx audit verify .denyx/audit.jsonl
 ```
 
-Each tool call produces one JSON Lines record per effecting action.
+The audit log path should NOT be in your policy's `write_allow`
+— `denyx-mcp` writes the log directly via its own filesystem
+access, not through the policy gate. Keeping it out of
+`write_allow` means the agent can't `fs.write` over its own
+audit trail to tamper with the record.
 
 ### Approval-gated capabilities (`requires_approval`)
 

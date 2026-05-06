@@ -62,14 +62,36 @@ So a working `opencode.json` looks like:
       "type": "local",
       "command": [
         "denyx-mcp",
-        "--policy", "/absolute/path/to/your/denyx.toml",
-        "--audit-log", "/absolute/path/to/audit.jsonl"
+        "--policy",       "/absolute/path/to/your/project/denyx.toml",
+        "--audit-log",    "/absolute/path/to/your/project/.denyx/audit.jsonl",
+        "--confirm-mode", "auto"
       ],
       "enabled": true
     }
   }
 }
 ```
+
+Create the `.denyx/` directory and gitignore it before launching:
+
+```sh
+mkdir -p /absolute/path/to/your/project/.denyx
+echo '.denyx/' >> /absolute/path/to/your/project/.gitignore
+```
+
+> **`--audit-log` is effectively required.** Without it,
+> `denyx-mcp` writes audit events to stderr, which opencode
+> captures into its own MCP-server log directory mixed with every
+> other server's noise — making the audit feature look broken
+> from the operator's perspective. The path doesn't have to be
+> `./.denyx/audit.jsonl`; that's just the recommended default
+> for project-local audit. What matters is that *some* path is
+> set so events go to a file you can `tail -f` and `jq` against:
+>
+> ```sh
+> tail -f .denyx/audit.jsonl
+> jq -c 'select(.status == "denied")' .denyx/audit.jsonl
+> ```
 
 If you copy-pasted the Claude Code shape (`mcpServers` + separate
 `command`/`args`) into `opencode.json`, opencode rejects the
@@ -122,8 +144,9 @@ effecting tool to `false`:
       "type": "local",
       "command": [
         "denyx-mcp",
-        "--policy", "/absolute/path/to/your/denyx.toml",
-        "--audit-log", "/absolute/path/to/audit.jsonl"
+        "--policy",       "/absolute/path/to/your/project/denyx.toml",
+        "--audit-log",    "/absolute/path/to/your/project/.denyx/audit.jsonl",
+        "--confirm-mode", "auto"
       ],
       "enabled": true
     }
@@ -182,8 +205,9 @@ whitelist** that closes both holes. Combine it with the explicit
       "type": "local",
       "command": [
         "denyx-mcp",
-        "--policy", "/absolute/path/to/your/denyx.toml",
-        "--audit-log", "/absolute/path/to/audit.jsonl"
+        "--policy",       "/absolute/path/to/your/project/denyx.toml",
+        "--audit-log",    "/absolute/path/to/your/project/.denyx/audit.jsonl",
+        "--confirm-mode", "auto"
       ],
       "enabled": true
     }

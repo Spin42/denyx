@@ -222,18 +222,32 @@ nothing-effecting behavior.
 The same enforcement is available over MCP (JSON-RPC 2.0 on stdio).
 
 ```sh
-denyx-mcp --policy denyx.toml
+mkdir -p ./.denyx
+denyx-mcp --policy denyx.toml --audit-log ./.denyx/audit.jsonl
 # stays running, reads JSON-RPC requests from stdin
 ```
 
+> **Why `--audit-log` is mandatory in any non-toy use of
+> `denyx-mcp`**: without it, the server defaults to writing audit
+> events to *stderr*, which the host (Claude Code / opencode)
+> captures into its own MCP-server log directory, mixed in with
+> every other MCP server's noise. From the operator's
+> perspective, the audit feature looks broken — events are
+> "going somewhere" but nowhere greppable. **Always pass
+> `--audit-log <path>`** so events go to a file you can `tail
+> -f` and `jq` against. `./.denyx/audit.jsonl` (gitignored —
+> `echo '.denyx/' >> .gitignore`) is the recommended
+> project-local default.
+
 Most agentic hosts (Claude Code, opencode) talk to MCP servers
 automatically once configured — see [09-claude-code.md](09-claude-code.md)
-and [10-opencode.md](10-opencode.md) for the wiring.
+and [10-opencode.md](10-opencode.md) for the wiring (both
+include `--audit-log` in their example configs).
 
 For a hand test, you can speak the protocol manually:
 
 ```sh
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}' | denyx-mcp --policy denyx.toml
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}' | denyx-mcp --policy denyx.toml --audit-log ./.denyx/audit.jsonl
 ```
 
 You'll get back the server's capability advertisement. The two methods
