@@ -238,6 +238,14 @@ MCP-aware orchestrator.
 - **`denyx-mcp`** — MCP server. Wires Denyx into Claude Code,
   opencode, Cursor, custom orchestrators.
 
+For a **team** rolling Denyx out across multiple developers — one
+shared policy, one centralised audit log — see
+[docs/denyx-for-teams.md](docs/denyx-for-teams.md). The wire
+protocol a Denyx-compatible server has to implement is in
+[docs/server-protocol.md](docs/server-protocol.md). Both endpoints
+are deliberately small (GET TOML, POST JSON) so any team can stand
+up a conforming server in an afternoon.
+
 ## OWASP Agentic Top 10 coverage
 
 Denyx is scored against the

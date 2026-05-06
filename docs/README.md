@@ -46,6 +46,8 @@ The index below lists everything in both groups in one place.
 
 | Doc                                                          | Purpose |
 |--------------------------------------------------------------|---------|
+| [denyx-for-teams](denyx-for-teams.md)                        | The team-deployment shape: one policy + one audit trail across many developers, via a central server. Philosophy, rollout stages, what a basic Denyx-capable server has to do. |
+| [server-protocol](server-protocol.md)                        | The HTTP wire spec a policy/audit server must implement, **v1**. Two endpoints, bearer auth, status-code semantics, conformance test vectors. Read after `denyx-for-teams.md`. |
 | [agent-policy-spec](agent-policy-spec.md)                    | Portable spec for the policy format, **v1.0.0**. Tool-agnostic — consumable by any agentic system. Use this if you're implementing the policy format in a non-Denyx runtime. |
 | [security-threat-model](security-threat-model.md)            | One-page review companion. What Denyx claims to defend against, what it explicitly does *not* defend against, the trust boundaries, the assumptions. **Read first if you're auditing with hostile intent.** |
 | [security-audit](security-audit.md)                          | The 16-surface bypass-assessment writeup that triggered the recent security work. Findings + fixes + verified-safe surfaces. |
