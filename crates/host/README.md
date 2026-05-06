@@ -1,6 +1,6 @@
 # denyx-host
 
-The embeddable Starlark host for [Denyx](https://github.com/mlainez/denyx),
+The embeddable Starlark host for [Denyx](https://github.com/Spin42/denyx),
 a default-deny capability layer for AI-agent runtimes.
 
 This crate is what you reach for when you want to **execute**
@@ -52,7 +52,7 @@ runner.run(r#"print(fs.read("src/main.rs"))"#)?;
 
 ## Status
 
-Pre-1.0. Read the [main README](https://github.com/mlainez/denyx)
+Pre-1.0. Read the [main README](https://github.com/Spin42/denyx)
 disclosure block before using in production — the runtime is
 empirically tested (fuzz, exfil probe, AI-driven pentest, mutation
 testing) but has not yet been reviewed by an external human

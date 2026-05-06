@@ -16,8 +16,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Marc Lainez <marc@spin42.com>"]
-repository = "https://github.com/mlainez/denyx"
-homepage = "https://github.com/mlainez/denyx"
+repository = "https://github.com/Spin42/denyx"
+homepage = "https://github.com/Spin42/denyx"
 # MSRV. Pinned to a recent stable that satisfies all transitive
 # deps (starlark 0.13 is the binding floor). Bumping this is a
 # minor-version bump for the workspace.

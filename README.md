@@ -3,9 +3,9 @@
 **A safe-by-design local tooling layer for agentic AI, with deliberate
 control over permissions through a policy file.**
 
-[![CI](https://github.com/mlainez/denyx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mlainez/denyx/actions/workflows/ci.yml)
-[![Mutation testing (weekly)](https://github.com/mlainez/denyx/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/mlainez/denyx/actions/workflows/mutants.yml)
-[![codecov](https://codecov.io/gh/mlainez/denyx/branch/main/graph/badge.svg)](https://codecov.io/gh/mlainez/denyx)
+[![CI](https://github.com/Spin42/denyx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/ci.yml)
+[![Mutation testing (weekly)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml)
+[![codecov](https://codecov.io/gh/Spin42/denyx/branch/main/graph/badge.svg)](https://codecov.io/gh/Spin42/denyx)
 
 > Badge meaning, since "passing" is doing a lot of work in those
 > labels: **CI** is the per-PR build + test + fmt + clippy +

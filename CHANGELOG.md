@@ -100,5 +100,5 @@ the `aegis-*` crate names were partially taken on crates.io.
   own crypto (AES, custom permutations) or pure side channels
   (length, comparison oracles, substring guesses).
 
-[Unreleased]: https://github.com/mlainez/denyx/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/mlainez/denyx/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Spin42/denyx/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Spin42/denyx/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 # denyx-policy
 
-The policy types and TOML loader for [Denyx](https://github.com/mlainez/denyx),
+The policy types and TOML loader for [Denyx](https://github.com/Spin42/denyx),
 a default-deny capability layer for AI-agent runtimes.
 
 This crate is the **specification side** of Denyx: it parses
@@ -51,8 +51,8 @@ assert!(policy.check_fs_read(std::path::Path::new("/etc/passwd")).is_err());
 ## Status
 
 Pre-1.0. The schema is documented in
-[docs/agent-policy-spec.md](https://github.com/mlainez/denyx/blob/main/docs/agent-policy-spec.md)
-(spec at v1.0.0; implementation at 0.x). See the [main README](https://github.com/mlainez/denyx)
+[docs/agent-policy-spec.md](https://github.com/Spin42/denyx/blob/main/docs/agent-policy-spec.md)
+(spec at v1.0.0; implementation at 0.x). See the [main README](https://github.com/Spin42/denyx)
 for the threat-model and security disclosures before using in
 production.
 

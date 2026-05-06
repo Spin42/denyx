@@ -1,6 +1,6 @@
 # denyx-cli
 
-Command-line interface for [Denyx](https://github.com/mlainez/denyx),
+Command-line interface for [Denyx](https://github.com/Spin42/denyx),
 a default-deny capability layer for AI-agent runtimes.
 
 Installs a `denyx` binary that runs a Starlark script under a
@@ -38,11 +38,11 @@ denyx audit tail --since 1h
 ```
 
 Full subcommand reference: `denyx --help` or the [main
-README](https://github.com/mlainez/denyx).
+README](https://github.com/Spin42/denyx).
 
 ## Status
 
-Pre-1.0. Read the [main README](https://github.com/mlainez/denyx)
+Pre-1.0. Read the [main README](https://github.com/Spin42/denyx)
 disclosure block before using against systems you can't afford to
 recover.
 

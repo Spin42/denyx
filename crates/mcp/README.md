@@ -1,6 +1,6 @@
 # denyx-mcp
 
-The MCP server for [Denyx](https://github.com/mlainez/denyx), a
+The MCP server for [Denyx](https://github.com/Spin42/denyx), a
 default-deny capability layer for AI-agent runtimes.
 
 `denyx-mcp` exposes the policy-gated Starlark host over stdio
@@ -30,9 +30,9 @@ cargo install denyx-mcp
 
 For opencode, server-mode (centralised policy + audit), and
 platform-specific notes (macOS Lima, Windows WSL2), see the
-[main README](https://github.com/mlainez/denyx) and the
-[Claude Code](https://github.com/mlainez/denyx/blob/main/docs/07-claude-code.md)
-/ [opencode](https://github.com/mlainez/denyx/blob/main/docs/08-opencode.md)
+[main README](https://github.com/Spin42/denyx) and the
+[Claude Code](https://github.com/Spin42/denyx/blob/main/docs/07-claude-code.md)
+/ [opencode](https://github.com/Spin42/denyx/blob/main/docs/08-opencode.md)
 guides.
 
 ## Server mode (centralised policy + audit)
@@ -46,7 +46,7 @@ the agent — no policy override is honoured.
 
 ## Status
 
-Pre-1.0. Read the [main README](https://github.com/mlainez/denyx)
+Pre-1.0. Read the [main README](https://github.com/Spin42/denyx)
 disclosure block — in particular, the `requires_approval` mode
 falls back to `auto-deny` when the MCP client doesn't advertise
 elicitation support, which most clients don't yet (including Claude
