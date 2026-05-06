@@ -208,6 +208,18 @@ deployments where the audit log feeds an existing SIEM or alerting
 pipeline; orgs that need to demonstrate "every agent action was
 recorded centrally."
 
+> **Identity note.** The event body itself does not contain
+> `user`, `machine_id`, or `agent_id` fields — the bearer token
+> in the HTTP `Authorization` header is the only identity carrier
+> in v1 of the server protocol. The server is responsible for
+> joining the event to an identity at ingest, typically by
+> issuing one bearer token per machine / developer / CI project
+> and looking up the mapping in its token database. JWTs with
+> claims, workload-identity tokens (SPIFFE / GCP / K8s SA), and
+> proxy-injected `X-User` headers are all valid implementation
+> choices. Full discussion in
+> [server-protocol.md](server-protocol.md#event-identity--who-emitted-this-event).
+
 #### Option C — Local JSONL + log shipping (filebeat / vector / fluentd)
 
 Each Denyx-gated agent writes to a local JSONL file (Option A).

@@ -271,6 +271,93 @@ top-level fields to `AuditEvent`. Servers should accept and store
 unknown fields rather than reject the event. The client never
 removes a field that's already in v1 without a v2 protocol bump.
 
+### Event identity — who emitted this event?
+
+**v1 protocol: the bearer token is the only identity carrier.**
+
+Look at the audit-event schema above and you'll notice what's
+*not* there: no `agent_id`, no `machine_id`, no `user`, no
+`hostname`. The Denyx client does not stamp a per-event identity
+into the event body. The fields are pure descriptions of *what
+the agent tried to do*, not *who was running the agent*.
+
+This is a deliberate design choice with explicit consequences for
+server implementers. **The server is responsible for joining the
+event to an identity at ingest time**, using the bearer token as
+the join key. Practical patterns:
+
+1. **One bearer token per machine** (or per developer / per CI
+   project). The server's token database maps each token to a
+   structured identity record (`user@example.com`, `host=laptop-42`,
+   `team=platform`, etc.). At ingest, the server looks up the
+   token's identity and writes a denormalised row to the audit
+   table:
+
+   ```
+   audit_events: (ts, task_id, step, capability, status, detail,
+                  user_email, machine_id, team)
+   ```
+
+   Most production deployments will use this pattern. It's the
+   simplest, the auth and the identity stay in one place.
+
+2. **JWT bearer token with claims.** The token itself is a signed
+   JWT. The server validates the signature, extracts the claims
+   (`sub`, `email`, `iss`, custom claims for team / project / etc.),
+   and uses those without needing a separate database lookup.
+   Cleaner for organisations that already issue JWTs from an IdP.
+
+3. **Workload identity** (SPIFFE SVID, GCP service-account token,
+   Kubernetes ServiceAccount JWT). The bearer is whatever the
+   workload identity system issues; the server validates against
+   the identity provider. Right shape for CI agents and headless
+   services where there's no human user.
+
+In all three patterns, the **identity is decided by the server**,
+not by the client. The Denyx client is a dumb event emitter; it
+cannot lie about its identity even in principle, because it
+doesn't know its own identity in the first place — the only
+self-description it has is whatever the operator put in
+`DENYX_AUTH_TOKEN`.
+
+#### Why no `agent_id` field in the event?
+
+Three reasons the v1 spec doesn't include a per-event identity
+field:
+
+1. **Bearer-token identity is already in the request.** Adding a
+   field to the body would duplicate information the HTTP layer
+   already carries, and create the risk of the two disagreeing
+   (a malicious client putting a different `agent_id` than its
+   token is bound to).
+2. **Server-side enrichment is more flexible.** A client-stamped
+   `agent_id` becomes load-bearing for the rest of time. Letting
+   the server derive identity from the token means the server
+   can change identity scoping (per-machine to per-user,
+   per-project to per-team, etc.) without coordinating a wire
+   change.
+3. **Local audit logs don't need it.** The default deployment
+   writes JSONL to disk on the same machine as the agent. There's
+   no identity question — the file IS the per-machine record.
+   Adding identity fields just to satisfy the centralised case
+   is overhead the standalone case doesn't need.
+
+#### v2 candidate: optional client-stamped identity
+
+A future v2 protocol extension could add an optional top-level
+`agent_id` (or `client_id`) field that the client populates from
+an env var (`DENYX_AGENT_ID` or similar). This would make the
+event body self-describing for use cases where the server can't
+or doesn't want to do token-to-identity mapping (forensic
+ingest, multi-tenant log services, etc.). It is **not in v1**;
+servers built today should plan for token-based mapping.
+
+If you need client-stamped identity *today* without waiting for
+v2: a simple proxy in front of the audit endpoint can inject the
+identity into the event body based on the request's bearer
+token. Decorate-then-store is a common ingest pattern and works
+with any v1-conforming Denyx client unchanged.
+
 ### Capability-specific `detail` shape
 
 The `detail` object is structured per-capability. Current shapes:
