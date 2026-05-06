@@ -588,12 +588,25 @@ mod tests {
 
     #[test]
     fn redaction_snapshot_includes_hex() {
+        // Use ASCII bytes whose hex representation contains letters
+        // (a-f) so hex_lower and hex_upper differ. The earlier
+        // version used "ABCD" → "41424344" which is digits-only:
+        // hex_lower and hex_upper are identical, and a mutation
+        // that made hex_upper return an empty string passed
+        // undetected. Mutation testing surfaced the gap.
+        // 'j'=0x6a, 'k'=0x6b, 'l'=0x6c, 'm'=0x6d → hex digits a-d
+        // appear in the encoding.
         let r = TaintRegistry::default();
-        r.add("ABCD");
+        r.add("jklm");
         let snap = r.redaction_snapshot();
-        // 'A'=0x41, 'B'=0x42, 'C'=0x43, 'D'=0x44.
-        assert!(snap.iter().any(|s| s == "41424344"));
-        assert!(snap.iter().any(|s| *s == "41424344".to_uppercase()));
+        assert!(
+            snap.iter().any(|s| s == "6a6b6c6d"),
+            "snapshot should contain hex_lower form: {snap:?}"
+        );
+        assert!(
+            snap.iter().any(|s| s == "6A6B6C6D"),
+            "snapshot should contain hex_upper form (distinct from lower): {snap:?}"
+        );
     }
 
     #[test]
