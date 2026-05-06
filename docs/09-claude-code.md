@@ -76,22 +76,103 @@ Once configured, Claude Code sees these tools (all prefixed
   — same.
 - `mcp__denyx__denyx_env_read` — same.
 
-### Restrict Claude Code to only the Denyx tools
+### Disable Claude Code's built-in effecting tools (REQUIRED)
 
-If you want a hardened setup where Claude Code can *only* affect the
-system through Denyx (no built-in `Bash`, no built-in `Edit`), launch it
-with `--tools` cleared and `--allowedTools` restricted:
+**Wiring `denyx-mcp` is not enough by itself.** Claude Code ships
+with built-in `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`,
+`WebFetch`, `WebSearch` (and `Monitor`, `NotebookEdit`,
+`PowerShell`) tools that touch the filesystem, network, and shell
+**directly** — they do NOT go through any MCP server. If you only
+add the `mcpServers` block above and leave the built-ins enabled,
+the model will see two paths to read a file (`Read` vs.
+`mcp__denyx__denyx_fs_read`) and pick the cheaper, ungated one.
+Net result: Denyx is installed but the policy gate never fires.
+You have a placebo sandbox.
 
-```sh
-claude \
-  --mcp-config '{"mcpServers":{"denyx":{"command":"denyx-mcp","args":["--policy","/path/to/denyx.toml"]}}}' \
-  --tools "" \
-  --allowedTools "mcp__denyx__denyx_run,mcp__denyx__denyx_fs_read,mcp__denyx__denyx_fs_write,mcp__denyx__denyx_subprocess_exec,mcp__denyx__denyx_net_http_get,mcp__denyx__denyx_env_read"
+To actually enforce the policy, write
+`./.claude/settings.json` in your project root (create the
+`.claude/` directory if it doesn't exist) with a `permissions.deny`
+list that blocks every effecting built-in:
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Monitor",
+      "NotebookEdit"
+    ]
+  }
+}
 ```
 
-Now Claude Code's *only* path to side-effects is through Denyx. Every
-fs/net/subprocess/env call goes through the policy gate and lands in the
-audit log.
+Add `"PowerShell"` on Windows. The bare tool name (e.g. `"Bash"`,
+not `"Bash(*)"`) means *"deny every invocation of this tool."*
+Deny rules always win over allow rules in Claude Code's
+permission system, so this is hard-deny. Restart Claude Code and
+the model now has exactly one path to side-effects: through the
+`mcp__denyx__*` tools, which all go through the policy gate.
+
+**This is project-local** — `./.claude/settings.json` only affects
+sessions started in this directory. Other projects on the same
+machine are unaffected.
+
+### Add Claude Code's memory files to the policy
+
+Disabling `Read`/`Write`/`Edit` blocks the model's natural way of
+updating its own memory (`./CLAUDE.md`, `./.claude/CLAUDE.md`).
+Once the lockdown is in place, the model has to use Denyx's
+`denyx_fs_*` tools for memory updates — which means those paths
+must be in the policy's `read_allow`/`write_allow`. Append to
+`[filesystem]` in `denyx.toml`:
+
+```toml
+[filesystem]
+# ... existing read_allow / write_allow ...
+read_allow  = [..., "./CLAUDE.md", "./.claude/CLAUDE.md"]
+write_allow = [..., "./CLAUDE.md", "./.claude/CLAUDE.md"]
+```
+
+Memory updates now go through the policy gate and land in the
+audit log alongside every other operation. **Don't** add
+`./.claude/settings.json`, `./.mcp.json`, or `./denyx.toml`
+itself to `write_allow` — those files control whether the
+lockdown is in effect, and an agent that can rewrite them can
+disable Denyx mid-session. The runtime's self-writable guard
+catches `denyx.toml`; the others stay write-blocked because the
+host-level deny is the only path to them, and the deny blocks.
+
+For Claude Code's auto-memory at
+`~/.claude/projects/<encoded-project>/memory/`: that's outside
+the project tree. If you want it gated, add the specific
+encoded-project path under that directory to
+`read_allow`/`write_allow`. Avoid the broad `~/.claude/projects/**`
+glob — it lets one project's agent overwrite another project's
+memory.
+
+### Why this works (and why the alternative doesn't)
+
+The critical property: the model's tool-selection isn't
+adversarial, it's *opportunistic*. Given two paths to read a
+file, it picks the one that looks more like the work it
+remembers from training data. `Read` is far more familiar to
+Claude than `mcp__denyx__denyx_fs_read`, so without a deny rule
+the model will reach for `Read` every time. The deny rule
+removes the choice; from there the model uses Denyx's tools
+because they're the only ones available.
+
+The earlier `--tools ""` + `--allowedTools` CLI-flag approach
+also works for one-off launches but doesn't persist into a
+project — every `claude` invocation needs the same flags.
+`.claude/settings.json` is the project-local equivalent and the
+shape Claude Code reads on every session start in that directory.
 
 ### Audit log
 

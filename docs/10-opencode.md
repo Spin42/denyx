@@ -88,17 +88,119 @@ Same as the Claude Code integration — see
 for the list. The only naming difference is the host's namespace
 prefix.
 
-## Restricting opencode to Denyx-only
+## Disable opencode's built-in effecting tools (REQUIRED)
 
-opencode has a notion of allowed tools per workspace. To force every
-side effect through Denyx, disable opencode's built-in `Bash`, `Read`,
-`Write`, `Edit` and similar tools and explicitly allow only the Denyx
-tools. The exact configuration syntax depends on the opencode version
-— check its `tools` or `allowedTools` settings.
+**Wiring `denyx-mcp` is not enough by itself.** opencode ships
+with built-in `bash`, `read`, `write`, `edit`, `glob`, `grep`,
+`webfetch`, `websearch` tools that touch the filesystem, network,
+and shell **directly** — they do NOT go through any MCP server.
+If you only add the `mcp` block above and leave the built-ins
+enabled, the model will see two paths to read a file (`read` vs.
+`denyx__denyx_fs_read`) and pick the cheaper, ungated one. Net
+result: Denyx is installed but the policy gate never fires. You
+have a placebo sandbox.
 
-The principle: opencode must not have a path to side-effects that
-bypasses `denyx-mcp`. If it has a built-in `Bash` tool, that tool is
-not policy-gated, and the model can call it directly.
+To actually enforce the policy, add a `tools` block to the same
+`./opencode.json` you wrote above, setting every built-in
+effecting tool to `false`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "tools": {
+    "bash": false,
+    "read": false,
+    "write": false,
+    "edit": false,
+    "glob": false,
+    "grep": false,
+    "webfetch": false,
+    "websearch": false
+  },
+  "mcp": {
+    "denyx": {
+      "type": "local",
+      "command": [
+        "denyx-mcp",
+        "--policy", "/absolute/path/to/your/denyx.toml",
+        "--audit-log", "/absolute/path/to/audit.jsonl"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+`tools: false` removes the built-in entirely — the model never
+sees it in its tool list. Restart opencode and the model now has
+exactly one path to side-effects: through the `denyx__*` tools,
+which all go through the policy gate.
+
+**This is project-local** — `./opencode.json` only affects
+sessions started in this directory. Other projects on the same
+machine are unaffected. If you have a global
+`~/.config/opencode/opencode.json` with built-ins enabled, that
+global config is unchanged; opencode merges the project-local
+shape over it for sessions in this directory.
+
+### Defence-in-depth: also use the `permission` block
+
+If you want a belt-and-braces shape that survives opencode adding
+new built-in tools in a future version (which `tools: { …: false }`
+would silently miss), combine the explicit `tools` denies with a
+`permission` wildcard:
+
+```json
+{
+  "permission": {
+    "*": "deny",
+    "denyx*": "allow"
+  },
+  "tools": { … as above … },
+  "mcp": { … }
+}
+```
+
+`permission` wildcards match against the underlying tool name, so
+`denyx*` allows all Denyx-prefixed MCP tools and `*` denies
+anything else — including any future built-in opencode adds in a
+version bump.
+
+## Add opencode's memory files to the policy
+
+Disabling `read`/`write`/`edit` blocks the model's natural way of
+updating its own memory (`./AGENTS.md`). Once the lockdown is in
+place, the model has to use Denyx's `denyx_fs_*` tools for memory
+updates — which means those paths must be in the policy's
+`read_allow`/`write_allow`. Append to `[filesystem]` in
+`denyx.toml`:
+
+```toml
+[filesystem]
+# ... existing read_allow / write_allow ...
+read_allow  = [..., "./AGENTS.md"]
+write_allow = [..., "./AGENTS.md"]
+```
+
+Memory updates now go through the policy gate and land in the
+audit log alongside every other operation. **Don't** add
+`./opencode.json` or `./denyx.toml` itself to `write_allow` —
+those files control whether the lockdown is in effect, and an
+agent that can rewrite them can disable Denyx mid-session. The
+runtime's self-writable guard catches `denyx.toml`; `opencode.json`
+stays write-blocked because the host-level `tools: { write: false }`
+is the only path to it, and that path is closed.
+
+## Why this works (and why the alternative doesn't)
+
+The critical property: the model's tool-selection isn't
+adversarial, it's *opportunistic*. Given two paths to read a
+file, it picks the one that looks more like the work it
+remembers from training data. `read` is far more familiar than
+`denyx__denyx_fs_read`, so without `tools: { read: false }` the
+model will reach for `read` every time. Disabling the built-in
+removes the choice; from there the model uses Denyx's tools
+because they're the only ones available.
 
 ## Local-executor relay (the agentic stack)
 
