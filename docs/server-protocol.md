@@ -176,6 +176,96 @@ error: *"policy fetch from `<url>` returned an empty body. An
 empty TOML parses to a default-deny policy, which is almost
 certainly not what the operator intended. Refusing to start."*
 
+### Which policy to serve — the server's routing model
+
+Mirroring the audit-event identity question: when 50 developers
+all run `denyx-mcp` with the same `DENYX_POLICY_URL`, how does the
+server decide which TOML to send back?
+
+**v1 protocol: the server decides, using URL + bearer token in
+whatever combination it likes.** The Denyx client passes no query
+parameters, no path parameters, no body, no agent-id header — just
+`GET <url>` with optional `Bearer <token>`. So the server has
+exactly two information sources for routing:
+
+1. The URL the client hit (host, path, query string).
+2. The bearer token in the `Authorization` header.
+
+Four practical patterns, in rough order of operational simplicity:
+
+#### Pattern 1 — One URL, one policy, one token for everyone
+
+`https://denyx.example.com/policy` returns the same TOML to
+every caller. The token (if any) is purely for access control —
+"is this request allowed to fetch the org policy at all?" —
+not for routing.
+
+**Use when:** one global policy applies to everyone in the org;
+the only enforcement-level distinction is "Denyx-gated
+or not." Smallest deployments. Maximally simple server.
+
+#### Pattern 2 — One URL, per-consumer token (server-side token-to-policy mapping)
+
+Every client hits the same `https://denyx.example.com/policy`
+endpoint, but each developer / machine / project gets a unique
+bearer token. The server's database maps `token → policy_id`
+and serves the matching TOML.
+
+**Use when:** different consumers need different policies (a
+junior dev gets a tighter policy than a senior dev; CI gets
+tighter than human; per-team baselines). The token is already
+per-consumer for audit-identity reasons (see audit endpoint
+above), so reusing it for policy routing is "free" — no new
+infrastructure.
+
+This is the natural shape for most production deployments and
+the symmetric counterpart to the audit-identity pattern. Same
+token database powers both endpoints.
+
+#### Pattern 3 — Per-consumer URL (URL itself is the routing key)
+
+Each developer / machine / project gets its own
+`DENYX_POLICY_URL` pointing at a unique endpoint:
+`https://denyx.example.com/policies/team-platform/dev-machine-42`.
+The server maps URL paths to policies (often as a static file
+tree behind a CDN); the token is just for access control.
+
+**Use when:** the server is intentionally dumb (a static-file
+webserver, a CDN, an S3 bucket with signed URLs). No
+policy-routing logic on the server side; the URL distribution
+mechanism is what does the routing.
+
+**Trade-off:** URLs proliferate. If you have 50 developers, you
+have 50 `DENYX_POLICY_URL` values to distribute. Combine with
+direnv / 1Password Shell plugin / your existing
+secret-distribution tool to keep this manageable.
+
+#### Pattern 4 — Hybrid (URL = scope, token = instance)
+
+`https://denyx.example.com/policies/<team>` keeps a per-team
+scope at the URL level; the bearer token within that team
+identifies the specific developer / machine. Server combines
+both signals.
+
+**Use when:** you want clean separation between *what kind of
+policy you get* (URL = team) and *who you are* (token =
+identity). Audit traces are clearer because the URL alone tells
+you the policy version's lineage.
+
+### A note on the symmetry with audit
+
+Both endpoints work the same way: **client passes a URL and an
+optional bearer token; server decides what to do with them**. The
+audit-identity discussion above maps directly onto policy
+routing — the same token database that resolves
+`token → user@example.com` for audit can also resolve
+`token → policy_for_dev_machines.toml` for policy fetch.
+
+Most production deployments use Pattern 2 for both endpoints with
+the same token database backing both. That's the "Denyx for
+Teams" sweet spot: one token per consumer, one server, two
+endpoints, both routed by the same auth context.
+
 ### Response — error
 
 | Status | Client behaviour | When the server should use it |

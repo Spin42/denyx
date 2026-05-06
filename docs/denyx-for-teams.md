@@ -140,6 +140,20 @@ deliberately small (two HTTP endpoints) and you can stand it up in
 an afternoon, but it is real infrastructure with real
 operational cost.
 
+> **Routing note.** Just like the audit-identity case below, the
+> client passes the URL and the bearer token to the server and
+> nothing else. **The server decides which policy to return** by
+> looking at the URL, the token, or both. Four practical patterns:
+> *(1)* one URL + one token = one global policy for everyone;
+> *(2)* one URL + per-consumer token, server maps token → policy
+> in its database (most production deployments); *(3)* per-consumer
+> URL where the path itself is the routing key (good when the
+> server is a CDN or static-file host); *(4)* hybrid — URL =
+> team scope, token = individual within the team. Most teams
+> picking centralised policy *and* centralised audit use the same
+> token database to resolve both. Full discussion in
+> [server-protocol.md](server-protocol.md#which-policy-to-serve--the-servers-routing-model).
+
 #### Option C — Hybrid: server with in-repo fallback
 
 Both the in-repo TOML *and* a `DENYX_POLICY_URL` are configured.
