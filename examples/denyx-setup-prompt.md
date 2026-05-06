@@ -202,6 +202,19 @@ Q5. **Approval gates.**
 
 == Step 4: Wire the project-local MCP config ==
 
+First, create the audit-log directory and gitignore it:
+
+    mkdir -p ./.denyx
+    grep -q '^\.denyx/' ./.gitignore 2>/dev/null || echo '.denyx/' >> ./.gitignore
+
+The audit log captures every gated capability call (allowed AND
+denied) as one JSON Lines record. Without `--audit-log <path>` in
+the args below, denyx-mcp silently writes audit events to stderr,
+which the host (Claude Code / opencode) buries in its own MCP-
+server log directory — making the events hard to find and
+defeating the audit feature for most users. **Always pass
+`--audit-log` explicitly.**
+
 Build the MCP `command`/`args` based on the OS branch from Step 0
 and which install path resolved in 0.3. `<denyx-mcp>` below is
 either the bare command name (`denyx-mcp`, when installed via
@@ -210,26 +223,40 @@ either the bare command name (`denyx-mcp`, when installed via
 
   - Linux native:
       command: <denyx-mcp>
-      args:    ["--policy", "./denyx.toml", "--confirm-mode", "auto"]
+      args:    ["--policy",       "./denyx.toml",
+                "--audit-log",    "./.denyx/audit.jsonl",
+                "--confirm-mode", "auto"]
 
   - macOS (Lima):
       command: limactl
       args:    ["shell", "denyx", "<denyx-mcp>",
-                "--policy", "<absolute-policy-path>", "--confirm-mode", "auto"]
+                "--policy",       "<absolute-policy-path>",
+                "--audit-log",    "<absolute-audit-log-path>",
+                "--confirm-mode", "auto"]
       (Lima mirrors the host's $HOME at the same absolute path
-      inside the VM, so use the host's absolute path for the policy
-      file. The `<denyx-mcp>` here is whatever resolved inside the
-      VM in Step 0.3 — usually bare `denyx-mcp` since you'd
-      `cargo install` inside the VM.)
+      inside the VM, so use the host's absolute path for both the
+      policy and the audit log. The `<denyx-mcp>` here is whatever
+      resolved inside the VM in Step 0.3 — usually bare `denyx-mcp`
+      since you'd `cargo install` inside the VM.)
 
   - Windows (WSL2):
       command: wsl.exe
       args:    ["-d", "<distro>", "-e", "<denyx-mcp>",
-                "--policy", "<wsl-side-policy-path>", "--confirm-mode", "auto"]
-      (Ask the user which WSL distro hosts the denyx install. The
-      policy path is the WSL-side path; if the policy lives on a
-      Windows drive, use `/mnt/c/...`. `<denyx-mcp>` is whatever
-      resolved inside WSL in Step 0.3 — usually bare `denyx-mcp`.)
+                "--policy",       "<wsl-side-policy-path>",
+                "--audit-log",    "<wsl-side-audit-log-path>",
+                "--confirm-mode", "auto"]
+      (Ask the user which WSL distro hosts the denyx install. Both
+      paths are WSL-side; if the project lives on a Windows drive,
+      use `/mnt/c/...`. `<denyx-mcp>` is whatever resolved inside
+      WSL in Step 0.3 — usually bare `denyx-mcp`.)
+
+**Don't** add `./.denyx/audit.jsonl` to the policy's `write_allow`.
+denyx-mcp writes the audit log directly via its own filesystem
+access; it doesn't need to be in the policy. Keeping the audit
+log OUT of `write_allow` means the agent can't `fs.write` over
+its own audit trail to tamper with the record — defence-in-depth
+on top of the SHA-256 hash chain that denyx-mcp embeds in each
+audit line.
 
 Now write the config:
 
