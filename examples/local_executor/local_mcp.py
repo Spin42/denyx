@@ -234,7 +234,11 @@ class AegisMcpClient:
     protocol we expose upstream, just one layer down."""
 
     def __init__(self, mcp_bin: Path, policy: Path, audit_log: Path | None = None) -> None:
-        cmd = [str(mcp_bin), "--policy", str(policy)]
+        # The orchestrated harness uses auto-allow so the cloud
+        # orchestrator's delegate_to_local calls aren't blanket-denied
+        # by the new default `auto` mode (which falls back to deny when
+        # the client doesn't advertise MCP elicitation — we don't).
+        cmd = [str(mcp_bin), "--policy", str(policy), "--confirm-mode", "auto-allow"]
         if audit_log is not None:
             cmd += ["--audit-log", str(audit_log)]
         self.proc = subprocess.Popen(

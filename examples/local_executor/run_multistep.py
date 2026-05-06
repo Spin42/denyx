@@ -252,8 +252,12 @@ class McpClient:
                 f"aegis-mcp binary not found at {mcp_bin}. "
                 f"Run `cargo build --release -p aegis-mcp` first."
             )
+        # See run.py for the rationale: the eval harness uses
+        # auto-allow so requires_approval-listed capabilities aren't
+        # blanket-denied by the new default `auto` mode. The harness
+        # doesn't simulate a human-in-the-loop.
         self.proc = subprocess.Popen(
-            [str(mcp_bin), "--policy", str(policy)],
+            [str(mcp_bin), "--policy", str(policy), "--confirm-mode", "auto-allow"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
