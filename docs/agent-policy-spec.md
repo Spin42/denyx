@@ -106,8 +106,10 @@ inherits = "secure-defaults"            # opt into a built-in preset
 name = "fastapi_prod_readonly"          # short human label
 description = "Diagnose prod; cannot mutate anything"
 
-# Capabilities that prompt the human before firing. Empty by default;
-# any capability listed here triggers a synchronous confirm hook.
+# Capabilities that escalate to the caller for approval before each
+# call. Empty by default. The host decides how to present the
+# escalation (TTY prompt, MCP elicitation, desktop dialog) — see
+# "Approval escalation" below for the protocol-level requirements.
 requires_approval = ["fs.delete", "subprocess.exec"]
 
 # ----- Filesystem -----
@@ -428,11 +430,11 @@ view is exactly what the policy bind-mounts in; paths outside the
 view do not exist for the child no matter what obfuscation is
 used.
 
-### Confirm-per-call
+### Approval escalation (`requires_approval`)
 
 When a capability fires that's listed in `requires_approval`, the
-runtime invokes a synchronous human-confirm hook before executing.
-The hook receives:
+runtime MUST invoke a synchronous **approval hook** before executing
+the side effect. The hook receives:
 
 ```
 {
@@ -442,13 +444,42 @@ The hook receives:
 }
 ```
 
-The hook returns `Allow` or `Deny`. A `Deny` MUST be audit-logged with
-`status="denied"` and `reason="confirm hook denied"`.
+The hook returns `Allow` or `Deny`. A `Deny` MUST be audit-logged
+with `status="denied"` and a stable reason string the orchestrator
+can match on (the Aegis implementation uses `"confirm hook denied"`
+in error messages and tags MCP responses with `aegis_error_kind:
+"confirm_denied"`).
+
+How the hook surfaces the escalation depends on the host:
+
+- **Terminal CLI.** Prompt on stdin/stderr; read `y`/`n`. The user
+  is in the loop by construction.
+- **MCP-based host.** Use the MCP `elicitation/create` primitive
+  (protocol version `2025-06-18` and later). The server SHOULD send
+  `elicitation/create` upstream when the client advertised
+  `capabilities.elicitation` at handshake time, and MUST fall back
+  to a structured deny (with a stable error tag the orchestrator
+  can branch on) when the client did not advertise it. **Never
+  silently auto-allow** an approval-required capability when
+  elicitation is unavailable — that turns the field into a no-op.
+- **Desktop / IDE host.** Render a modal dialog; await the user's
+  click; map to Allow/Deny.
+- **Embedded library.** Expose a trait/interface for the embedder
+  to plug in.
+
+**Deployment caveat all MCP implementers must document.** When the
+end-user has put their MCP client in an auto-permission mode
+(Claude Code's `--permission-mode auto`, opencode's unattended
+mode, …), the client typically auto-responds to elicitation without
+surfacing it to the user. In that configuration the hook still
+returns Allow/Deny — but it returns the client's auto-policy, not a
+real human decision. Implementations SHOULD make this caveat
+explicit in their user-facing documentation.
 
 ### Audit log
 
 Every capability invocation — successful, denied at policy, or denied
-at confirm — emits a structured event. Recommended shape:
+at the approval hook — emits a structured event. Recommended shape:
 
 ```json
 {
@@ -492,10 +523,14 @@ To consume this spec from your own agent host:
      happened between dispatch and execution).
    - **Audit.** Emit an event for every check, allowed or denied.
      Include task/step/capability/status/detail.
-4. **Wire confirm-per-call.** When a capability listed in
-   `requires_approval` is about to fire, surface a UI prompt
-   (modal in IDEs, stderr-prompt in CLIs, MCP roundtrip in MCP-based
-   hosts) and wait for the answer synchronously.
+4. **Wire approval escalation.** When a capability listed in
+   `requires_approval` is about to fire, escalate to the caller and
+   wait synchronously for the answer. CLI hosts: prompt on stdin.
+   MCP hosts: send `elicitation/create` to the client when it
+   advertises the capability, fall back to a structured deny
+   (never silent auto-allow) otherwise. Desktop/IDE hosts: render
+   a modal. The escalation MUST happen before any side effect, and
+   a deny MUST be audit-logged.
 5. **Map your tool surface to capability names.** If your agent has a
    `Bash` tool, that's `subprocess.exec` — apply
    `[subprocess].allow_commands` to the leading token. If you have a
