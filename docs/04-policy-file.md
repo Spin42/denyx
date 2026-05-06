@@ -1,6 +1,7 @@
 # The Policy File
 
-> ← [Back to docs README](README.md)
+> ← [Back to docs README](README.md) · Implements
+> [Agent Policy Spec v1.0.0](agent-policy-spec.md)
 
 The policy file is **the** thing in Aegis. It declares what an agent run
 is allowed to do, and the runtime enforces it. This document covers:
@@ -22,7 +23,7 @@ is allowed to do, and the runtime enforces it. This document covers:
 - [Common patterns](#common-patterns)
 
 For the *portable* spec — the implementation-neutral wire format —
-see [agent-policy-spec.md](agent-policy-spec.md). This document is the
+see [agent-policy-spec.md](agent-policy-spec.md) (v1.0.0). This document is the
 how-to-use guide for the Aegis runtime specifically.
 
 ## Quick reference

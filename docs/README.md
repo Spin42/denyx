@@ -46,7 +46,7 @@ The index below lists everything in both groups in one place.
 
 | Doc                                                          | Purpose |
 |--------------------------------------------------------------|---------|
-| [agent-policy-spec](agent-policy-spec.md)                    | Portable spec for the policy format. Tool-agnostic — consumable by any agentic system. Use this if you're implementing the policy format in a non-Aegis runtime. |
+| [agent-policy-spec](agent-policy-spec.md)                    | Portable spec for the policy format, **v1.0.0**. Tool-agnostic — consumable by any agentic system. Use this if you're implementing the policy format in a non-Aegis runtime. |
 | [security-threat-model](security-threat-model.md)            | One-page review companion. What Aegis claims to defend against, what it explicitly does *not* defend against, the trust boundaries, the assumptions. **Read first if you're auditing with hostile intent.** |
 | [security-audit](security-audit.md)                          | The 16-surface bypass-assessment writeup that triggered the recent security work. Findings + fixes + verified-safe surfaces. |
 | [security-pentest-report](security-pentest-report.md)        | AI-driven (Sonnet + Opus) penetration test against the local-only IFC layer. Findings categorised Critical/High/Medium/Low, mitigations, closure verification. |

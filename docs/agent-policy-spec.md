@@ -1,6 +1,6 @@
 # Agent Policy Spec
 
-**Status:** Draft v1 — 2026-05-04
+**Status:** v1.0.0 — 2026-05-06
 
 A portable, tool-agnostic format for declaring what an autonomous (or
 semi-autonomous) coding agent is permitted to do in a given environment.
@@ -101,7 +101,7 @@ five; deviations should be documented as compatibility notes.
 
 ```toml
 # ----- Top-level metadata (optional but recommended) -----
-version = "1"                           # spec major version
+version = "1.0.0"                       # semver MAJOR.MINOR.PATCH; see "Compatibility and versioning" below
 inherits = "secure-defaults"            # opt into a built-in preset
 name = "fastapi_prod_readonly"          # short human label
 description = "Diagnose prod; cannot mutate anything"
@@ -120,16 +120,30 @@ requires_approval = ["fs.delete", "subprocess.exec"]
 read_allow   = ["src/**", "tests/**", "/tmp/agent_work/**"]
 write_allow  = ["src/**", "/tmp/agent_work/**"]
 delete_allow = ["/tmp/agent_work/**"]
+# Local-only reads: the agent may read these paths, but the value
+# never bubbles back to the host. See "Visibility classes" below.
+local_only_read = ["~/.config/myapp/token"]
 # Project-specific denies on top of the inherited preset's universal
 # denies (~/.aws, ~/.ssh, **/.env, **/secrets/**, etc.).
 deny = ["**/Gemfile.lock"]
 
 # ----- Network -----
 [network]
-http_get_allow = ["api.github.com", "*.npmjs.org"]
+# One allow list per HTTP verb. Empty list = the verb is denied at
+# the capability gate (no `net.http_post`, etc.).
+http_get_allow    = ["api.github.com", "*.npmjs.org"]
+http_post_allow   = ["api.openai.com"]
+http_put_allow    = []
+http_patch_allow  = []
+http_delete_allow = []
+# Local-only hosts: the agent may HTTP-call these, but the response
+# body is tainted at the runtime boundary and scrubbed before
+# crossing back to the host (e.g. an MCP tool result). See
+# "Visibility classes" below.
+local_only_hosts  = ["api.openai.com"]
 deny_hosts = ["evil-exfil.example.com"]
-# `secure-defaults` already lists 169.254.169.254. Add project-specific
-# IPs/CIDRs here.
+# `secure-defaults` already lists 169.254.169.254 and the RFC1918
+# / loopback ranges. Add project-specific IPs/CIDRs here.
 deny_ips = []
 # Per-call HTTP timeout. Defaults to 30 seconds when unset. Applies
 # uniformly to every `net.http_*` verb. Tighten this to keep an
@@ -139,9 +153,13 @@ timeout_seconds = 30
 # ----- Environment -----
 [environment]
 # Read named env vars only. Default-deny: a script can NOT enumerate.
-# secure-defaults already denies AWS_*, OPENAI_API_KEY, GITHUB_TOKEN,
-# etc.; add only project-specific keys.
 allow_vars = ["USER", "HOME", "PATH", "GITHUB_REPOSITORY"]
+# Local-only vars: the agent may read the value, but it never bubbles
+# back. See "Visibility classes" below. secure-defaults already
+# denies AWS_*, OPENAI_API_KEY, GITHUB_TOKEN, etc. via deny_vars.
+local_only_vars = ["OPENAI_API_KEY"]
+# Belt-and-suspenders deny that wins over allow / local-only.
+deny_vars = ["AWS_SECRET_ACCESS_KEY"]
 
 # ----- Subprocess -----
 [subprocess]
@@ -149,12 +167,37 @@ allow_vars = ["USER", "HOME", "PATH", "GITHUB_REPOSITORY"]
 # secure-defaults' deny_commands already covers rm/sudo/ssh/curl/
 # kubectl/etc. — list only project-specific allows here.
 allow_commands = ["git", "npm", "pytest", "ruff", "black"]
+# Local-only commands: stdout/stderr from these processes is tainted
+# at the runtime boundary. See "Visibility classes" below.
+local_only_commands = []
+# Belt-and-suspenders deny on top of the inherited preset.
+deny_commands = []
+# Opt-in OS-level isolation backend. "none" (default): subprocesses
+# run as regular processes inheriting the (filtered) parent env.
+# "bwrap": Linux-only; each call runs in a fresh namespaced
+# bind-mount jail derived from the policy. Implementations MAY
+# extend with platform-specific backends; the spec only mandates
+# that an unknown value is rejected at load.
+sandbox = "none"
 
 # Per-command argument denylist (basename → forbidden patterns,
 # substring-match against joined argv[1..]).
 [subprocess.deny_args]
 git = ["push --force", "reset --hard", "clean -fd"]
 npm = ["publish"]
+
+# ----- Runtime caps (optional) -----
+[runtime]
+# Wall-clock cap, in seconds, per script invocation. Checked at
+# every effecting capability call: the next call after the deadline
+# fails with a typed runtime-limit error before the side effect
+# runs. Pure CPU loops are NOT caught (run inside a container if
+# you need that).
+max_seconds = 30
+# Maximum interpreter call-stack depth. Defends against recursion
+# bombs. Implementation defaults vary; absent ⇒ implementation
+# default.
+max_callstack_size = 256
 
 # ----- Host tools (optional) -----
 [tools]
@@ -220,6 +263,73 @@ The canonical capability names are:
 Implementations may extend with their own capabilities (e.g.
 `git.commit`, `git.push`, `pkg.install`) but should namespace them and
 document the additions.
+
+### Visibility classes
+
+Every resource (a path, a host, an env var name, a command) is in
+exactly one of three classes:
+
+| Class             | Read / use? | Value crosses runtime boundary? | Typical use                                           |
+|-------------------|-------------|----------------------------------|-------------------------------------------------------|
+| **forbidden**     | no          | (read fails)                     | secrets, prod creds, `~/.aws`, `/etc/passwd`         |
+| **local-only**    | yes         | tainted; never bubbles up        | API keys the agent needs to call a service           |
+| **public**        | yes         | plain                            | normal source code, dev env vars                     |
+
+The class is determined by which list contains the resource:
+
+- **forbidden** — appears in the action's `deny` / `deny_*` list (deny wins over every allow).
+- **local-only** — appears in the action's `local_only_*` list and not in any `deny`.
+- **public** — appears in the action's plain allow list (`read_allow`, `http_get_allow`, `allow_vars`, `allow_commands`) and not in any `deny`.
+- **forbidden** (the default) — appears in none of the above.
+
+Per resource type, the local-only field name is:
+
+- filesystem: `local_only_read`
+- network: `local_only_hosts`
+- environment: `local_only_vars`
+- subprocess: `local_only_commands` (stdout/stderr of the child are tainted)
+
+Implementations MUST treat `local_only_*` values as tainted at the
+runtime output boundary: printed text, audit-event payloads, MCP
+tool results, error messages must be scrubbed (or refused outright)
+before they cross back to the calling host. See "Information-flow
+guarantees and limits" below for the precise contract.
+
+### Information-flow guarantees and limits
+
+The local-only class is a **best-effort** information-flow control
+layer. The spec mandates the *enforcement points* (every output
+boundary the runtime emits to) but does not mandate a particular
+algorithm — different implementations may catch different
+transformations.
+
+A v1-conformant implementation MUST, at minimum:
+
+- Scrub the original byte sequence wherever it appears in any
+  output the runtime emits.
+- Refuse outbound effects (writes, subprocess calls to non-local-
+  only commands, HTTP calls to non-local-only hosts) whose string
+  arguments carry the original byte sequence.
+
+A v1-conformant implementation SHOULD ALSO catch the common
+mechanical transformations: byte-reverse, hex (lower + upper),
+single-byte XOR with each key (and its hex form), base64
+(standard + url-safe, with and without padding), and ROT-N for
+N in 1..25.
+
+A v1-conformant implementation is NOT REQUIRED to catch:
+
+- Cryptographic transforms with a script-generated key (AES, RC4,
+  custom invertible permutations) — the runtime doesn't know the
+  key.
+- Multi-byte XOR keys.
+- Pure side channels (`len(secret)`, comparison oracles, substring-
+  containment guesses).
+
+These limits MUST be documented in the implementation's user-facing
+documentation. The honest framing is: local-only defeats *accidental*
+leakage and prompt-injection-grade exfiltration, not a deliberate
+adversary running their own crypto.
 
 ## Inheritance and presets
 
@@ -596,24 +706,47 @@ agent host implementing the spec.
 
 ## Compatibility and versioning
 
-The spec uses a single `version = "..."` field with semver-major
-semantics:
+The spec uses a single `version = "MAJOR.MINOR.PATCH"` field
+following [Semantic Versioning 2.0.0](https://semver.org). Each
+component has a precise meaning at the schema level:
 
-- A v1 file MUST be readable by any v1.x implementation.
-- New optional sections may be added in minor revisions; consumers
-  encountering unknown sections SHOULD ignore them (forward
-  compatibility).
-- Removing or restructuring a section requires a major bump.
-- Implementations SHOULD declare which version they support; an
-  implementation reading a `version = "2"` file when it implements
-  only v1 SHOULD reject the file with a clear error.
+- **MAJOR** — incompatible schema changes. Removing or restructuring
+  a section, renaming a field, changing a field's type, or
+  tightening a constraint that an existing v1 file might violate.
+  Implementations that support v1 MUST reject a `version = "2.x.y"`
+  file with a clear error.
+- **MINOR** — additive, backward-compatible changes. New optional
+  sections, new optional fields on existing sections, new
+  capability names, new preset names. A v1.0 implementation reading
+  a v1.1 file MUST accept it: it MUST ignore unknown sections and
+  unknown fields, and MUST treat unknown capability names declared
+  in `requires_approval` as opaque (escalate to the caller as if
+  they were known).
+- **PATCH** — clarifications, typo fixes, doc rewrites. No
+  observable behavioural change for any conforming implementation.
+
+What this means for implementers:
+
+- Match on MAJOR. `version = "1.0.0"`, `"1.4.7"`, `"1.99.0"` all
+  parse and run on a v1 implementation.
+- Reject on MAJOR mismatch. A v1 implementation MUST refuse a
+  v2.x.y file at load with an actionable error.
+- Tolerate the unknown. Encountering a section, field, or capability
+  name your implementation doesn't know is NOT a load error if the
+  MAJOR matches; it's a silent skip plus, ideally, a one-line
+  warning the operator can grep for.
+
+The `version` field itself is OPTIONAL. A file without `version`
+parses as if it were the current major's latest minor — useful for
+hand-edited dev policies. Production policies SHOULD pin a specific
+`MAJOR.MINOR.PATCH`.
 
 A compatibility profile in your README or product docs is encouraged:
 
-> `my-agent-host` supports Agent Policy Spec v1, with the following
-> notes: (1) `subprocess.deny_args` is parsed but not enforced
-> (Slice 2 follow-up). (2) IP literals are matched as-is; CIDR support
-> is reserved for v1.1.
+> `my-agent-host` supports Agent Policy Spec v1.0, with the
+> following notes: (1) `subprocess.deny_args` is parsed but not
+> enforced (Slice 2 follow-up). (2) The `bwrap` sandbox backend is
+> Linux-only; macOS / Windows fall back to the language-level gate.
 
 ## Aegis as the reference implementation
 
@@ -627,13 +760,17 @@ Aegis (this repository) is one runtime that implements this spec:
   server (`aegis-mcp --policy ... <stdio>`). All three reuse the
   same `host::Runner` enforcement core.
 - The MCP server speaks newline-delimited JSON-RPC 2.0 on stdio and
-  exposes eight tools: a primary `aegis_run(script)` for full
-  Starlark programs, plus per-capability sugar (`aegis_fs_read`,
+  exposes nine tools: a primary `aegis_run(script)` for full
+  Starlark programs, per-capability sugar (`aegis_fs_read`,
   `aegis_fs_write`, `aegis_fs_delete`, `aegis_subprocess_exec`,
-  `aegis_net_http_get`, `aegis_net_http_post`, `aegis_env_read`).
+  `aegis_net_http_get`, `aegis_net_http_post`, `aegis_env_read`),
+  and a read-only oracle `aegis_tool_routing(name?)` that returns
+  the `[tools.X]` records (capabilities, backend_url, backend_method,
+  description, allowed flag) so a calling host can consult the
+  policy's tool surface without re-parsing the TOML.
   Hosts that prefer one MCP call per discrete action use the sugar;
   hosts whose agents naturally compose multi-step Starlark prefer
-  `aegis_run`. Both surfaces share the same enforcement code path.
+  `aegis_run`. All surfaces share the same enforcement code path.
 
 ### Enforcement coverage in Aegis today
 

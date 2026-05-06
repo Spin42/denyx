@@ -252,7 +252,7 @@ filename:
 
 | Doc                                                       | What's in it |
 |-----------------------------------------------------------|--------------|
-| [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec. Implement in non-Aegis runtimes. |
+| [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec, **v1.0.0**. Tool-agnostic; implement in non-Aegis runtimes. |
 | [security-threat-model](docs/security-threat-model.md)    | One-page review companion. What Aegis claims to defend; what it explicitly does *not*. Read first if you're auditing. |
 | [security-audit](docs/security-audit.md)                  | The 16-surface bypass-assessment writeup. Findings + fixes. |
 | [security-pentest-report](docs/security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). 2 High findings, both remediated. |
