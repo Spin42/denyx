@@ -3,6 +3,22 @@
 **A safe-by-design local tooling layer for agentic AI, with deliberate
 control over permissions through a policy file.**
 
+[![CI](https://github.com/mlainez/aegis/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mlainez/aegis/actions/workflows/ci.yml)
+[![Mutation testing (weekly)](https://github.com/mlainez/aegis/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/mlainez/aegis/actions/workflows/mutants.yml)
+[![Coverage ≥80%](https://img.shields.io/badge/coverage-%E2%89%A580%25-blue?logo=rust)](https://github.com/mlainez/aegis/actions/workflows/ci.yml)
+[![Lints: clippy -D warnings](https://img.shields.io/badge/clippy-%2DD_warnings-blue?logo=rust)](https://github.com/mlainez/aegis/actions/workflows/ci.yml)
+
+> Badge meaning, since "passing" is doing a lot of work in those
+> labels: **CI** is the per-PR build + test + fmt + clippy +
+> 80%-line-coverage gate (everything green = the whole gate passed).
+> **Mutation testing** is a weekly cron — the badge reflects whether
+> the most recent scheduled run completed, not the kill rate (the
+> kill rate lives in [docs/mutation-testing.md](docs/mutation-testing.md)
+> and the workflow's Step Summary). **Coverage ≥80%** and **clippy
+> -D warnings** are static labels for the policies the CI workflow
+> enforces — there's no third-party code-quality grade service wired
+> in; clippy with `-D warnings` is what we actually fail PRs on.
+
 Aegis embeds Starlark (Python's safe subset), exposes a small set of
 effecting builtins (`fs.read`, `net.http_get`, `subprocess.exec`,
 `env.read`, ...), and enforces a TOML-declared policy at every call.
