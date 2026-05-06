@@ -19,7 +19,7 @@ pub const SECURE_DEFAULTS: &str = r#"
 # secret env var names, and the cloud metadata IP. User files extend
 # (concat) these lists; they cannot remove preset entries.
 
-confirm_per_call = [
+requires_approval = [
     "fs.delete",
     "subprocess.exec",
     "database.write",

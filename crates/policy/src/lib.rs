@@ -121,7 +121,7 @@ pub struct PolicyFile {
     #[serde(default, deserialize_with = "deserialize_tools")]
     pub tools: std::collections::BTreeMap<String, ToolRecord>,
     #[serde(default)]
-    pub confirm_per_call: Vec<String>,
+    pub requires_approval: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -622,7 +622,7 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
                 .or(base.runtime.max_callstack_size),
         },
         tools: merge_tools(base.tools, over.tools),
-        confirm_per_call: concat_dedup(base.confirm_per_call, over.confirm_per_call),
+        requires_approval: concat_dedup(base.requires_approval, over.requires_approval),
     }
 }
 
@@ -659,7 +659,7 @@ pub struct Policy {
     /// Single source of truth for what `check_function` permits.
     fn_derived: Vec<&'static str>,
     tools: std::collections::BTreeMap<String, ToolRecord>,
-    confirm_per_call: Vec<String>,
+    requires_approval: Vec<String>,
 }
 
 impl Policy {
@@ -716,12 +716,34 @@ impl Policy {
             SandboxMode::None => Ok(()),
             SandboxMode::Bwrap => {
                 if which_on_path("bwrap").is_none() {
+                    // Tailor the hint to the running OS. The bwrap
+                    // binary itself is Linux-only; on macOS/Windows
+                    // the supported path is a Linux VM (Lima/WSL2)
+                    // with bwrap inside, not a native bwrap port.
+                    let hint = if cfg!(target_os = "macos") {
+                        "You're on macOS, where bwrap doesn't run natively. The \
+                         supported path is to run `aegis-mcp` inside a Lima VM \
+                         that has bubblewrap installed — see \
+                         docs/macos-deployment.md for the full guide and a \
+                         ready-made Lima template at \
+                         examples/macos/aegis.lima.yaml. \
+                         To opt out of OS-level isolation entirely, set \
+                         `sandbox = \"none\"`."
+                    } else if cfg!(target_os = "windows") {
+                        "You're on Windows, where bwrap doesn't run natively. The \
+                         supported path is to run `aegis-mcp` inside WSL2 \
+                         (`wsl --install -d Ubuntu-24.04`) and install \
+                         bubblewrap there — see docs/windows-deployment.md for \
+                         the full guide. To opt out of OS-level isolation \
+                         entirely, set `sandbox = \"none\"`."
+                    } else {
+                        "Install bubblewrap (Debian/Ubuntu: `apt install \
+                         bubblewrap`; Fedora: `dnf install bubblewrap`; Arch: \
+                         `pacman -S bubblewrap`) or set `sandbox = \"none\"`."
+                    };
                     anyhow::bail!(
                         "policy sets `[subprocess].sandbox = \"bwrap\"` but the \
-                         `bwrap` binary is not on PATH. Install bubblewrap \
-                         (Debian/Ubuntu: `apt install bubblewrap`; Fedora: \
-                         `dnf install bubblewrap`) or set `sandbox = \"none\"`. \
-                         Linux-only for v1; macOS/Windows backends are future work."
+                         `bwrap` binary is not on PATH. {hint}"
                     );
                 }
                 Ok(())
@@ -847,7 +869,7 @@ impl Policy {
         let subprocess_deny_args = file.subprocess.deny_args.clone();
         let fn_derived = derive_capabilities(&file);
         let tools = file.tools.clone();
-        let confirm_per_call = file.confirm_per_call.clone();
+        let requires_approval = file.requires_approval.clone();
         Ok(Self {
             file,
             root,
@@ -873,7 +895,7 @@ impl Policy {
             subprocess_deny_args,
             fn_derived,
             tools,
-            confirm_per_call,
+            requires_approval,
         })
     }
 
@@ -881,8 +903,8 @@ impl Policy {
         &self.root
     }
 
-    pub fn confirm_required(&self, capability: &str) -> bool {
-        self.confirm_per_call.iter().any(|c| c == capability)
+    pub fn requires_approval(&self, capability: &str) -> bool {
+        self.requires_approval.iter().any(|c| c == capability)
     }
 
     /// Look up `name` in `[tools]`. Returns the list of capabilities

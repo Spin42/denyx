@@ -346,9 +346,15 @@ The not-so-good:
   above). Treat it as "defense at two layers" — annoying when your
   task description happens to mention `/etc/passwd`, useful when the
   task is actually trying to read it.
-- Local-only redaction is substring-based; deliberate exfiltration via
-  obfuscation can defeat it. Defending against that requires real
-  information-flow tracking, which the MVP doesn't implement.
+- Local-only enforcement covers the documented set of practical
+  transforms (reverse, hex, single-byte XOR, hex(XOR), chunking)
+  plus arg-side denial at every outbound effect — the exfil probe
+  reports 0 LEAK / 3 WEAK_LEAK / 9 REDACTED. A determined adversary
+  bringing their own crypto (AES with a script-generated key) still
+  escapes; defeating that would require real value-level taint
+  propagation through the Starlark evaluator. See
+  [security-threat-model.md](security-threat-model.md) for the
+  honest scope.
 
 ## Where next
 

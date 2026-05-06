@@ -316,9 +316,9 @@ fn policy_show(args: PolicyTargetArgs) -> Result<(), CliError> {
         println!();
     }
 
-    if !file.confirm_per_call.is_empty() {
-        println!("[confirm_per_call]");
-        for cap in &file.confirm_per_call {
+    if !file.requires_approval.is_empty() {
+        println!("[requires_approval]");
+        for cap in &file.requires_approval {
             println!("  - {cap}");
         }
         println!();

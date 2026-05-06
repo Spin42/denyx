@@ -126,7 +126,7 @@ The exit codes:
 Edit your `aegis.toml`:
 
 ```toml
-confirm_per_call = ["fs.delete"]
+requires_approval = ["fs.delete"]
 
 [filesystem]
 delete_allow = ["/tmp/aegis_quickstart_*"]

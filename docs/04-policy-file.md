@@ -14,7 +14,7 @@ is allowed to do, and the runtime enforces it. This document covers:
   - [`[subprocess]`](#subprocess)
   - [`[runtime]`](#runtime)
   - [`[tools]`](#tools)
-  - [`confirm_per_call`](#confirm_per_call)
+  - [`requires_approval`](#requires_approval)
 - [Capabilities are derived, not declared](#capabilities-are-derived-not-declared)
 - [Inheritance and presets](#inheritance-and-presets)
 - [The three visibility levels](#the-three-visibility-levels)
@@ -34,10 +34,11 @@ inherits = "secure-defaults"        # baseline of universal denies
 name = "myproject dev"              # human label, free-form
 description = "agent profile for local development"
 
-confirm_per_call = [                # capabilities that prompt the user
-    "fs.delete",                    # before they fire (TTY confirm hook).
-    "subprocess.exec",
-]
+requires_approval = [               # capabilities that escalate to the
+    "fs.delete",                    # caller before each call. CLI: TTY
+    "subprocess.exec",              # prompt. MCP: elicitation if the
+]                                    # client supports it; otherwise
+                                     # auto-deny with a structured tag.
 
 [filesystem]
 read_allow      = ["src/**", "tests/**", "README.md"]
@@ -478,18 +479,79 @@ searxng/searxng`), Brave Search API, or Tavily.
 > enhancement could add `[tools.X].allow_hosts` if there's enough
 > demand for strict per-tool URL gating.
 
-### `confirm_per_call`
+### `requires_approval`
 
-Capabilities listed here trigger the host's `ConfirmHook` before each
-call:
+Capabilities listed here are *escalated to the caller* before each call.
+The list is independent of the resource allow-lists: a capability that's
+otherwise permitted by the policy still routes through the approval
+hook on every call.
 
 ```toml
-confirm_per_call = ["fs.delete", "subprocess.exec"]
+requires_approval = ["fs.delete", "subprocess.exec"]
 ```
 
-The `aegis run` CLI uses an interactive TTY prompt; the MCP server uses
-`AllowAllConfirm` (no UI surface to prompt through); embedders plug their
-own.
+What "escalated to the caller" means depends on the embedder:
+
+- **`aegis run` CLI** — interactive TTY prompt. The user sees a
+  one-line summary and types `y` / `n`. This is the only path with a
+  guaranteed real-human-in-the-loop today.
+- **`aegis-mcp --confirm-mode auto`** (default) — if the connecting
+  client advertises the MCP `elicitation` capability at handshake
+  time, the server sends a real `elicitation/create` request to the
+  client and blocks for the user's reply. If the client doesn't
+  advertise elicitation, the server falls back to `auto-deny` (next
+  bullet). See "Approval flow under MCP" below for the deployment
+  caveat.
+- **`aegis-mcp --confirm-mode auto-deny`** — every approval-required
+  call returns a tool result with `isError: true` and an
+  `aegis_error_kind: "confirm_denied"` tag. The orchestrator can
+  surface that to the user via its own UI, edit the policy, and
+  re-issue.
+- **`aegis-mcp --confirm-mode auto-allow`** — every approval-
+  required call passes. Use only for tests and demos. This defeats
+  the purpose of `requires_approval`.
+- **`aegis-mcp --confirm-mode elicit`** — force elicitation
+  regardless of client capability advertisement. If the client
+  doesn't actually implement elicitation, the request times out
+  (300 s) and the call denies safely.
+- **Embedded `aegis-host`** — the host implements the `ConfirmHook`
+  trait directly against its UI surface (a desktop app prompt, an
+  OAuth-style browser flow, whatever fits).
+
+#### Approval flow under MCP — what actually happens with each client
+
+The server-side primitive is correct: aegis-mcp's bidirectional
+dispatch sends `elicitation/create` upstream, blocks on the response,
+and maps it to Allow / Deny. **Whether the user actually sees the
+prompt is a property of the client, not the server.** Empirical
+findings as of 2026-05:
+
+| Client | `--permission-mode` | Advertises elicitation? | What happens |
+|--------|----------------------|------------------------|--------------|
+| `claude -p` (Sonnet/Opus, Claude Code 2.1.x) | `default` / `auto` / others | **No** | aegis-mcp's `auto` mode falls back to `auto-deny`. Tool returns `isError: true`, `aegis_error_kind: "confirm_denied"`. Agent surfaces the denial in its text response. The runtime correctly enforces the deny — no side effect happens. |
+| `claude` (interactive UI) | varies | TBD — verify in your version | If elicitation is advertised, the user gets a real prompt. If not, fallback to `auto-deny` and the orchestrator's own UX. |
+| `opencode` | unattended | TBD per version | Same shape. |
+
+**Take-away.** If you want a real per-call human prompt, today's
+realistic deployment is one of:
+
+1. **CLI** (`aegis run`) — when the user is at a terminal.
+2. **MCP `auto-deny` + orchestrator-handled retry** — the structured
+   `confirm_denied` tag gives the orchestrator everything it needs
+   to render its own approval UX and either edit the policy or
+   re-issue against a non-gated context. This is the most
+   broadly-deployed shape today.
+3. **MCP `elicit` with a client that supports elicitation** — the
+   protocol works end-to-end (Aegis ships integration tests that
+   prove this), but you have to verify your specific client
+   actually surfaces the prompt instead of auto-responding to it.
+
+Don't assume `requires_approval` plus an MCP server in `auto` mode
+gives you human-in-the-loop. **Auto mode is the user's explicit
+opt-out from being asked.** If the client doesn't advertise
+elicitation (most don't yet, in 2026), the prompt has nowhere to
+go, and aegis-mcp falls back to `auto-deny`, which is the safe
+behavior — but there is no user prompt anywhere in the loop.
 
 ## Capabilities are derived, not declared
 
@@ -636,28 +698,62 @@ print("response received")    # safe — no secret in the message
 ```
 
 Even if a script tried to leak the key — `print("key=" + key)` —
-the printed line crosses the runtime's output boundary and the substring
-scan replaces the key with `[REDACTED]` before the orchestrator sees it.
+the printed line crosses the runtime's output boundary and the
+scrub replaces the key with `[REDACTED]` before the orchestrator
+sees it.
 
-The redaction applies to:
+The enforcement has three layers, all in the runtime:
 
-- `outcome.printed` — the lines the agent host receives back from
-  `aegis run` or `aegis-mcp`.
-- Audit-event payloads — paths, URLs, argv, env-var names, error
-  messages — all redacted before reaching the audit sink.
-- The MCP `aegis_run` tool result, which is just `outcome.printed`
-  joined with newlines.
+1. **Output-boundary scrub.** Every `outcome.printed` line, every
+   audit-event payload field, every MCP `aegis_run` tool-result
+   string, and every error message is scanned. Each scan looks for
+   the original tainted bytes AND a documented set of mechanically-
+   derived sibling forms — byte-reverse, hex (lower + upper) of
+   original and reverse, XOR with each single-byte key, and the hex
+   encoding of every XOR result. Any match is replaced with
+   `[REDACTED]`.
+2. **Subsequence-chunking detection.** A script that prints the
+   secret one character at a time interleaved with cover text never
+   forms a substring match in any one line. The chunking pass walks
+   the joined printed output looking for the secret's characters
+   appearing in order with bounded gaps; if found, every line that
+   contributed a character is replaced with `[REDACTED]`.
+3. **Arg-side denial at outbound effects.** When the destination is
+   *not* local-only — `fs.write` to a public path, `fs.delete` to
+   any path, `subprocess.exec` of a non-local-only command,
+   `net.http_*` to a non-local-only host — every string argument
+   is scanned against the same transform set. A match means the
+   script is trying to push tainted bytes out through a public
+   sink: the call is **refused** with a typed Policy error (not
+   scrubbed on the way out). The matched transform label is
+   included in the audit-event payload so an operator can see
+   exactly how the script tried to disguise the value (e.g.
+   `xor_0x5a_hex_lower`).
 
-The taint is **transitively persistent**: read the secret, write it to
-a file, read it back, print → still redacted, because the secret bytes
-are still present as a substring in the printed string.
+The taint is **transitively persistent**: read the secret, write it
+to a local-only path, read it back, print → still redacted, because
+the readback registers as tainted on the new value too.
 
-The redaction is **substring-based and conservative**. It catches naive
-exfiltration. A model that XORs the key, base64-encodes it, or splits it
-across two `print()` calls bypasses the substring scan — that's
-deliberate adversarial behavior beyond the MVP's scope. The runtime-
-enforced rule still holds: a *prompt* alone cannot bypass the policy,
-because the policy is enforced in Rust, not by asking the model nicely.
+What this layer does NOT defend against (and the threat-model doc
+documents honestly):
+
+- Cryptographic transforms with a script-generated key (AES, RC4,
+  custom invertible permutation). The redactor doesn't know the
+  key, so the ciphertext doesn't match any pre-computed pattern.
+  An adversary determined to bring their own crypto can still
+  exfiltrate; closing this would require real value-level taint
+  propagation through the Starlark evaluator, which is intrusive
+  to the upstream `starlark-rust` crate.
+- Pure side channels: `print(len(secret))`,
+  `print(secret[0] == "s")`, `print("MNOP" in secret)`. Each
+  reveals at most O(log L) bits per query. Defending against
+  these would require forbidding `len()` / comparison / `in` on
+  tainted values, which would break every legitimate use of a
+  secret as a string.
+
+The runtime-enforced rule still holds: a *prompt* alone cannot
+bypass the policy, because the policy is enforced in Rust, not by
+asking the model nicely.
 
 ## How the runtime resolves a call
 
@@ -675,8 +771,11 @@ For any effecting capability, the resolution order is fixed:
    - `local_only_*`: permit, register taint
    - regular allow list: permit, plain
    - none of the above: reject (default-deny)
-4. **Confirm hook** (per-call): if the capability is in
-   `confirm_per_call`, prompt the operator. On deny, the call fails.
+4. **Approval hook** (per-call): if the capability is in
+   `requires_approval`, escalate to the caller. CLI prompts the
+   user on stdin; MCP server sends `elicitation/create` (when the
+   client supports it) or denies with a structured tag (when not).
+   On deny, the call fails.
 5. **Action**: do the read / write / fetch / exec.
 6. **Audit emit**: log the outcome (`Allowed` / `Errored` / `Denied`).
 

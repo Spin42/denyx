@@ -1,5 +1,5 @@
 //! Confirm-per-call hook: synchronous callback the host invokes before
-//! running a capability listed in `policy.confirm_per_call`.
+//! running a capability listed in `policy.requires_approval`.
 //!
 //! The CLI provides a TTY implementation (stderr prompt + stdin yes/no).
 //! Embedded integrators (Claude Code, opencode) implement this trait

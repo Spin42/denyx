@@ -108,7 +108,7 @@ description = "Diagnose prod; cannot mutate anything"
 
 # Capabilities that prompt the human before firing. Empty by default;
 # any capability listed here triggers a synchronous confirm hook.
-confirm_per_call = ["fs.delete", "subprocess.exec"]
+requires_approval = ["fs.delete", "subprocess.exec"]
 
 # ----- Filesystem -----
 [filesystem]
@@ -228,7 +228,7 @@ known-good baseline.
 Merge semantics: the preset is loaded as the base, the user file's
 fields are merged on top.
 
-- **List fields** (allow lists, deny lists, `confirm_per_call`)
+- **List fields** (allow lists, deny lists, `requires_approval`)
   **concatenate with dedup**. A user-file entry of the form `"!X"`
   *removes* `X` from the inherited list (gitignore-style negation);
   this is the supported override path. Negation of an entry that
@@ -430,7 +430,7 @@ used.
 
 ### Confirm-per-call
 
-When a capability fires that's listed in `confirm_per_call`, the
+When a capability fires that's listed in `requires_approval`, the
 runtime invokes a synchronous human-confirm hook before executing.
 The hook receives:
 
@@ -493,7 +493,7 @@ To consume this spec from your own agent host:
    - **Audit.** Emit an event for every check, allowed or denied.
      Include task/step/capability/status/detail.
 4. **Wire confirm-per-call.** When a capability listed in
-   `confirm_per_call` is about to fire, surface a UI prompt
+   `requires_approval` is about to fire, surface a UI prompt
    (modal in IDEs, stderr-prompt in CLIs, MCP roundtrip in MCP-based
    hosts) and wait for the answer synchronously.
 5. **Map your tool surface to capability names.** If your agent has a
@@ -621,7 +621,7 @@ The honest picture:
 | `[filesystem].local_only_read` / `[network].local_only_hosts` | ✅ enforced; values tainted at output boundary (printed, audit, MCP result) |
 | Derived capability set            | ✅ enforced (verifier + runtime); auto-derived from populated resource sections, no `[functions]` block |
 | `[tools]` short and long form     | ✅ enforced via Policy::check_tool; long form's backend_url / backend_method routing hints exposed via Policy::tool_routing for bridge layers |
-| `confirm_per_call`               | ✅ enforced via ConfirmHook; `aegis-mcp --confirm-mode {auto-allow,auto-deny}` selects behavior; auto-deny tags response with `aegis_error_kind: "confirm_denied"` for orchestrator branching |
+| `requires_approval`               | ✅ enforced via ConfirmHook; `aegis-mcp --confirm-mode {auto,elicit,auto-deny,auto-allow}` selects behavior. `auto` (default) sends MCP `elicitation/create` when the client advertises elicitation, otherwise falls back to `auto-deny`. `auto-deny` tags responses with `aegis_error_kind: "confirm_denied"` for orchestrator branching. |
 | Self-writable guard              | ✅ enforced at load — refuses any policy whose write_allow / delete_allow matches the policy file itself |
 | `inherits` (presets)             | ✅ resolved at load |
 

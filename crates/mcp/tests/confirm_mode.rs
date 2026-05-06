@@ -1,7 +1,7 @@
 //! Integration tests for `aegis-mcp --confirm-mode`.
 //!
 //! Spawns the compiled `aegis-mcp` binary, hands it a policy with
-//! `confirm_per_call = ["fs.write"]`, drives the JSON-RPC protocol
+//! `requires_approval = ["fs.write"]`, drives the JSON-RPC protocol
 //! enough to issue an `aegis_run` of a `fs.write` script, and
 //! asserts on the response shape:
 //!
@@ -91,7 +91,7 @@ fn auto_allow_lets_confirm_gated_call_through() {
     let abs = dir_for_writes.to_string_lossy().replace('\\', "/");
     let body = format!(
         r#"
-confirm_per_call = ["fs.write"]
+requires_approval = ["fs.write"]
 
 [filesystem]
 write_allow = ["{abs}/**"]
@@ -122,7 +122,7 @@ fn auto_deny_blocks_confirm_gated_call_with_tagged_error() {
     let abs = dir_for_writes.to_string_lossy().replace('\\', "/");
     let body = format!(
         r#"
-confirm_per_call = ["fs.write"]
+requires_approval = ["fs.write"]
 
 [filesystem]
 write_allow = ["{abs}/**"]

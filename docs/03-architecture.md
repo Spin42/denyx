@@ -198,16 +198,36 @@ documented in `docs/security-audit.md`.
 ### Confirm hook
 
 The `ConfirmHook` trait lets a host plug in interactive approval for
-capabilities listed in `[confirm_per_call]`. The CLI uses a TTY prompt
-when `aegis run` runs interactively, `AllowAllConfirm` when `--yes` is
-passed, and `DenyAllConfirm` when stdin/stderr aren't a TTY. The MCP
-server selects between `AllowAllConfirm` and `DenyAllConfirm` via the
-`--confirm-mode {auto-allow,auto-deny}` flag (default `auto-allow`).
-In `auto-deny`, a confirm-gated call returns a tool result with
-`isError: true` and `aegis_error_kind: "confirm_denied"`, naming the
-capability — the orchestrator can interpret that and prompt the user
-out-of-band before reissuing. In-process embedders that want real
-prompt UI should plug their own `ConfirmHook` implementation.
+capabilities listed in `requires_approval`. Four implementations ship:
+
+- **`TtyConfirm`** — used by `aegis run` interactively. Reads a
+  yes/no answer on stdin.
+- **`AllowAllConfirm`** — `aegis run --yes` and
+  `aegis-mcp --confirm-mode auto-allow`. Tests and demos only.
+- **`DenyAllConfirm`** — `aegis-mcp --confirm-mode auto-deny`,
+  and the fallback path of the `auto` mode when the client doesn't
+  advertise elicitation. Returns `isError: true` with
+  `aegis_error_kind: "confirm_denied"` so the orchestrator can
+  surface its own approval UX.
+- **`ElicitConfirm`** — `aegis-mcp --confirm-mode {auto, elicit}`.
+  Sends an MCP `elicitation/create` request to the connecting
+  client and blocks for the user's reply (timeout 300 s →
+  `Deny`). The bidirectional dispatch needed for this lives in
+  the MCP server's reader thread; see `crates/mcp/src/main.rs`.
+
+The default is `auto`: capability negotiation at `initialize` time
+picks `ElicitConfirm` when the client advertises
+`capabilities.elicitation`, and `DenyAllConfirm` otherwise. As of
+mid-2026 most MCP clients (including Claude Code in `-p` mode) do
+not advertise elicitation, so `auto` degrades to `DenyAllConfirm`
+in those configurations — the structured `confirm_denied` tag is
+what the orchestrator branches on. See
+[04-policy-file.md](04-policy-file.md#approval-flow-under-mcp---what-actually-happens-with-each-client)
+for the empirical findings.
+
+In-process embedders that want a different prompt UX (a desktop
+dialog, a browser-based confirmation flow, …) implement
+`ConfirmHook` against their own surface.
 
 ### Local-only reads (taint)
 

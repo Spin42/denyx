@@ -102,7 +102,7 @@ git = ["push --force"]
 capabilities = ["net.http_get"]
 backend_url  = "https://api.duckduckgo.com/?format=json&q="
 
-confirm_per_call = ["fs.delete"]
+requires_approval = ["fs.delete"]
 
 [runtime]
 max_seconds = 30
@@ -121,7 +121,7 @@ max_seconds = 30
     assert!(stdout.contains("- fs.read"));
     assert!(stdout.contains("- fs.write"));
     assert!(stdout.contains("- subprocess.exec"));
-    // fs.delete is in `confirm_per_call` for the test but is NOT a
+    // fs.delete is in `requires_approval` for the test but is NOT a
     // derived capability (no delete_allow). Walk the lines to assert
     // it doesn't appear in the [capabilities] block specifically.
     let cap_block: String = stdout
@@ -143,7 +143,7 @@ max_seconds = 30
     assert!(stdout.contains("[tools]"));
     assert!(stdout.contains("WebSearch"));
     assert!(stdout.contains("api.duckduckgo.com"));
-    assert!(stdout.contains("[confirm_per_call]"));
+    assert!(stdout.contains("[requires_approval]"));
     assert!(stdout.contains("[runtime]"));
     assert!(stdout.contains("max_seconds: 30"));
 

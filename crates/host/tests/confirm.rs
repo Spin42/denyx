@@ -1,4 +1,4 @@
-//! Tests for `confirm_per_call` plumbing through the embedded host.
+//! Tests for `requires_approval` plumbing through the embedded host.
 //! Uses a recording `ConfirmHook` to assert which capabilities asked
 //! for confirmation, in what order, with what summary.
 
@@ -36,9 +36,9 @@ fn make(toml: &str, answer: ConfirmDecision) -> (Runner, Arc<Recording>) {
 }
 
 #[test]
-fn confirm_per_call_fires_on_listed_capability() {
+fn requires_approval_fires_on_listed_capability() {
     let toml = r#"
-confirm_per_call = ["fs.delete"]
+requires_approval = ["fs.delete"]
 
 [filesystem]
 write_allow  = ["/tmp/aegis_confirm_test/**"]
@@ -58,11 +58,11 @@ delete_allow = ["/tmp/aegis_confirm_test/**"]
 }
 
 #[test]
-fn confirm_per_call_does_not_fire_on_unlisted_capability() {
-    // fs.write is NOT in confirm_per_call, so the hook should never
+fn requires_approval_does_not_fire_on_unlisted_capability() {
+    // fs.write is NOT in requires_approval, so the hook should never
     // be called even though the script does a write.
     let toml = r#"
-confirm_per_call = ["fs.delete"]
+requires_approval = ["fs.delete"]
 
 [filesystem]
 write_allow = ["/tmp/aegis_confirm_test/**"]
@@ -79,7 +79,7 @@ write_allow = ["/tmp/aegis_confirm_test/**"]
 #[test]
 fn deny_decision_surfaces_as_typed_error() {
     let toml = r#"
-confirm_per_call = ["fs.delete"]
+requires_approval = ["fs.delete"]
 
 [filesystem]
 delete_allow = ["/tmp/aegis_confirm_test/**"]
@@ -107,7 +107,7 @@ fn confirm_request_summary_includes_resource() {
     // The summary surfaced to the hook should be useful for a UI
     // prompt — name the resource the call is acting on.
     let toml = r#"
-confirm_per_call = ["subprocess.exec"]
+requires_approval = ["subprocess.exec"]
 
 [subprocess]
 allow_commands = ["true"]
@@ -121,16 +121,16 @@ allow_commands = ["true"]
 }
 
 #[test]
-fn pure_policy_confirm_required() {
-    // Direct check that Policy::confirm_required reads the field
+fn pure_policy_requires_approval() {
+    // Direct check that Policy::requires_approval reads the field
     // correctly, so embedders building their own ConfirmHook can
     // pre-classify capabilities.
     let toml = r#"
-confirm_per_call = ["fs.delete", "subprocess.exec"]
+requires_approval = ["fs.delete", "subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     let p = Policy::from_file(file, PathBuf::from("/")).unwrap();
-    assert!(p.confirm_required("fs.delete"));
-    assert!(p.confirm_required("subprocess.exec"));
-    assert!(!p.confirm_required("fs.read"));
+    assert!(p.requires_approval("fs.delete"));
+    assert!(p.requires_approval("subprocess.exec"));
+    assert!(!p.requires_approval("fs.read"));
 }

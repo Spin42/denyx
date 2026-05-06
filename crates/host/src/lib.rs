@@ -71,7 +71,7 @@ pub use audit::{
     VerifyReport, GENESIS_PREV_HASH,
 };
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
-pub use taint::{redact, TaintRegistry, REDACTED};
+pub use taint::{redact, redact_lines, TaintRegistry, REDACTED};
 
 /// A capability the runtime knows how to enforce.
 ///
@@ -256,13 +256,13 @@ impl Runner {
                 })
         };
         let captured = ctx.captured.borrow_mut().take();
-        let taints = ctx.taint.snapshot();
-        let printed: Vec<String> = ctx
-            .printed
-            .into_inner()
-            .into_iter()
-            .map(|line| redact(&line, &taints))
-            .collect();
+        // Output-boundary IFC: per-line substring scrub (covers
+        // original + reverse + hex + per-key-XOR transforms via the
+        // redaction snapshot) plus subsequence-chunking detection
+        // (covers per-char prints interleaved with cover text).
+        let printed_raw = ctx.printed.into_inner();
+        let printed = redact_lines(printed_raw, &ctx.taint);
+        let taints = ctx.taint.redaction_snapshot();
 
         if let Err(starlark_msg) = eval_result {
             // If a builtin captured a typed error before Starlark wrapped
@@ -358,7 +358,7 @@ impl HostCtx {
     }
 
     fn require_confirm(&self, capability: &str, summary: String) -> Result<(), AegisError> {
-        if !self.policy.confirm_required(capability) {
+        if !self.policy.requires_approval(capability) {
             return Ok(());
         }
         let req = ConfirmRequest {
@@ -386,7 +386,7 @@ impl HostCtx {
 
     fn emit(&self, mut event: AuditEvent) {
         if !self.taint.is_empty() {
-            let taints = self.taint.snapshot();
+            let taints = self.taint.redaction_snapshot();
             taint::redact_json(&mut event.detail, &taints);
         }
         self.audit.emit(event);
@@ -397,6 +397,49 @@ impl HostCtx {
             kind,
             message: message.to_string(),
         });
+    }
+
+    /// Arg-side taint enforcement: refuse the call if any of the
+    /// supplied (label, value) pairs carries a tainted byte sequence
+    /// (in original or any documented sibling-transform form). Used by
+    /// every outbound effecting builtin whose destination is *not*
+    /// local-only — the effect would carry a local-only value across
+    /// the runtime boundary, which is exactly what the local-only
+    /// class exists to prevent. The matched transform label
+    /// (`"original"`, `"reverse"`, `"hex_lower"`, `"xor_0x5a"`, ...)
+    /// is included in the audit-event message so an operator
+    /// reviewing the log sees how the script tried to disguise the
+    /// value.
+    fn enforce_outbound_taint(
+        &self,
+        capability: &'static str,
+        step: u32,
+        summary: &str,
+        args: &[(&str, &str)],
+    ) -> Result<(), AegisError> {
+        if self.taint.is_empty() {
+            return Ok(());
+        }
+        for (label, value) in args {
+            if let Some(reason) = self.taint.arg_taint_reason(value) {
+                let msg = format!(
+                    "policy denies {capability}: tainted local-only value would \
+                     flow through argument {label:?} (matched form: {reason}); \
+                     destination is not local-only, refusing to leak across the \
+                     runtime boundary"
+                );
+                self.emit(AuditEvent::denied(
+                    &self.task_id,
+                    step,
+                    capability,
+                    summary,
+                    &msg,
+                ));
+                self.capture(CapturedKind::Policy, &msg);
+                return Err(AegisError::Policy(msg));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -507,10 +550,18 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         let step = ctx.begin_call("fs.write")?;
         match ctx.policy.check_fs_write(Path::new(path)) {
             Ok(resolved) => {
-                ctx.require_confirm(
+                // Arg-side IFC: fs.write has no local_only_write
+                // class — any write target is host-visible. So if
+                // either the path or the content carries tainted
+                // bytes, refuse rather than scrub.
+                let summary = format!("write {} ({} bytes)", resolved.display(), content.len());
+                ctx.enforce_outbound_taint(
                     "fs.write",
-                    format!("write {} ({} bytes)", resolved.display(), content.len()),
+                    step,
+                    &summary,
+                    &[("path", path), ("content", content)],
                 )?;
+                ctx.require_confirm("fs.write", summary)?;
                 if let Some(parent) = resolved.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
@@ -549,7 +600,18 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         let step = ctx.begin_call("fs.delete")?;
         match ctx.policy.check_fs_delete(Path::new(path)) {
             Ok(resolved) => {
-                ctx.require_confirm("fs.delete", format!("delete {}", resolved.display()))?;
+                let summary = format!("delete {}", resolved.display());
+                // Arg-side IFC: deleting a path whose name encodes
+                // tainted bytes is a covert exfil channel (the
+                // attacker observes filesystem mutations to recover
+                // the secret). Refuse.
+                ctx.enforce_outbound_taint(
+                    "fs.delete",
+                    step,
+                    &summary,
+                    &[("path", path)],
+                )?;
+                ctx.require_confirm("fs.delete", summary)?;
                 let result = std::fs::remove_file(&resolved);
                 ctx.emit(AuditEvent::fs(
                     &ctx.task_id,
@@ -627,7 +689,29 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
             ctx.capture(CapturedKind::Policy, &msg);
             return Err(e.into());
         }
+        // Arg-side IFC: if the command is *not* local-only, no argv
+        // element may carry tainted bytes. Local-only commands
+        // (e.g. a curl-into-the-LAN-only binary) are allowed to
+        // receive secrets because their output is also tainted, so
+        // the value can't escape via that channel.
         let cmd_summary = argv.join(" ");
+        if !ctx.policy.subprocess_is_local_only(&argv[0]) {
+            let pairs: Vec<(String, String)> = argv
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (format!("argv[{i}]"), v.clone()))
+                .collect();
+            let pair_refs: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(l, v)| (l.as_str(), v.as_str()))
+                .collect();
+            ctx.enforce_outbound_taint(
+                "subprocess.exec",
+                step,
+                &format!("exec: {}", cmd_summary),
+                &pair_refs,
+            )?;
+        }
         ctx.require_confirm("subprocess.exec", format!("exec: {}", cmd_summary))?;
         // Build the child env from scratch. The default `Command`
         // inherits the parent's full env, which would leak vars
@@ -728,8 +812,16 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_get",
+                        step,
+                        &format!("GET {}", parsed),
+                        &[("url", url)],
+                    )?;
+                }
+                ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .get(parsed.as_str())
@@ -790,11 +882,19 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_post",
+                        step,
+                        &format!("POST {} ({} bytes)", parsed, body.len()),
+                        &[("url", url), ("body", body)],
+                    )?;
+                }
                 ctx.require_confirm(
                     "net.http_post",
                     format!("POST {} ({} bytes)", parsed, body.len()),
                 )?;
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .post(parsed.as_str())
@@ -855,11 +955,19 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_put",
+                        step,
+                        &format!("PUT {} ({} bytes)", parsed, body.len()),
+                        &[("url", url), ("body", body)],
+                    )?;
+                }
                 ctx.require_confirm(
                     "net.http_put",
                     format!("PUT {} ({} bytes)", parsed, body.len()),
                 )?;
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .put(parsed.as_str())
@@ -920,11 +1028,19 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_patch",
+                        step,
+                        &format!("PATCH {} ({} bytes)", parsed, body.len()),
+                        &[("url", url), ("body", body)],
+                    )?;
+                }
                 ctx.require_confirm(
                     "net.http_patch",
                     format!("PATCH {} ({} bytes)", parsed, body.len()),
                 )?;
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .request("PATCH", parsed.as_str())
@@ -984,8 +1100,16 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                ctx.require_confirm("net.http_delete", format!("DELETE {}", parsed))?;
                 let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_delete",
+                        step,
+                        &format!("DELETE {}", parsed),
+                        &[("url", url)],
+                    )?;
+                }
+                ctx.require_confirm("net.http_delete", format!("DELETE {}", parsed))?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .delete(parsed.as_str())

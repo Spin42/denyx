@@ -441,7 +441,7 @@ allow = ["fs.read"]
 fn override_can_remove_preset_confirm() {
     let user = r#"
 inherits = "secure-defaults"
-confirm_per_call = ["!subprocess.exec"]
+requires_approval = ["!subprocess.exec"]
 
 [functions]
 allow = ["subprocess.exec"]
@@ -451,10 +451,10 @@ allow = ["subprocess.exec"]
         .resolve_inheritance()
         .unwrap();
     assert!(!file
-        .confirm_per_call
+        .requires_approval
         .iter()
         .any(|c| c == "subprocess.exec"));
-    assert!(file.confirm_per_call.iter().any(|c| c == "fs.delete"));
+    assert!(file.requires_approval.iter().any(|c| c == "fs.delete"));
 }
 
 #[test]

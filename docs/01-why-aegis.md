@@ -80,13 +80,20 @@ capability gate, and output-boundary redaction. None depends on prompting.
 - **Not a replacement for code review.** A policy file is a contract about
   what the agent *can do*; reviewing the actual scripts the agent emits
   remains the user's responsibility.
-- **Not perfect against deliberate exfiltration.** The output-boundary
-  redaction (taint scrubbing) catches the common substring leak. A model
-  determined to encode a secret into a non-substring form (XOR, base64,
-  chunked across multiple outputs) requires real information-flow tracking
-  that Aegis's MVP does not implement. The threat model the MVP closes is
-  *prompt engineering* — a malicious prompt cannot bypass the policy
-  because the policy is enforced in Rust, not by the model.
+- **Not perfect against deliberate exfiltration.** The local-only
+  enforcement covers a documented set of practical transforms
+  (byte-reverse, hex lower/upper, XOR with each single-byte key,
+  hex(XOR) compositions, per-character chunking) and refuses
+  outbound effects that would carry tainted bytes to a non-local-
+  only sink — but a transform with a script-generated key (AES,
+  RC4, custom invertible permutation) escapes, since the redactor
+  doesn't know the key. Pure side channels (length, comparison
+  oracles, substring guesses) also remain. See
+  [security-threat-model.md](security-threat-model.md) for the
+  empirical exfil-probe results and the precise scope. The
+  threat model the runtime closes is *prompt engineering* — a
+  malicious prompt cannot bypass the policy because the policy
+  is enforced in Rust, not by the model.
 
 ## Threat model
 

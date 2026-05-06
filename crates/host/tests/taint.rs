@@ -132,15 +132,24 @@ print("PREFIX[" + k + "]SUFFIX")
 }
 
 #[test]
-fn env_local_only_var_redacts_after_fs_write_then_read() {
-    // Round-trip: write the secret to a file under a local-only-read
-    // path, read it back, print. The substring scan still catches the
-    // value because it's preserved on disk and read back identically.
+fn fs_write_with_tainted_content_is_denied_at_arg_check() {
+    // Pre-IFC behaviour: fs.write with the tainted secret as content
+    // succeeded; reading back through fs.read re-tainted, and the
+    // print scrubber caught the readback.
+    //
+    // Post-IFC behaviour: fs.write to a non-local-only path with
+    // tainted content is **denied at the arg check**, before any
+    // bytes touch the disk. The disk persistence channel is closed
+    // entirely — there's no file for an out-of-band reader to find.
+    // This test asserts the new (stricter) behaviour: the round-trip
+    // attempt fails with a Policy error and the scratch file is
+    // never created.
     let var = "AEGIS_TAINT_TEST_ROUNDTRIP";
     let secret_value = "roundtrip-secret-value-9999-abcdef";
     std::env::set_var(var, secret_value);
     let tmp = std::env::temp_dir();
     let scratch = tmp.join(format!("aegis_taint_rt_{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&scratch);
 
     let toml = format!(
         r#"
@@ -150,9 +159,6 @@ local_only_vars = ["{var}"]
 [filesystem]
 read_allow = ["{path}"]
 write_allow = ["{path}"]
-
-[functions]
-allow = ["env.read", "fs.read", "fs.write"]
 "#,
         path = scratch.to_string_lossy().replace('\\', "/")
     );
@@ -161,19 +167,24 @@ allow = ["env.read", "fs.read", "fs.write"]
     let src = format!(
         r#"k = env.read("{var}")
 fs.write("{path_lit}", k)
-back = fs.read("{path_lit}")
-print("readback:", back)
+print("after_write")
 "#
     );
-    let outcome = runner.run("t-rt", &src, "test.star").unwrap();
-    let joined = outcome.printed.join("\n");
-    assert!(
-        !joined.contains(secret_value),
-        "secret leaked via fs round-trip: {joined}"
+    let err = runner.run("t-rt", &src, "test.star").expect_err(
+        "fs.write of tainted content to a non-local-only path must be denied",
     );
-    assert!(joined.contains("[REDACTED]"));
+    let msg = format!("{err}");
+    assert!(msg.contains("tainted"), "error should mention taint: {msg}");
+    assert!(
+        msg.contains("fs.write"),
+        "error should name fs.write: {msg}"
+    );
+    assert!(
+        !scratch.exists(),
+        "scratch file should never have been written: {}",
+        scratch.display()
+    );
 
-    let _ = std::fs::remove_file(&scratch);
     std::env::remove_var(var);
 }
 
@@ -260,16 +271,18 @@ fn audit_event_payload_is_also_redacted() {
     let secret = "audit-secret-do-not-leak-ABCD";
     std::env::set_var(var, secret);
 
+    // The command is marked local-only — its argv is permitted to
+    // carry tainted bytes (its stdout would also be tainted, so the
+    // value can't escape via that channel). With a local-only command
+    // the arg-check passes; we then assert the audit event payload
+    // gets the substring scrubbing.
     let toml = format!(
         r#"
 [environment]
 local_only_vars = ["{var}"]
 
 [subprocess]
-allow_commands = ["printf"]
-
-[functions]
-allow = ["env.read", "subprocess.exec"]
+local_only_commands = ["printf"]
 "#
     );
     let file = PolicyFile::from_toml_str(&toml).unwrap();
@@ -277,9 +290,6 @@ allow = ["env.read", "subprocess.exec"]
     let cap = Arc::new(Capture::default());
     let runner = Runner::new(policy).with_audit(cap.clone());
 
-    // Read the secret first so taint is registered, THEN exec a
-    // subprocess that includes the secret literal in argv. The audit
-    // event for the subprocess will record argv — must be redacted.
     let src = format!(
         r#"k = env.read("{var}")
 out = subprocess.exec(["printf", "%s", k])
@@ -293,5 +303,40 @@ out = subprocess.exec(["printf", "%s", k])
         "audit log leaked secret: {serialized}"
     );
 
+    std::env::remove_var(var);
+}
+
+#[test]
+fn subprocess_with_tainted_argv_is_denied_for_public_command() {
+    // Companion to the audit-redaction test: when the command is NOT
+    // local-only, passing a tainted value as argv is denied at the
+    // arg check. This is the new IFC: the script can't push secret
+    // bytes to a host-visible binary's stdout via argv.
+    let var = "AEGIS_TAINT_PUBLIC_ARGV";
+    let secret = "public-argv-secret-token-9999";
+    std::env::set_var(var, secret);
+
+    let toml = format!(
+        r#"
+[environment]
+local_only_vars = ["{var}"]
+
+[subprocess]
+allow_commands = ["printf"]
+"#
+    );
+    let runner = runner_for(&toml, std::env::temp_dir());
+    let src = format!(
+        r#"k = env.read("{var}")
+out = subprocess.exec(["printf", "%s", k])
+print("never_reached")
+"#
+    );
+    let err = runner
+        .run("t-pa", &src, "test.star")
+        .expect_err("public command must refuse tainted argv");
+    let msg = format!("{err}");
+    assert!(msg.contains("tainted"), "{msg}");
+    assert!(msg.contains("subprocess.exec"), "{msg}");
     std::env::remove_var(var);
 }
