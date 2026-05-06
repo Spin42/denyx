@@ -99,10 +99,45 @@ endpoint independently with `401 Unauthorized` (token missing /
 malformed) or `403 Forbidden` (token valid but lacks the
 permission to fetch this policy / submit audit for this scope).
 
-Auth is **optional**: a server that omits the auth check entirely
-(say, behind a private VPC) is still conforming. In that mode the
-client may or may not set `DENYX_AUTH_TOKEN`; the server should
-ignore the header if present.
+### Auth is required for any non-trivial deployment
+
+The protocol does not *technically* enforce that the server
+validate the token — a server that ignores the `Authorization`
+header is still wire-conformant. But in practice, **bearer auth
+must be validated** for any deployment where:
+
+- The token is the identity carrier for audit ingest (see
+  [Event identity](#event-identity--who-emitted-this-event)) —
+  without validation, anyone on the network can forge events
+  with any token they choose, and the audit trail becomes
+  meaningless.
+- The server hosts more than one policy and uses the token to
+  decide which one to serve (Pattern 2 in the
+  [routing model](#which-policy-to-serve--the-servers-routing-model))
+  — without validation, anyone can request any policy by
+  guessing its token, exposing tighter or looser rule sets.
+- The audit endpoint stores anything that an attacker would care
+  about — operational telemetry, filesystem paths, URLs the
+  agent visits — which is to say, any audit endpoint that's
+  worth querying later.
+
+**The narrow exceptions** where skipping the auth check is
+defensible:
+
+- **Localhost-loopback dev fixtures.** A `127.0.0.1` server
+  listening on a loopback interface, used only for the local
+  developer's own testing.
+- **Air-gapped private VPCs** where every potential client is
+  already authenticated at the network layer (e.g. mutually-TLS-
+  authenticated workload identities at an ingress sidecar that
+  unwraps before reaching the Denyx server).
+
+In every other shape — corporate networks, the public internet,
+shared dev environments, anything reachable from a co-worker's
+laptop — **validating the bearer token is required**, not
+optional. Treat the protocol's permissiveness as a backwards-
+compatibility hatch for trivial setups, not a license to skip
+auth in production.
 
 There is no other auth mechanism in v1. No mTLS-encoded identity
 in the cert, no signed-request body, no HMAC. If the deployment
@@ -604,44 +639,98 @@ testing, use HTTP.
 
 ## Operator's reference: minimum conforming server
 
-The smallest server that implements this spec is roughly:
+The smallest server that implements this spec, **with bearer-token
+validation**, is roughly:
 
 ```python
 # Pseudo-Python; not production-ready. Illustrates the wire
-# protocol only — no auth, no persistence, no error handling.
+# protocol with bearer-auth validation. Real production servers
+# should: replace the in-memory token map with a database; back
+# the audit handler with durable storage; serve over TLS via a
+# reverse proxy (nginx, Caddy, an ingress sidecar); add request
+# logging and metrics.
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import secrets
 
-POLICY_TOML = """
+# In production, this is a database mapping each token to a
+# {user, machine, team, policy_id} record. For the example, a
+# single token grants access to a single policy.
+TOKENS = {
+    # token             →  policy TOML to serve for this token
+    "dev-laptop-token-abc123": """
 inherits = "secure-defaults"
 
 [filesystem]
 read_allow  = ["src/**"]
 write_allow = ["/tmp/**"]
-"""
+""",
+}
+
+def extract_bearer(headers) -> str | None:
+    """Return the bearer token from the Authorization header,
+    or None if the header is missing or malformed."""
+    auth = headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    return auth[len("Bearer "):].strip()
+
+def authorise(headers) -> str | None:
+    """Validate the bearer token. Returns the matched token on
+    success, None on failure. Uses constant-time comparison to
+    avoid timing-oracle attacks on the token-equality check."""
+    presented = extract_bearer(headers)
+    if presented is None:
+        return None
+    for known in TOKENS:
+        if secrets.compare_digest(presented, known):
+            return known
+    return None
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/policy":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/toml")
-            self.end_headers()
-            self.wfile.write(POLICY_TOML.encode())
-        else:
+        if self.path != "/policy":
             self.send_error(404)
+            return
+        token = authorise(self.headers)
+        if token is None:
+            self.send_error(401, "Bearer token missing or invalid")
+            return
+        # Look up the policy this token is entitled to. In
+        # production, a token might map to many policies via
+        # team / project; here it's a single mapping.
+        policy = TOKENS[token]
+        body = policy.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/toml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
-        if self.path == "/audit":
-            length = int(self.headers["Content-Length"])
-            body = self.rfile.read(length)
-            event = json.loads(body)
-            print(f"AUDIT: {event['capability']} {event['status']} "
-                  f"task={event['task_id']} step={event['step']}")
-            self.send_response(204)
-            self.end_headers()
-        else:
+        if self.path != "/audit":
             self.send_error(404)
+            return
+        token = authorise(self.headers)
+        if token is None:
+            self.send_error(401, "Bearer token missing or invalid")
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            event = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(400, "audit body must be valid JSON")
+            return
+        # In production, you'd write the event to a durable store
+        # and decorate it with the identity that `token` resolves
+        # to. Here we just log to stdout.
+        print(f"AUDIT [{token[:8]}…]: "
+              f"{event['capability']} {event['status']} "
+              f"task={event['task_id']} step={event['step']}")
+        self.send_response(204)
+        self.end_headers()
 
 HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 ```
@@ -651,11 +740,21 @@ Run that, then point a Denyx client at it:
 ```sh
 DENYX_POLICY_URL=http://localhost:8080/policy \
 DENYX_AUDIT_URL=http://localhost:8080/audit \
+DENYX_AUTH_TOKEN=dev-laptop-token-abc123 \
 denyx-mcp --confirm-mode auto
 ```
 
 The client will fetch the policy at startup and POST one audit
-event per gated capability call. That's the entire protocol.
+event per gated capability call. The server validates the bearer
+on every request and rejects with `401` if it's missing, malformed,
+or unknown.
+
+> **Note:** this example serves over plain HTTP for clarity. In
+> any production deployment, terminate TLS in front of this
+> server (nginx / Caddy / an ingress sidecar) — the bearer token
+> in the `Authorization` header is sent in cleartext on HTTP and
+> anyone on the network path can capture and replay it. See the
+> [TLS / transport](#tls--transport) section.
 
 ## Conformance test vectors
 
