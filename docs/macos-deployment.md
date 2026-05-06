@@ -1,6 +1,6 @@
 # Denyx on macOS
 
-> ← [Back to docs README](README.md) · [Install](05-install.md) · [Architecture](03-architecture.md)
+> ← [Back to docs README](README.md) · [Install](07-install.md) · [Architecture](03-architecture.md)
 
 This is the supported macOS deployment shape: **run `denyx-mcp`
 inside a lightweight Linux VM (Lima) and let your host's MCP client
@@ -277,7 +277,7 @@ the args change.
 ## What's not covered
 
 - **Native macOS sandboxing.** Not on the v0.1 roadmap. See the
-  [threat model](security-threat-model.md) for honest scope.
+  [threat model](04-security-threat-model.md) for honest scope.
 - **Ephemeral VMs per call.** The Lima VM is long-running. If you
   want fresh-VM-per-call isolation, that's the
   Virtualization.framework integration, not Lima.
@@ -290,6 +290,6 @@ the args change.
 |------------------------------------------------|------|
 | **This doc** (`macos-deployment.md`)           | Run Denyx on a Mac. Operational guide. |
 | [windows-deployment.md](windows-deployment.md) | The parallel doc for Windows + WSL2. |
-| [05-install.md](05-install.md)                 | Generic install (Linux native, plus pointers here for macOS / Windows). |
-| [04-policy-file.md](04-policy-file.md)         | Policy file reference. The same policy works on Linux, macOS-via-Lima, and Windows-via-WSL2. |
-| [security-threat-model.md](security-threat-model.md) | What the runtime defends against. The deployment shape doesn't change the threat model. |
+| [07-install.md](07-install.md)                 | Generic install (Linux native, plus pointers here for macOS / Windows). |
+| [06-policy-file.md](06-policy-file.md)         | Policy file reference. The same policy works on Linux, macOS-via-Lima, and Windows-via-WSL2. |
+| [04-security-threat-model.md](04-security-threat-model.md) | What the runtime defends against. The deployment shape doesn't change the threat model. |

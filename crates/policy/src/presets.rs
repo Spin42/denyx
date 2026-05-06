@@ -123,7 +123,7 @@ deny_commands = [
     # the argv path-gate. Allowing any of them in `allow_commands`
     # nullifies Denyx's filesystem and (often) network policies for
     # whatever the binary chooses to do. Negate via `!sh` etc. only
-    # if you understand the consequences — see docs/04-policy-file.md
+    # if you understand the consequences — see docs/06-policy-file.md
     # "Subprocess is a privilege boundary".
 
     # Shell evaluators (run arbitrary -c "...")

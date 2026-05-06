@@ -8,13 +8,13 @@ Claude Code's: launch `denyx-mcp` as a project-level MCP server and
 either let opencode keep its built-in tools (Denyx is *one of* its
 tools) or restrict it so Denyx is the *only* path to side-effects.
 
-Most of what's in [07-claude-code.md](07-claude-code.md) applies here.
+Most of what's in [09-claude-code.md](09-claude-code.md) applies here.
 This doc covers the opencode-specific configuration.
 
 ## Prerequisites
 
 - `denyx` and `denyx-mcp` built and on `$PATH` (see
-  [05-install.md](05-install.md)).
+  [07-install.md](07-install.md)).
 - opencode installed. See [opencode.ai](https://opencode.ai/) for
   current install instructions.
 - A policy file. `denyx init --lang <lang>` is the fastest start.
@@ -60,7 +60,7 @@ may differ from Claude Code's).
 ## Available tools
 
 Same as the Claude Code integration — see
-[07-claude-code.md#available-tools](07-claude-code.md#available-tools)
+[09-claude-code.md#available-tools](09-claude-code.md#available-tools)
 for the list. The only naming difference is the host's namespace
 prefix.
 
@@ -100,14 +100,14 @@ sees one tool: `delegate_to_local`. It decomposes a task into atomic
 steps and delegates each to the local 7B; the local model emits a
 Starlark program that Denyx enforces.
 
-See [09-local-executor.md](09-local-executor.md) for what this
+See [12-local-executor.md](12-local-executor.md) for what this
 architecture looks like end-to-end and the evaluation results.
 
 ## Troubleshooting
 
 opencode's MCP integration shape is similar to Claude Code's. The
 common issues from
-[07-claude-code.md#troubleshooting](07-claude-code.md#troubleshooting)
+[09-claude-code.md#troubleshooting](09-claude-code.md#troubleshooting)
 apply here too:
 
 - `denyx-mcp: no --policy provided` banner → you forgot the
@@ -116,7 +116,7 @@ apply here too:
   section that derives that capability is empty (e.g. `fs.read`
   needs `[filesystem].read_allow` or `local_only_read` populated).
 - `not in [filesystem].read_allow` → extend `read_allow` (refresher in
-  [04-policy-file.md](04-policy-file.md#filesystem)).
+  [06-policy-file.md](06-policy-file.md#filesystem)).
 
 opencode-specific gotchas:
 
@@ -132,6 +132,6 @@ opencode-specific gotchas:
 
 ## Where next
 
-- [09-local-executor.md](09-local-executor.md) — the full agentic
+- [12-local-executor.md](12-local-executor.md) — the full agentic
   architecture, including the evaluation harness and results.
-- [04-policy-file.md](04-policy-file.md) — for tuning the policy.
+- [06-policy-file.md](06-policy-file.md) — for tuning the policy.

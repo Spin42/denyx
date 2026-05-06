@@ -10,7 +10,7 @@ the user's machine via Ollama), which emits Starlark programs that
 
 It's the architecture the project's evaluation harness measures, and
 the one that makes the local-only-secrets feature
-([04-policy-file.md](04-policy-file.md#how-local-only-works)) actually
+([06-policy-file.md](06-policy-file.md#how-local-only-works)) actually
 useful — secrets stay on the local side, the cloud side never sees
 them.
 
@@ -327,7 +327,7 @@ model picks, it must match `[network].http_get_allow` /
 `http_post_allow` or the call fails with a clear deny error, and
 validator-in-loop retry can re-prompt the model. The routing hint
 is a UX nudge, not a security boundary. See
-[04-policy-file.md](04-policy-file.md#tools) for the full schema.
+[06-policy-file.md](06-policy-file.md#tools) for the full schema.
 
 ## Tradeoffs
 
@@ -353,15 +353,15 @@ The not-so-good:
   bringing their own crypto (AES with a script-generated key) still
   escapes; defeating that would require real value-level taint
   propagation through the Starlark evaluator. See
-  [security-threat-model.md](security-threat-model.md) for the
+  [04-security-threat-model.md](04-security-threat-model.md) for the
   honest scope.
 
 ## Where next
 
-- [04-policy-file.md](04-policy-file.md#how-local-only-works) — the
+- [06-policy-file.md](06-policy-file.md#how-local-only-works) — the
   local-only feature in detail.
-- [07-claude-code.md](07-claude-code.md) — Claude Code integration.
-- [08-opencode.md](08-opencode.md) — opencode integration.
+- [09-claude-code.md](09-claude-code.md) — Claude Code integration.
+- [10-opencode.md](10-opencode.md) — opencode integration.
 - [02-from-sigil.md](02-from-sigil.md) — design history; in particular,
   why the local executor uses stock Starlark + a stock 7B rather than
   Sigil's bespoke-DSL + fine-tuned-model approach.

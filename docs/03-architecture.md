@@ -156,7 +156,7 @@ a hostname resolves to an internal IP).
    word-boundary scans for any registered capability name. Rejects the
    whole run before evaluation starts if the script references a
    capability not derived from a populated resource section (see
-   [04-policy-file.md](04-policy-file.md#capabilities-are-derived-not-declared)).
+   [06-policy-file.md](06-policy-file.md#capabilities-are-derived-not-declared)).
 
 ### Audit log
 
@@ -222,7 +222,7 @@ mid-2026 most MCP clients (including Claude Code in `-p` mode) do
 not advertise elicitation, so `auto` degrades to `DenyAllConfirm`
 in those configurations — the structured `confirm_denied` tag is
 what the orchestrator branches on. See
-[04-policy-file.md](04-policy-file.md#approval-flow-under-mcp---what-actually-happens-with-each-client)
+[06-policy-file.md](06-policy-file.md#approval-flow-under-mcp---what-actually-happens-with-each-client)
 for the empirical findings.
 
 In-process embedders that want a different prompt UX (a desktop
@@ -273,7 +273,7 @@ the MVP's scope. The threat model is *prompt engineering can't bypass it*
   - `4` confirm hook denied
   - `5` i/o or configuration error
 - `denyx init --lang <LANG> [--output PATH] [--force]` — emit a starter
-  policy. See [04-policy-file.md](04-policy-file.md#the-init-generator).
+  policy. See [06-policy-file.md](06-policy-file.md#the-init-generator).
 - `denyx policy validate <PATH>` — parse + resolve inheritance + run
   the load-time guards (including the self-writable check) without
   running any script. Exits 0 on OK; non-zero with a clear error
@@ -308,7 +308,7 @@ Like the CLI, `denyx-mcp` accepts `--policy <toml>` and falls back to
 `secure-defaults` (with a stderr banner) if absent. Audit events stream
 to stderr by default or to a file via `--audit-log`.
 
-See [07-claude-code.md](07-claude-code.md) and [08-opencode.md](08-opencode.md)
+See [09-claude-code.md](09-claude-code.md) and [10-opencode.md](10-opencode.md)
 for the host-side wiring.
 
 ## Layout

@@ -1488,7 +1488,7 @@ impl Policy {
     ///    we don't know which, so passing in any allow list is
     ///    sufficient.
     ///
-    /// Known limitations (documented in 04-policy-file.md):
+    /// Known limitations (documented in 06-policy-file.md):
     /// - Paths embedded inside a quoted string argument
     ///   (`sh -c "cat /etc/passwd"`) are NOT extracted. Defense:
     ///   don't list shell evaluators in `allow_commands`.

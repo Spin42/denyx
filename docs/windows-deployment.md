@@ -1,6 +1,6 @@
 # Denyx on Windows
 
-> ← [Back to docs README](README.md) · [Install](05-install.md) · [Architecture](03-architecture.md)
+> ← [Back to docs README](README.md) · [Install](07-install.md) · [Architecture](03-architecture.md)
 
 This is the supported Windows deployment shape: **run `denyx-mcp`
 inside WSL2 (Windows Subsystem for Linux) and let your host's MCP
@@ -308,7 +308,7 @@ The MCP wiring pattern is identical across all of these — only the
 ## What's not covered
 
 - **Native Windows AppContainer sandboxing.** Not on the v0.1
-  roadmap. See the [threat model](security-threat-model.md) for
+  roadmap. See the [threat model](04-security-threat-model.md) for
   honest scope.
 - **Windows 10 1809 and earlier.** Lacks WSL2; only WSL1 is
   available, which doesn't have a real Linux kernel. Upgrade to
@@ -322,6 +322,6 @@ The MCP wiring pattern is identical across all of these — only the
 |-------------------------------------------|------|
 | **This doc** (`windows-deployment.md`)    | Run Denyx on Windows. Operational guide. |
 | [macos-deployment.md](macos-deployment.md) | The parallel doc for macOS + Lima. |
-| [05-install.md](05-install.md)            | Generic install (Linux native, plus pointers here for Windows / macOS). |
-| [04-policy-file.md](04-policy-file.md)    | Policy file reference. The same policy works on Linux, macOS-via-Lima, and Windows-via-WSL2. |
-| [security-threat-model.md](security-threat-model.md) | What the runtime defends against. The deployment shape doesn't change the threat model. |
+| [07-install.md](07-install.md)            | Generic install (Linux native, plus pointers here for Windows / macOS). |
+| [06-policy-file.md](06-policy-file.md)    | Policy file reference. The same policy works on Linux, macOS-via-Lima, and Windows-via-WSL2. |
+| [04-security-threat-model.md](04-security-threat-model.md) | What the runtime defends against. The deployment shape doesn't change the threat model. |

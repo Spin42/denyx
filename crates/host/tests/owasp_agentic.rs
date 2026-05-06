@@ -4,7 +4,7 @@
 //! Each `mod` below corresponds to one OWASP risk and asserts the
 //! Denyx runtime's stance on it via concrete Starlark scripts and
 //! synthetic policies. The accompanying report at
-//! `docs/owasp-agentic-coverage.md` summarises the scoring (4
+//! `docs/05-owasp-agentic-coverage.md` summarises the scoring (4
 //! strong / 3 partial / 3 out-of-scope) and points back at the
 //! tests in this file.
 //!

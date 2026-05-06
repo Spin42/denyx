@@ -901,10 +901,10 @@ orchestrator sees.
 
 ## Where next
 
-- [05-install.md](05-install.md) — install Denyx and dependencies.
-- [06-quickstart.md](06-quickstart.md) — generate a policy and run a
+- [07-install.md](07-install.md) — install Denyx and dependencies.
+- [08-quickstart.md](08-quickstart.md) — generate a policy and run a
   script in 5 minutes.
-- [09-local-executor.md](09-local-executor.md) — the full agentic
+- [12-local-executor.md](12-local-executor.md) — the full agentic
   setup with a local model + cloud orchestrator.
 - [agent-policy-spec.md](agent-policy-spec.md) — the portable spec for
   non-Denyx runtimes that want to consume the same TOML format.

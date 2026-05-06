@@ -736,7 +736,7 @@ specifications:
   the policy-fetch endpoint must serve.
 - [03-architecture.md](03-architecture.md) — how the client fits
   the policy and audit responses into its runtime.
-- [security-threat-model.md](security-threat-model.md) — what
+- [04-security-threat-model.md](04-security-threat-model.md) — what
   Denyx assumes about the network between the client and the
   server (TL;DR: the network is hostile; HTTPS or a private VPC
   is required for production).

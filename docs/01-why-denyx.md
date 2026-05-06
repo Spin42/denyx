@@ -65,7 +65,7 @@ Concretely, a Denyx-enforced agent run looks like this:
    `subprocess.exec`, `env.read`) goes through a typed builtin that
    re-checks the policy at call time and emits an **audit event**.
 5. The script's printed output, audit log, and tool-result text are
-   scrubbed of any tainted values (see [04-policy-file.md](04-policy-file.md)
+   scrubbed of any tainted values (see [06-policy-file.md](06-policy-file.md)
    on local-only reads).
 
 Three lines of defense, all in the runtime: pre-execution verifier, runtime
@@ -89,7 +89,7 @@ capability gate, and output-boundary redaction. None depends on prompting.
   RC4, custom invertible permutation) escapes, since the redactor
   doesn't know the key. Pure side channels (length, comparison
   oracles, substring guesses) also remain. See
-  [security-threat-model.md](security-threat-model.md) for the
+  [04-security-threat-model.md](04-security-threat-model.md) for the
   empirical exfil-probe results and the precise scope. The
   threat model the runtime closes is *prompt engineering* — a
   malicious prompt cannot bypass the policy because the policy
@@ -114,5 +114,5 @@ capability gate, and output-boundary redaction. None depends on prompting.
   Sigil project tried, what didn't work, and what changed.
 - [03-architecture.md](03-architecture.md) — the actual implementation: how
   Starlark, capability typing, and the three lines of defense fit together.
-- [04-policy-file.md](04-policy-file.md) — how to write policies. The most
+- [06-policy-file.md](06-policy-file.md) — how to write policies. The most
   important read after this one.

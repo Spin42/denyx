@@ -6,7 +6,7 @@ This document is the "I want to reproduce these numbers" guide. The
 project ships three evaluation harnesses under
 `examples/local_executor/`. Each one drives a real Ollama model + a
 real `denyx-mcp` subprocess against a curated task suite, so the
-results in [docs/09-local-executor.md](09-local-executor.md) are
+results in [docs/12-local-executor.md](12-local-executor.md) are
 reproducible on any Linux/macOS machine with the prerequisites
 installed.
 
@@ -56,7 +56,7 @@ place:
   cost of a one-time `ollama pull` (~5 GB).
 
 The full per-failure breakdown for the orchestrated run lives in
-[docs/09-local-executor.md](09-local-executor.md#phase-2-orchestrated-run_orchestratedpy--sonnetopus--qwen).
+[docs/12-local-executor.md](12-local-executor.md#phase-2-orchestrated-run_orchestratedpy--sonnetopus--qwen).
 
 ## Prerequisites
 
@@ -299,7 +299,7 @@ this harness via `--mcp-config`).
 ## Where this fits
 
 This doc is the operator-side companion to
-[09-local-executor.md](09-local-executor.md), which explains *why*
+[12-local-executor.md](12-local-executor.md), which explains *why*
 the architecture is shaped this way and what each layer does. Read
 that one first if you want to understand the design; come back here
 when you want to actually run something.

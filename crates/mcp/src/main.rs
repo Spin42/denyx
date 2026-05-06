@@ -160,7 +160,7 @@ struct Cli {
     /// user. In that configuration, `auto` effectively degrades to
     /// whatever the client's auto-response is — Denyx's request
     /// gets approved or declined without human review. See
-    /// docs/07-claude-code.md and docs/04-policy-file.md for the
+    /// docs/09-claude-code.md and docs/06-policy-file.md for the
     /// honest deployment guidance.
     #[arg(long, default_value = "auto")]
     confirm_mode: ConfirmModeArg,
@@ -734,8 +734,8 @@ struct ElicitMachinery {
 /// unattended mode) auto-respond to elicitation requests without
 /// surfacing them to the user. In that configuration the user is
 /// *not* in the loop, even though the server faithfully sent the
-/// prompt. The honest framing is in docs/04-policy-file.md and
-/// docs/07-claude-code.md.
+/// prompt. The honest framing is in docs/06-policy-file.md and
+/// docs/09-claude-code.md.
 struct ElicitConfirm {
     machinery: Arc<ElicitMachinery>,
 }

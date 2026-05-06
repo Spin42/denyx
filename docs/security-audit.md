@@ -193,7 +193,7 @@ or rotate/cap the log file.
 No I/O, no capability calls, so the deadline check at builtin
 entry doesn't fire. Starlark has no public per-statement abort
 hook in 0.13. Documented in
-[04-policy-file.md](04-policy-file.md#runtime). For total
+[06-policy-file.md](06-policy-file.md#runtime). For total
 isolation, run inside a container.
 
 **15. Unicode normalization.** Different byte sequences for

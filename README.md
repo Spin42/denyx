@@ -45,7 +45,7 @@ not in a wrapper that asks the model nicely.
 >   Inter-Agent, ASI-08 Cascading Failures). 11 concrete tests in
 >   [`crates/host/tests/owasp_agentic.rs`](crates/host/tests/owasp_agentic.rs);
 >   full breakdown in
->   [docs/owasp-agentic-coverage.md](docs/owasp-agentic-coverage.md).
+>   [docs/05-owasp-agentic-coverage.md](docs/05-owasp-agentic-coverage.md).
 >   Honest framing: Denyx is a single-process capability gate, not a
 >   fleet-governance platform — the four out-of-scope risks are by
 >   design, not gaps.
@@ -57,7 +57,7 @@ not in a wrapper that asks the model nicely.
 >   does NOT catch scripts running their own crypto (AES, custom
 >   permutations) or pure side channels (length, comparison oracles,
 >   substring guesses). Full scope in
->   [docs/security-threat-model.md](docs/security-threat-model.md).
+>   [docs/04-security-threat-model.md](docs/04-security-threat-model.md).
 > - **`requires_approval` is not always a real user prompt.** The
 >   CLI prompts on stdin. The MCP server's default `auto` mode sends
 >   `elicitation/create` only if the client advertises the
@@ -66,7 +66,7 @@ not in a wrapper that asks the model nicely.
 >   `confirm_denied` tag for the orchestrator. The runtime denies
 >   correctly either way; a real prompt is delivered only by the CLI
 >   or elicitation-capable clients. See
->   [docs/07-claude-code.md](docs/07-claude-code.md#empirical-findings-what-claude-code-actually-does).
+>   [docs/09-claude-code.md](docs/09-claude-code.md#empirical-findings-what-claude-code-actually-does).
 > - **OS isolation is opt-in and platform-specific.** Linux:
 >   `[subprocess].sandbox = "bwrap"`. macOS: Lima VM
 >   ([docs/macos-deployment.md](docs/macos-deployment.md)). Windows:
@@ -180,7 +180,7 @@ are model-side artifacts (Sonnet preemptively refuses some DENY
 tasks; Opus paraphrases the literal `[REDACTED]` sentinel one
 verify hook substring-matches on). The runtime denies and redacts
 correctly in every case. See
-[docs/09-local-executor.md](docs/09-local-executor.md) for the
+[docs/12-local-executor.md](docs/12-local-executor.md) for the
 per-failure breakdown.)
 
 **"Extend only with what we need"** flips the security model inside
@@ -240,7 +240,7 @@ MCP-aware orchestrator.
 
 For a **team** rolling Denyx out across multiple developers — one
 shared policy, one centralised audit log — see
-[docs/denyx-for-teams.md](docs/denyx-for-teams.md). The wire
+[docs/11-denyx-for-teams.md](docs/11-denyx-for-teams.md). The wire
 protocol a Denyx-compatible server has to implement is in
 [docs/server-protocol.md](docs/server-protocol.md). Both endpoints
 are deliberately small (GET TOML, POST JSON) so any team can stand
@@ -278,7 +278,7 @@ which Denyx deliberately doesn't include.
 
 Full per-ASI breakdown with quoted canonical text, reasoning, and
 test pointers:
-[docs/owasp-agentic-coverage.md](docs/owasp-agentic-coverage.md).
+[docs/05-owasp-agentic-coverage.md](docs/05-owasp-agentic-coverage.md).
 
 ## Documentation
 
@@ -293,30 +293,34 @@ filename:
 
 ### Reading path
 
-| #  | Doc                                                | What's in it |
-|----|----------------------------------------------------|--------------|
-| 01 | [why-denyx](docs/01-why-denyx.md)                  | Problem statement and threat-model framing. |
-| 02 | [from-sigil](docs/02-from-sigil.md)                | What the predecessor Sigil project taught us; why Denyx looks the way it does. |
-| 03 | [architecture](docs/03-architecture.md)            | Capability typing, the three lines of defense, the crate layout. |
-| 04 | [policy-file](docs/04-policy-file.md)              | **The most important read.** Every section, every option, with examples. The `denyx init` generator and the local-only-reads feature. |
-| 05 | [install](docs/05-install.md)                      | Prerequisites: Rust, Ollama, Claude Code / opencode. |
-| 06 | [quickstart](docs/06-quickstart.md)                | 5-minute walkthrough — generate, run, audit. |
-| 07 | [claude-code](docs/07-claude-code.md)              | Wire `denyx-mcp` into Claude Code. |
-| 08 | [opencode](docs/08-opencode.md)                    | Same for opencode. |
-| 09 | [local-executor](docs/09-local-executor.md)        | The full agentic stack: cloud orchestrator → local 7B → Denyx. Includes evaluation results. |
-| 10 | [running-examples](docs/10-running-examples.md)    | Reproduction guide for the three eval harnesses. |
+| #  | Doc                                                              | What's in it |
+|----|------------------------------------------------------------------|--------------|
+| 01 | [why-denyx](docs/01-why-denyx.md)                                | Problem statement and threat-model framing. |
+| 02 | [from-sigil](docs/02-from-sigil.md)                              | The Sigil → Aegis → Denyx lineage. What was tried, what was learned, why Denyx looks the way it does. |
+| 03 | [architecture](docs/03-architecture.md)                          | Capability typing, the three lines of defense, the crate layout. |
+| 04 | [security-threat-model](docs/04-security-threat-model.md)        | What Denyx claims to defend, what it explicitly does *not*, the trust boundaries. The contract Denyx commits to enforce. |
+| 05 | [owasp-agentic-coverage](docs/05-owasp-agentic-coverage.md)      | Empirical scoring against the OWASP Agentic Top 10, with concrete tests behind each position. 2 strong / 4 partial / 4 out-of-scope. |
+| 06 | [policy-file](docs/06-policy-file.md)                            | **The most important read.** Every section, every option, with examples. The `denyx init` generator and the local-only-reads feature. |
+| 07 | [install](docs/07-install.md)                                    | Prerequisites: Rust, Ollama, Claude Code / opencode. |
+| 08 | [quickstart](docs/08-quickstart.md)                              | 5-minute walkthrough — generate, run, audit. |
+| 09 | [claude-code](docs/09-claude-code.md)                            | Wire `denyx-mcp` into Claude Code. |
+| 10 | [opencode](docs/10-opencode.md)                                  | Same for opencode. |
+| 11 | [denyx-for-teams](docs/11-denyx-for-teams.md)                    | The team-deployment shape: shared policy + centralised audit via a server. Trade-offs of every shape, rollout stages, what a basic Denyx-capable server has to do. |
+| 12 | [local-executor](docs/12-local-executor.md)                      | The full agentic stack: cloud orchestrator → local 7B → Denyx. Includes evaluation results. |
+| 13 | [running-examples](docs/13-running-examples.md)                  | Reproduction guide for the three eval harnesses. |
 
 ### Reference
 
 | Doc                                                       | What's in it |
 |-----------------------------------------------------------|--------------|
 | [agent-policy-spec](docs/agent-policy-spec.md)            | Portable policy format spec, **v1.0.0**. Tool-agnostic; implement in non-Denyx runtimes. |
-| [security-threat-model](docs/security-threat-model.md)    | One-page review companion. What Denyx claims to defend; what it explicitly does *not*. Read first if you're auditing. |
+| [server-protocol](docs/server-protocol.md)                | The HTTP wire spec a policy/audit server must implement, **v1**. Two endpoints, bearer auth, status-code semantics, conformance test vectors. Read alongside `11-denyx-for-teams`. |
 | [security-audit](docs/security-audit.md)                  | The 16-surface bypass-assessment writeup. Findings + fixes. |
 | [security-pentest-report](docs/security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). 2 High findings, both remediated. |
+| [mutation-testing](docs/mutation-testing.md)              | How `cargo-mutants` runs against the security-critical core. Triage workflow, schedule, honest limits. |
 | [macos-deployment](docs/macos-deployment.md)              | macOS deployment guide: Lima VM + bubblewrap. |
 | [windows-deployment](docs/windows-deployment.md)          | Windows deployment guide: WSL2 + bubblewrap. |
-| [conclusions](docs/conclusions.md)                        | Sigil retrospective notes (background for `02-from-sigil.md`). |
+| [conclusions](docs/conclusions.md)                        | Sigil retrospective notes (background for `02-from-sigil`). |
 | [project-plan](docs/project-plan.md)                      | Initial design plan; historical artifact. |
 
 ## Why "Denyx"?
@@ -351,7 +355,7 @@ it should attempt, and the single Opus miss is a verify-hook
 substring strictness issue where the orchestrator paraphrased
 the redaction outcome instead of preserving the literal
 `[REDACTED]` sentinel. Per-failure breakdown in
-[docs/09-local-executor.md](docs/09-local-executor.md).
+[docs/12-local-executor.md](docs/12-local-executor.md).
 The policy spec is portable and documented. APIs may still change.
 
 ## Roadmap to production-readiness
@@ -381,7 +385,7 @@ operational items (◇) gate easy adoption.
   finding: Claude Code 2.1.x in `claude -p` mode does **not**
   advertise elicitation, so the dominant deployment shape today is
   "runtime denies the call, orchestrator surfaces the structured
-  tag." See [docs/07-claude-code.md](docs/07-claude-code.md#empirical-findings-what-claude-code-actually-does).
+  tag." See [docs/09-claude-code.md](docs/09-claude-code.md#empirical-findings-what-claude-code-actually-does).
 - ✅ `denyx policy validate` + `denyx policy show` (CI lint and
   operator visibility)
 - ✅ Per-call HTTP timeout (`[network].timeout_seconds`, default 30s)
@@ -417,7 +421,7 @@ operational items (◇) gate easy adoption.
   read/write/delete on the audit log — same shape as the
   self-writable guard for the policy file)
 - ✅ One-page security threat-model doc
-  ([docs/security-threat-model.md](docs/security-threat-model.md))
+  ([docs/04-security-threat-model.md](docs/04-security-threat-model.md))
   — what Denyx defends against, what it does *not*, the trust
   boundaries, the assumptions
 - ✅ Adversarial exfiltration probe

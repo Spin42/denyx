@@ -97,7 +97,7 @@ Tests:
 **Limit:** the IFC transform set is finite. Custom AES, custom
 permutations, length-leak side channels, comparison oracles, and
 substring-guess oracles are NOT covered. The threat model
-(`docs/security-threat-model.md`) is explicit.
+(`docs/04-security-threat-model.md`) is explicit.
 
 ---
 
@@ -352,7 +352,7 @@ Tests:
 - Review [`crates/host/tests/owasp_agentic.rs`](../crates/host/tests/owasp_agentic.rs)
   to see exactly what is and isn't covered.
 - For the broader threat model, read
-  [docs/security-threat-model.md](security-threat-model.md).
+  [docs/04-security-threat-model.md](04-security-threat-model.md).
 - For the empirical security toolbox (fuzz, exfil probe, AI
   pentest, mutation testing) that backs these claims, see
   the disclosure block in the [main README](../README.md).

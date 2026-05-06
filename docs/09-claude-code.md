@@ -12,15 +12,15 @@ guide covers the two ways to wire Denyx in:
 2. **As a remote-orchestrator → local-executor relay** — Sonnet/Opus in
    Claude Code delegates tasks to a local 7B model that runs the actual
    code through Denyx. This is the architecture the project's evaluation
-   harness measures (see [09-local-executor.md](09-local-executor.md)).
+   harness measures (see [12-local-executor.md](12-local-executor.md)).
 
 ## Prerequisites
 
 - `denyx` and `denyx-mcp` built and on `$PATH` (see
-  [05-install.md](05-install.md)).
+  [07-install.md](07-install.md)).
 - `claude` CLI installed and authenticated.
 - A policy file. `denyx init --lang <lang>` is the fastest start — see
-  [04-policy-file.md](04-policy-file.md#the-denyx-init-generator).
+  [06-policy-file.md](06-policy-file.md#the-denyx-init-generator).
 
 ## Approach 1: Denyx as a policy-gated tool surface
 
@@ -220,7 +220,7 @@ way, regardless of how the model is prompted:
 ## Approach 2: Sonnet → local-executor → Denyx
 
 This is the architecture from
-[09-local-executor.md](09-local-executor.md). It's worth a quick
+[12-local-executor.md](12-local-executor.md). It's worth a quick
 overview here because it's the stack the project evaluation actually
 measures.
 
@@ -323,17 +323,17 @@ empty. For example, calls to `fs.read` need at least one entry in
 `[filesystem].read_allow` (or `local_only_read`). Open the policy
 file, populate the matching section, and restart Claude Code (it
 caches MCP tool listings). The full mapping is in
-[04-policy-file.md](04-policy-file.md#capabilities-are-derived-not-declared).
+[06-policy-file.md](06-policy-file.md#capabilities-are-derived-not-declared).
 
 **A tool call reports `not in [filesystem].read_allow`:** the path you
 asked for isn't covered by `read_allow`. Either add the path to
 `read_allow` or use a more permissive pattern. Refresher in
-[04-policy-file.md](04-policy-file.md#filesystem).
+[06-policy-file.md](06-policy-file.md#filesystem).
 
 ## Where next
 
-- [08-opencode.md](08-opencode.md) — same setup for opencode.
-- [09-local-executor.md](09-local-executor.md) — the local-executor
+- [10-opencode.md](10-opencode.md) — same setup for opencode.
+- [12-local-executor.md](12-local-executor.md) — the local-executor
   architecture in depth, including the evaluation results.
-- [04-policy-file.md](04-policy-file.md) — for tightening the policy
+- [06-policy-file.md](06-policy-file.md) — for tightening the policy
   once you know what your agent actually needs.

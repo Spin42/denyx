@@ -504,9 +504,9 @@ Denyx is not trying to be one.
   timeouts, error semantics, conformance test vectors.
 - [agent-policy-spec.md](agent-policy-spec.md) — the TOML schema
   the policy endpoint must serve.
-- [04-policy-file.md](04-policy-file.md) — a tutorial introduction
+- [06-policy-file.md](06-policy-file.md) — a tutorial introduction
   to writing a Denyx policy. Read first if you've never seen
   one.
-- [security-threat-model.md](security-threat-model.md) — what
+- [04-security-threat-model.md](04-security-threat-model.md) — what
   Denyx assumes about the network between client and server.
   Short version: HTTPS or a private VPC for production.

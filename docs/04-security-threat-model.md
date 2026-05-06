@@ -14,7 +14,7 @@ For the systematic post-implementation bypass review, see
 pentest against the IFC layer specifically (Sonnet + Opus, with risk
 ratings and closure verification), see
 [security-pentest-report.md](security-pentest-report.md). For the
-policy file reference, see [04-policy-file.md](04-policy-file.md).
+policy file reference, see [06-policy-file.md](06-policy-file.md).
 
 ## What Denyx is
 
@@ -172,9 +172,9 @@ files:
 
 | Doc | Purpose |
 |-----|---------|
-| **This doc** (`security-threat-model.md`) | What Denyx claims to defend; what it doesn't. Read first. |
+| **This doc** (`04-security-threat-model.md`) | What Denyx claims to defend; what it doesn't. Read first. |
 | [security-audit.md](security-audit.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
 | [security-pentest-report.md](security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). Two High findings (base64, ROT-N), both remediated and closure-verified. Methodology + scope + residual risk. |
-| [04-policy-file.md](04-policy-file.md) | Policy file reference (operator-facing). |
+| [06-policy-file.md](06-policy-file.md) | Policy file reference (operator-facing). |
 | [03-architecture.md](03-architecture.md) | How the runtime is structured (developer-facing). |
 | [examples/local_executor/run_exfil.py](../examples/local_executor/run_exfil.py) | The adversarial exfiltration probe — runs hand-written Starlark that *tries* to leak `local_only_var` values. Empirical version of the "what we don't defend against" list. |

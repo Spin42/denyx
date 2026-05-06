@@ -229,7 +229,7 @@ model — via the system prompt, via RAG, via validator-in-loop retry. The
 runtime stays spec-compliant Starlark.
 
 This stance is *load-bearing across the project*. It's why local-executor
-evaluation works at all (see [09-local-executor.md](09-local-executor.md)):
+evaluation works at all (see [12-local-executor.md](12-local-executor.md)):
 a 7B model **alone** (no cloud orchestrator) plus 4 retrieved worked
 examples plus one retry on Starlark errors gets the entire current
 36-task multi-step suite correct, *without ever relaxing the runtime*.
@@ -269,7 +269,7 @@ choices in Denyx:
   strictness issue where the orchestrator paraphrased qwen's literal
   `[REDACTED]` sentinel. The runtime denies correctly and redacts
   correctly in every case where it's invoked. See
-  [09-local-executor.md](09-local-executor.md) for the per-failure
+  [12-local-executor.md](12-local-executor.md) for the per-failure
   breakdown.
 
 The pre-training-proximity intuition — that pulling the language toward

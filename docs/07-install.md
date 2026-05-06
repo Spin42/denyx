@@ -131,7 +131,7 @@ necessarily the side that runs `denyx-mcp`.
 ### Ollama (for the local-executor flow)
 
 If you want to run the architecture from
-[09-local-executor.md](09-local-executor.md) — cloud orchestrator
+[12-local-executor.md](12-local-executor.md) — cloud orchestrator
 delegating to a local model — you need [Ollama](https://ollama.com).
 
 Linux:
@@ -167,7 +167,7 @@ curl -s http://localhost:11434/api/tags | head -c 200
 CLI. The orchestrated harness uses
 `claude -p ... --mcp-config ...` to run Sonnet or Opus as the
 orchestrator while delegating actual code to the local executor via
-`denyx-mcp`. See [07-claude-code.md](07-claude-code.md) for the
+`denyx-mcp`. See [09-claude-code.md](09-claude-code.md) for the
 integration setup.
 
 ```sh
@@ -182,7 +182,7 @@ current setup.
 ### opencode (alternative orchestrator host)
 
 [opencode](https://opencode.ai/) is an open-source agentic IDE that
-also speaks MCP. See [08-opencode.md](08-opencode.md) for the MCP
+also speaks MCP. See [10-opencode.md](10-opencode.md) for the MCP
 server configuration.
 
 ### Python (only if you want to reproduce the eval)
@@ -203,12 +203,12 @@ The orchestrated and pentest harnesses additionally require the
 
 ## Where next
 
-- [06-quickstart.md](06-quickstart.md) — generate a policy, run a
+- [08-quickstart.md](08-quickstart.md) — generate a policy, run a
   script, watch the audit log.
-- [07-claude-code.md](07-claude-code.md) — wire Denyx into Claude
+- [09-claude-code.md](09-claude-code.md) — wire Denyx into Claude
   Code as an MCP tool.
-- [08-opencode.md](08-opencode.md) — same for opencode.
-- [09-local-executor.md](09-local-executor.md) — the full Sonnet/Opus
+- [10-opencode.md](10-opencode.md) — same for opencode.
+- [12-local-executor.md](12-local-executor.md) — the full Sonnet/Opus
   → local 7B → Denyx architecture.
 - [macos-deployment.md](macos-deployment.md) — full macOS guide.
 - [windows-deployment.md](windows-deployment.md) — full Windows guide.

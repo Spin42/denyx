@@ -5,7 +5,7 @@
 Five minutes from a freshly built `denyx` to a script running under a
 real policy.
 
-Assumes you've already followed [05-install.md](05-install.md) (Rust +
+Assumes you've already followed [07-install.md](07-install.md) (Rust +
 `cargo build --release` + `denyx` on `$PATH`).
 
 ## 1. Generate a starter policy
@@ -188,8 +188,8 @@ denyx-mcp --policy denyx.toml
 ```
 
 Most agentic hosts (Claude Code, opencode) talk to MCP servers
-automatically once configured — see [07-claude-code.md](07-claude-code.md)
-and [08-opencode.md](08-opencode.md) for the wiring.
+automatically once configured — see [09-claude-code.md](09-claude-code.md)
+and [10-opencode.md](10-opencode.md) for the wiring.
 
 For a hand test, you can speak the protocol manually:
 
@@ -222,9 +222,9 @@ and lists the capability set derived from your resource sections.
 
 ## Where next
 
-- [04-policy-file.md](04-policy-file.md) — full policy reference (you'll
+- [06-policy-file.md](06-policy-file.md) — full policy reference (you'll
   want this open while you trim the generated file).
-- [09-local-executor.md](09-local-executor.md) — the agentic setup with a
+- [12-local-executor.md](12-local-executor.md) — the agentic setup with a
   local 7B model + cloud orchestrator.
-- [07-claude-code.md](07-claude-code.md) — Claude Code integration.
-- [08-opencode.md](08-opencode.md) — opencode integration.
+- [09-claude-code.md](09-claude-code.md) — Claude Code integration.
+- [10-opencode.md](10-opencode.md) — opencode integration.

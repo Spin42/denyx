@@ -31,8 +31,8 @@ cargo install denyx-mcp
 For opencode, server-mode (centralised policy + audit), and
 platform-specific notes (macOS Lima, Windows WSL2), see the
 [main README](https://github.com/Spin42/denyx) and the
-[Claude Code](https://github.com/Spin42/denyx/blob/main/docs/07-claude-code.md)
-/ [opencode](https://github.com/Spin42/denyx/blob/main/docs/08-opencode.md)
+[Claude Code](https://github.com/Spin42/denyx/blob/main/docs/09-claude-code.md)
+/ [opencode](https://github.com/Spin42/denyx/blob/main/docs/10-opencode.md)
 guides.
 
 ## Server mode (centralised policy + audit)
