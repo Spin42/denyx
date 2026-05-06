@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Denyx CLI binary."
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Denyx CLI: run a policy-gated Starlark script with default-deny capability enforcement."
+readme = "README.md"
+keywords = ["security", "ai-agent", "policy", "starlark", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "denyx"

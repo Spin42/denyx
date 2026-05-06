@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Denyx policy types and runtime-parsed policy file format."
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Denyx policy types and runtime-parsed policy file format. Default-deny capability gates for AI-agent runtimes."
+readme = "README.md"
+keywords = ["security", "ai-agent", "policy", "starlark", "sandbox"]
+categories = ["development-tools", "config"]
 
 [dependencies]
 anyhow.workspace = true

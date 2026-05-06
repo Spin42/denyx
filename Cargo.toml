@@ -15,8 +15,13 @@ exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["marc <marc@spin42.com>"]
+authors = ["Marc Lainez <marc@spin42.com>"]
 repository = "https://github.com/mlainez/denyx"
+homepage = "https://github.com/mlainez/denyx"
+# MSRV. Pinned to a recent stable that satisfies all transitive
+# deps (starlark 0.13 is the binding floor). Bumping this is a
+# minor-version bump for the workspace.
+rust-version = "1.80"
 
 [workspace.dependencies]
 denyx-policy = { path = "crates/policy", version = "0.1.0" }

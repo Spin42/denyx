@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Denyx embeddable Starlark host with capability-typed effects."
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Denyx embeddable Starlark host with capability-typed effects, capability gates, and IFC-tainted output redaction."
+readme = "README.md"
+keywords = ["security", "ai-agent", "starlark", "sandbox", "embedding"]
+categories = ["development-tools"]
 
 [dependencies]
 denyx-policy.workspace = true
