@@ -640,26 +640,36 @@ testing, use HTTP.
 ## Operator's reference: minimum conforming server
 
 The smallest server that implements this spec, **with bearer-token
-validation**, is roughly:
+validation**, is below. **This code has been run end-to-end
+against the v0.1 `denyx-mcp` client** — `denyx-mcp` fetches the
+policy from `/policy`, resolves the `secure-defaults` preset,
+and initialises successfully; unauthenticated requests are
+rejected with `401`; valid audit POSTs return `204`.
 
 ```python
-# Pseudo-Python; not production-ready. Illustrates the wire
-# protocol with bearer-auth validation. Real production servers
-# should: replace the in-memory token map with a database; back
-# the audit handler with durable storage; serve over TLS via a
-# reverse proxy (nginx, Caddy, an ingress sidecar); add request
-# logging and metrics.
+#!/usr/bin/env python3
+"""Minimal Denyx-conformant policy + audit server, with bearer-auth.
 
+Pseudo-Python; not production-ready. Illustrates the wire protocol
+with bearer-auth validation. Real production servers should:
+  - replace the in-memory token map with a database
+  - back the audit handler with durable storage
+  - serve over TLS via a reverse proxy (nginx, Caddy, ingress sidecar)
+  - add request logging and metrics
+"""
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import secrets
 
-# In production, this is a database mapping each token to a
-# {user, machine, team, policy_id} record. For the example, a
-# single token grants access to a single policy.
-TOKENS = {
-    # token             →  policy TOML to serve for this token
-    "dev-laptop-token-abc123": """
+# Maps each bearer token to the policy TOML it's entitled to.
+# In production this is a database row keyed on the token (or on
+# the JWT subject); here it's an in-memory dict so the example is
+# self-contained. The same dict serves both the auth check ("is
+# this token a valid key?") and the policy lookup ("what TOML
+# does this token get?"); production servers usually separate
+# auth-validation from policy-routing.
+TOKEN_POLICIES = {
+    "dev-laptop-token-abc123": """\
 inherits = "secure-defaults"
 
 [filesystem]
@@ -668,7 +678,8 @@ write_allow = ["/tmp/**"]
 """,
 }
 
-def extract_bearer(headers) -> str | None:
+
+def extract_bearer(headers):
     """Return the bearer token from the Authorization header,
     or None if the header is missing or malformed."""
     auth = headers.get("Authorization", "")
@@ -676,17 +687,19 @@ def extract_bearer(headers) -> str | None:
         return None
     return auth[len("Bearer "):].strip()
 
-def authorise(headers) -> str | None:
+
+def authorise(headers):
     """Validate the bearer token. Returns the matched token on
     success, None on failure. Uses constant-time comparison to
     avoid timing-oracle attacks on the token-equality check."""
     presented = extract_bearer(headers)
     if presented is None:
         return None
-    for known in TOKENS:
+    for known in TOKEN_POLICIES:
         if secrets.compare_digest(presented, known):
             return known
     return None
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -697,11 +710,7 @@ class Handler(BaseHTTPRequestHandler):
         if token is None:
             self.send_error(401, "Bearer token missing or invalid")
             return
-        # Look up the policy this token is entitled to. In
-        # production, a token might map to many policies via
-        # team / project; here it's a single mapping.
-        policy = TOKENS[token]
-        body = policy.encode()
+        body = TOKEN_POLICIES[token].encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/toml")
         self.send_header("Content-Length", str(len(body)))
@@ -723,38 +732,56 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "audit body must be valid JSON")
             return
-        # In production, you'd write the event to a durable store
-        # and decorate it with the identity that `token` resolves
-        # to. Here we just log to stdout.
+        # Truncate the token for log readability without leaking
+        # the full secret to console logs.
         print(f"AUDIT [{token[:8]}…]: "
               f"{event['capability']} {event['status']} "
               f"task={event['task_id']} step={event['step']}")
         self.send_response(204)
         self.end_headers()
 
-HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
 ```
 
-Run that, then point a Denyx client at it:
+Save as `denyx_example_server.py`, run it
+(`python3 denyx_example_server.py`), then point a Denyx client at
+it:
 
 ```sh
-DENYX_POLICY_URL=http://localhost:8080/policy \
-DENYX_AUDIT_URL=http://localhost:8080/audit \
+DENYX_POLICY_URL=http://127.0.0.1:8765/policy \
+DENYX_AUDIT_URL=http://127.0.0.1:8765/audit \
 DENYX_AUTH_TOKEN=dev-laptop-token-abc123 \
 denyx-mcp --confirm-mode auto
 ```
 
-The client will fetch the policy at startup and POST one audit
-event per gated capability call. The server validates the bearer
-on every request and rejects with `401` if it's missing, malformed,
-or unknown.
+Or hit it directly with `curl` to test each path:
 
-> **Note:** this example serves over plain HTTP for clarity. In
-> any production deployment, terminate TLS in front of this
-> server (nginx / Caddy / an ingress sidecar) — the bearer token
-> in the `Authorization` header is sent in cleartext on HTTP and
-> anyone on the network path can capture and replay it. See the
-> [TLS / transport](#tls--transport) section.
+```sh
+# Should 401 (no auth):
+curl -i http://127.0.0.1:8765/policy
+
+# Should 200 + TOML body:
+curl -i -H "Authorization: Bearer dev-laptop-token-abc123" \
+     http://127.0.0.1:8765/policy
+
+# Should 204:
+curl -i -H "Authorization: Bearer dev-laptop-token-abc123" \
+        -H "Content-Type: application/json" \
+        -d '{"ts":"2026-05-06T18:31:42.842Z","task_id":"t-1",
+             "step":0,"capability":"fs.read","status":"allowed",
+             "detail":{"path":"src/main.rs","error":null}}' \
+     http://127.0.0.1:8765/audit
+```
+
+> **Note:** this example serves over plain HTTP and binds to
+> `127.0.0.1` (localhost only) for clarity. For any production
+> deployment that's reachable beyond localhost, terminate TLS in
+> front of this server (nginx / Caddy / an ingress sidecar) — the
+> bearer token in the `Authorization` header is sent in cleartext
+> on HTTP and anyone on the network path can capture and replay
+> it. See the [TLS / transport](#tls--transport) section.
 
 ## Conformance test vectors
 
