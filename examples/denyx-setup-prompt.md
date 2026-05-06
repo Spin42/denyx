@@ -288,35 +288,8 @@ To actually enforce the policy, you have to disable the built-in
 effecting tools so the model has no path to side-effects except
 via `denyx-mcp`. This is a different config file from Step 4a.
 
-  - **Claude Code**: detect the version with `claude --version`
-    first — the deny list is meaningfully larger for v2 because
-    v2 added several built-in tools (Skill, Agent, Cron*, Task*,
-    EnterWorktree, ExitWorktree, SendMessage, Team*) that can
-    each side-effect outside the MCP gate. Use the matching block:
-
-    For **Claude Code v2** (current — most users):
-      {
-        "permissions": {
-          "deny": [
-            "Bash", "Edit", "Write", "Read",
-            "Glob", "Grep", "WebFetch", "WebSearch",
-            "Monitor", "NotebookEdit", "PowerShell",
-            "Skill", "Agent",
-            "CronCreate", "CronDelete",
-            "TaskCreate", "TaskUpdate", "TaskStop",
-            "EnterWorktree", "ExitWorktree",
-            "SendMessage", "TeamCreate", "TeamDelete"
-          ],
-          "disableBypassPermissionsMode": "disable",
-          "disableAutoMode": "disable"
-        }
-      }
-    The two `disable*` fields are v2-only; they prevent the user
-    from entering bypass-permissions mode (which skips ALL
-    permission checks) or auto mode (ML-based auto-approval).
-    Both would defeat the deny list if left available.
-
-    For **Claude Code v1** (legacy — drop every v2-only tool):
+  - **Claude Code** (v1 and v2 both — see version note below):
+    write `./.claude/settings.json`:
       {
         "permissions": {
           "deny": [
@@ -326,16 +299,29 @@ via `denyx-mcp`. This is a different config file from Step 4a.
           ]
         }
       }
-    Add `"PowerShell"` to the deny list on Windows for v1 too.
+    Add `"PowerShell"` on Windows. The bare string form
+    (`"Bash"` not `"Bash(*)"`) means "block all invocations of
+    this tool." Deny rules always win against allow rules, so
+    this is hard-deny.
 
-    Common to both versions: the bare string form (`"Bash"` not
-    `"Bash(*)"`) means "block all invocations of this tool."
-    Deny rules always win against allow rules, so this is
-    hard-deny. Some v2 tools (TaskList, TaskGet, TaskOutput,
-    CronList, TodoWrite, EnterPlanMode/ExitPlanMode,
-    AskUserQuestion, ToolSearch, LSP) are NOT in the deny list
-    because they don't side-effect — they're metadata / mode-
-    switching / read-only.
+    **For Claude Code v2** (run `claude --version` to check),
+    add ONE more field that prevents the user (or a tricked
+    user) from entering `bypassPermissions` mode, which would
+    skip the deny list entirely:
+      "disableBypassPermissionsMode": "disable"
+    The field is silently ignored on v1, so including it
+    unconditionally is safe.
+
+    The v2 tools that *aren't* on the deny list — `Agent` (sub-
+    agents), `Task*`, `Cron*`, `Skill`, `EnterWorktree`,
+    `SendMessage`, `Team*` — were verified empirically to inherit
+    the parent session's `.claude/settings.json` rather than
+    create independent bypass paths. A sub-agent hits the same
+    deny list; a cron-scheduled prompt re-fires through the same
+    deny list; etc. They don't need to be in the deny list. See
+    `docs/claude-code-permission-tests.md` for the test recipe
+    that confirmed this; re-run it after a Claude Code version
+    bump to verify nothing changed.
 
     If `./.claude/settings.json` already exists with other
     permissions, MERGE the deny array — don't clobber existing
