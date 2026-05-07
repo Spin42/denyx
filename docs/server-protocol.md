@@ -368,7 +368,7 @@ Content-Length: ...
   "capability": "fs.read",
   "status":     "allowed",
   "detail":     {
-    "path":  "/home/dev/projects/foo/src/main.rs",
+    "path":  "/path/to/project/src/main.rs",
     "error": null
   }
 }
