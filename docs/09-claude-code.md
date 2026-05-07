@@ -39,45 +39,58 @@ current working directory.
 The rest of this section walks through the same setup manually, in
 case you want to understand each step or do it without the prompt.
 
-### Configure the MCP server
+### Configure with `denyx host-config`
 
-Claude Code reads MCP server configuration from your settings (per-user
-or per-project; see Claude Code's docs for the exact location on your
-platform). Add an `denyx` server entry:
-
-```json
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "denyx-mcp",
-      "args": [
-        "--policy",     "/absolute/path/to/your/project/denyx.toml",
-        "--audit-log",  "/absolute/path/to/your/project/.denyx/audit.jsonl",
-        "--confirm-mode", "auto"
-      ]
-    }
-  }
-}
-```
-
-Use absolute paths — the MCP server's working directory may not match
-your project root. Create the `.denyx/` directory and gitignore it
-before launching:
+The recommended path is to let `denyx host-config` write every
+configuration file from your policy in one go:
 
 ```sh
-mkdir -p /absolute/path/to/your/project/.denyx
-echo '.denyx/' >> /absolute/path/to/your/project/.gitignore
+cd /path/to/your/project
+denyx host-config \
+    --policy ./denyx.toml \
+    --host claude \
+    --platform native \
+    --sandbox auto
 ```
 
-> **`--audit-log` is effectively required.** Without it,
-> `denyx-mcp` writes audit events to stderr, which Claude Code
-> captures into its own MCP-server log directory mixed with every
-> other server's noise — making the audit feature look broken
-> from the operator's perspective. The path doesn't have to be
-> `./.denyx/audit.jsonl`; that's just the recommended default
-> for project-local audit. What matters is that *some* path is
-> set so the events go to a file you can `tail -f` and `jq`
-> against.
+This single command:
+
+- creates `./.denyx/` and adds it to `./.gitignore` (audit-log dir),
+- writes `./.mcp.json` wiring `denyx-mcp` as a project-local MCP
+  server (with `--audit-log ./.denyx/audit.jsonl` and
+  `--confirm-mode auto` baked in),
+- writes `./.claude/settings.json` denying every built-in
+  effecting tool (`Bash`, `Edit`, `Write`, `Read`, `Glob`, `Grep`,
+  `WebFetch`, `WebSearch`, `Monitor`, `NotebookEdit`, plus
+  `PowerShell` when `--windows` is set), and setting
+  `disableBypassPermissionsMode: "disable"` and
+  `disableAutoMode: "disable"`,
+- emits Claude Code v2's native sandbox stanza, with
+  `allowedDomains` derived from your policy's `http_*_allow`
+  union and `allowWrite` from any absolute / home-relative
+  paths in `[filesystem].write_allow`.
+
+If any of those files already exists, `host-config` **merges**:
+unrelated keys are preserved, deny lists are unioned (no
+duplicates), the sandbox stanza is deep-merged. To overwrite
+instead, pass `--existing replace`. To preview without writing,
+pass `--dry-run`.
+
+> **macOS / Windows:** Pass `--platform lima --lima-vm <vm>` (macOS)
+> or `--platform wsl --wsl-distro <distro> --windows` (Windows) so
+> the generated MCP `command`/`args` shape uses the right wrapper
+> (`limactl shell ...` or `wsl.exe -d <distro> -e ...`). On those
+> platforms also pass `--policy <absolute-path>` and
+> `--audit-log <absolute-path>` — both must be reachable inside the
+> VM/distro. See [docs/macos-deployment.md](macos-deployment.md)
+> and [docs/windows-deployment.md](windows-deployment.md).
+
+> **`--audit-log` defaults to `./.denyx/audit.jsonl`.** Without an
+> audit-log path, `denyx-mcp` writes events to stderr, which
+> Claude Code buries in its own MCP-server log directory — making
+> the audit feature look broken. `host-config` always passes
+> `--audit-log` explicitly so events land somewhere `tail -f` /
+> `jq`-able. Override with `--audit-log <path>`.
 
 ### Available tools
 
@@ -96,109 +109,48 @@ Once configured, Claude Code sees these tools (all prefixed
   — same.
 - `mcp__denyx__denyx_env_read` — same.
 
-### Disable Claude Code's built-in effecting tools (REQUIRED)
+### Why disabling Claude Code's built-in tools is required
 
-**Wiring `denyx-mcp` is not enough by itself.** Claude Code ships
-with built-in `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`,
-`WebFetch`, `WebSearch` (and `Monitor`, `NotebookEdit`,
-`PowerShell`) tools that touch the filesystem, network, and shell
-**directly** — they do NOT go through any MCP server. If you only
-add the `mcpServers` block above and leave the built-ins enabled,
-the model will see two paths to read a file (`Read` vs.
-`mcp__denyx__denyx_fs_read`) and pick the cheaper, ungated one.
-Net result: Denyx is installed but the policy gate never fires.
-You have a placebo sandbox.
+`denyx host-config` writes the deny list automatically; this
+section explains *why* the lockdown is non-negotiable.
 
-To actually enforce the policy, write
-`./.claude/settings.json` in your project root (create the
-`.claude/` directory if it doesn't exist):
+Claude Code ships with built-in `Bash`, `Read`, `Write`, `Edit`,
+`Glob`, `Grep`, `WebFetch`, `WebSearch` (and `Monitor`,
+`NotebookEdit`, `PowerShell`) tools that touch the filesystem,
+network, and shell **directly** — they do NOT go through any MCP
+server. If only `denyx-mcp` is wired and the built-ins remain
+enabled, the model sees two paths to read a file (`Read` vs.
+`mcp__denyx__denyx_fs_read`) and picks the cheaper, ungated one.
+Result: Denyx is installed but the gate never fires. Placebo
+sandbox.
 
-```json
-{
-  "permissions": {
-    "deny": [
-      "Bash",
-      "Edit",
-      "Write",
-      "Read",
-      "Glob",
-      "Grep",
-      "WebFetch",
-      "WebSearch",
-      "Monitor",
-      "NotebookEdit"
-    ]
-  }
-}
-```
+`host-config` writes (or merges into) `./.claude/settings.json`:
 
-Add `"PowerShell"` to the deny list on Windows. **This list is
-the same for Claude Code v1 and v2.** The v2 additions
-(`Agent`/`Task*`/`Cron*`/`Skill`/`EnterWorktree`/`SendMessage`/
-`Team*`) all inherit the parent session's `.claude/settings.json`
-— a sub-agent spawned via `Agent` reads the same deny list, a
-prompt re-enqueued by `CronCreate` hits the same deny list when
-it fires, etc. They don't create independent bypass paths and
-don't need to be on the deny list. (Verified empirically — see
-the [permission-test recipe](claude-code-permission-tests.md) you
-can re-run on any future version.)
+- A `permissions.deny` array with every built-in effecting tool
+  name. Claude Code's deny rules always win over allow rules,
+  so this is hard-deny. The list is the same for Claude Code v1
+  and v2 — the v2 additions (`Agent`/`Task*`/`Cron*`/`Skill`/
+  `EnterWorktree`/`SendMessage`/`Team*`) all inherit the parent
+  session's `.claude/settings.json` rather than create
+  independent bypass paths (verified empirically — see the
+  [permission-test recipe](claude-code-permission-tests.md)).
+- `disableBypassPermissionsMode: "disable"` to lock out v2's
+  `bypassPermissions` mode, which would otherwise skip the deny
+  list entirely. (Silently ignored on v1.)
+- `disableAutoMode: "disable"` to require explicit user approval
+  on every operation, including Denyx-permitted ones. (Drop
+  this manually from the generated file if you'd rather trust
+  the policy gate as the safety boundary and skip the per-call
+  prompt.)
+- (With `--sandbox auto`) a `sandbox` stanza enabling Claude
+  Code v2's OS-level isolation — Seatbelt on macOS, bubblewrap
+  on Linux/WSL2 — with `allowedDomains` and `allowWrite`
+  derived from the Denyx policy. Defense-in-depth at the kernel
+  layer in case any built-in slips through.
 
-The bare tool name (e.g. `"Bash"`, not `"Bash(*)"`) means *"deny
-every invocation of this tool."* Deny rules always win over
-allow rules in Claude Code's permission system, so this is
-hard-deny.
-
-#### v2-only addition: lock out bypass-permissions mode
-
-If you're on v2, add one more field to prevent the deny list
-itself from being skipped:
-
-```json
-{
-  "permissions": {
-    "deny": [ ... as above ... ],
-    "disableBypassPermissionsMode": "disable"
-  }
-}
-```
-
-`bypassPermissions` is a v2 mode that skips **every** permission
-check, including the deny list. Without this lock, a user
-(possibly tricked into it) can disable your lockdown with one
-keystroke. The `"disable"` value here means *"prevent this mode
-from being activated."*
-
-The field is silently ignored on v1 (v1 doesn't have the bypass
-mode), so including it unconditionally is safe.
-
-#### Optional: also lock out auto mode
-
-v2 has an `auto` mode that auto-approves tools the ML
-classifier judges "safe." Deny rules still take precedence, so
-auto mode never auto-approves something on your deny list — but
-it does auto-approve permitted tools (including
-`mcp__denyx__*`) without prompting the user. Whether you want
-that is a UX preference, not a security requirement:
-
-```json
-"disableAutoMode": "disable"
-```
-
-Add this if you want every operation (including Denyx-permitted
-ones) to require explicit user approval. Skip it if you trust
-the policy gate as the safety boundary and prefer no extra
-prompts on Denyx-permitted operations.
-
-#### Common to both versions
-
-- **This is project-local.** `./.claude/settings.json` only
-  affects sessions started in this directory. Other projects on
-  the same machine are unaffected.
-- The `"deny"` array uses tool names directly (no `mcp__server__`
-  prefix for built-ins; only MCP tools have that prefix).
-- Restart Claude Code after writing the file. The model now has
-  exactly one path to side-effects: through the `mcp__denyx__*`
-  tools, which all go through the policy gate.
+The lockdown is project-local: `./.claude/settings.json` only
+affects sessions started in that directory. Restart Claude Code
+after running `host-config` so it picks up the new file.
 
 ### Add Claude Code's memory files to the policy
 
@@ -273,7 +225,9 @@ Denyx's tools too). What you can do:
    `.mcp.json`.
 
 2. **Explicitly deny known competing servers** by adding their
-   tool-name patterns to the deny list:
+   tool-name patterns to the deny list. After running
+   `host-config`, edit `./.claude/settings.json` and append to
+   `permissions.deny`:
 
    ```json
    {
@@ -291,7 +245,9 @@ Denyx's tools too). What you can do:
 
    Each `mcp__<server>__*` line denies all tools from that
    server. This requires knowing the names of the servers the
-   project might add, which is a real maintenance burden.
+   project might add, which is a real maintenance burden. A
+   subsequent `host-config` run will preserve the additions
+   (merge mode unions the deny list).
 
 3. **Treat adding a new MCP server as a security review event.**
    When a developer wants to add a new `mcpServers` entry,
@@ -359,19 +315,11 @@ capabilities escalate to the caller on every call. The MCP server's
   passes silently. **Use only for tests and demos** — this defeats
   the purpose of `requires_approval`.
 
-```json
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "denyx-mcp",
-      "args": [
-        "--policy", "/path/to/denyx.toml",
-        "--confirm-mode", "auto"
-      ]
-    }
-  }
-}
-```
+`host-config` always writes `--confirm-mode auto` into the MCP
+args. To switch modes, edit `./.mcp.json` after generation (the
+`mcpServers.denyx.args` array) — `host-config` won't overwrite
+that change on the next run as long as you stay in default
+`--existing merge` mode.
 
 #### Empirical findings: what Claude Code actually does
 

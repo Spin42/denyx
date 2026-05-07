@@ -32,76 +32,65 @@ outside the current working directory.
 The rest of this section walks through the same setup manually, in
 case you want to understand each step or do it without the prompt.
 
-## Configure the MCP server
+## Configure with `denyx host-config`
 
-opencode reads MCP server configuration from a project-local
-`./opencode.json` (or the user-global
-`~/.config/opencode/opencode.json` if you want machine-wide
-enablement). Project-local is what you almost always want — it
-keeps Denyx scoped to the project you're gating, instead of
-opting every project on the machine in.
-
-The opencode config shape is **different from Claude Code's**.
-Specifically:
-
-- Top-level key is **`mcp`**, not `mcpServers` (Claude Code's name).
-- Each server entry has a **`type`** field — `"local"` for stdio
-  servers like `denyx-mcp`.
-- **`command`** is a single ARRAY that contains the binary AND
-  its arguments together; there is no separate `args` field.
-- An **`enabled`** boolean lets you toggle servers without
-  removing them.
-
-So a working `opencode.json` looks like:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "denyx": {
-      "type": "local",
-      "command": [
-        "denyx-mcp",
-        "--policy",       "/absolute/path/to/your/project/denyx.toml",
-        "--audit-log",    "/absolute/path/to/your/project/.denyx/audit.jsonl",
-        "--confirm-mode", "auto"
-      ],
-      "enabled": true
-    }
-  }
-}
-```
-
-Create the `.denyx/` directory and gitignore it before launching:
+The recommended path is to let `denyx host-config` write
+`./opencode.json` (and optionally `.claude/settings.json` /
+`.mcp.json`) from your policy in one go:
 
 ```sh
-mkdir -p /absolute/path/to/your/project/.denyx
-echo '.denyx/' >> /absolute/path/to/your/project/.gitignore
+cd /path/to/your/project
+denyx host-config \
+    --policy ./denyx.toml \
+    --host opencode \
+    --platform native \
+    --sandbox auto
 ```
 
-> **`--audit-log` is effectively required.** Without it,
-> `denyx-mcp` writes audit events to stderr, which opencode
-> captures into its own MCP-server log directory mixed with every
-> other server's noise — making the audit feature look broken
-> from the operator's perspective. The path doesn't have to be
-> `./.denyx/audit.jsonl`; that's just the recommended default
-> for project-local audit. What matters is that *some* path is
-> set so events go to a file you can `tail -f` and `jq` against:
+This single command:
+
+- creates `./.denyx/` and adds it to `./.gitignore` (audit-log dir),
+- writes `./opencode.json` with `mcp.denyx` wired (using the
+  opencode-specific shape — `type: "local"`, `command` as a single
+  array, `enabled: true`), the `tools` block disabling every
+  built-in effecting tool (`bash`, `read`, `write`, `edit`,
+  `glob`, `grep`, `webfetch`, `websearch`), and a `permission`
+  block with `"*": "deny"` + `"denyx*": "allow"` as
+  defense-in-depth.
+
+If `./opencode.json` already exists, `host-config` **merges**:
+unrelated keys are preserved, the `tools` block has `false`
+override `true` (with a stderr warning), and the `mcp.denyx`
+entry replaces any prior version.
+
+> **macOS / Windows:** Pass `--platform lima --lima-vm <vm>` (macOS)
+> or `--platform wsl --wsl-distro <distro>` (Windows) so the
+> generated `command` array uses the right wrapper. On those
+> platforms also pass `--policy <absolute-path>` and
+> `--audit-log <absolute-path>`.
+
+> **`--audit-log` defaults to `./.denyx/audit.jsonl`.** Without an
+> audit-log path, `denyx-mcp` writes events to stderr, which
+> opencode buries in its own MCP-server log directory.
+> `host-config` always passes `--audit-log` explicitly so events
+> land somewhere you can `tail -f` and `jq` against:
 >
 > ```sh
 > tail -f .denyx/audit.jsonl
 > jq -c 'select(.status == "denied")' .denyx/audit.jsonl
 > ```
 
-If you copy-pasted the Claude Code shape (`mcpServers` + separate
-`command`/`args`) into `opencode.json`, opencode rejects the
-config at startup with `Configuration is invalid ... Unrecognized
-key: mcpServers`. The fix is purely shape: rewrite to the form
-above.
+opencode's MCP config shape is **different from Claude Code's**:
+top-level key `mcp` (not `mcpServers`), each server has a `type`
+field (`"local"` for stdio), `command` is a single array
+containing both the binary and its args (no separate `args`
+field), and `enabled: true` toggles the server. `host-config`
+emits the right shape automatically — you don't have to remember
+these quirks.
 
-Restart opencode. The server's tools should appear in the tool list,
-typically prefixed `denyx__` or similar (opencode's exact namespacing
-may differ from Claude Code's).
+Restart opencode. The server's tools should appear in the tool
+list, typically prefixed `denyx__` or similar (opencode's exact
+namespacing may differ from Claude Code's).
 
 ## Available tools
 
@@ -110,127 +99,47 @@ Same as the Claude Code integration — see
 for the list. The only naming difference is the host's namespace
 prefix.
 
-## Disable opencode's built-in effecting tools (REQUIRED)
+## Why disabling opencode's built-in tools is required
 
-**Wiring `denyx-mcp` is not enough by itself.** opencode ships
-with built-in `bash`, `read`, `write`, `edit`, `glob`, `grep`,
-`webfetch`, `websearch` tools that touch the filesystem, network,
-and shell **directly** — they do NOT go through any MCP server.
-If you only add the `mcp` block above and leave the built-ins
-enabled, the model will see two paths to read a file (`read` vs.
-`denyx__denyx_fs_read`) and pick the cheaper, ungated one. Net
-result: Denyx is installed but the policy gate never fires. You
-have a placebo sandbox.
+`denyx host-config` writes the lockdown automatically; this
+section explains *why* it's non-negotiable.
 
-To actually enforce the policy, add a `tools` block to the same
-`./opencode.json` you wrote above, setting every built-in
-effecting tool to `false`:
+opencode ships with built-in `bash`, `read`, `write`, `edit`,
+`glob`, `grep`, `webfetch`, `websearch` tools that touch the
+filesystem, network, and shell **directly** — they do NOT go
+through any MCP server. If only `denyx-mcp` is wired and the
+built-ins remain enabled, the model sees two paths to read a
+file (`read` vs. `denyx__denyx_fs_read`) and picks the cheaper,
+ungated one. Result: placebo sandbox.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "tools": {
-    "bash": false,
-    "read": false,
-    "write": false,
-    "edit": false,
-    "glob": false,
-    "grep": false,
-    "webfetch": false,
-    "websearch": false
-  },
-  "mcp": {
-    "denyx": {
-      "type": "local",
-      "command": [
-        "denyx-mcp",
-        "--policy",       "/absolute/path/to/your/project/denyx.toml",
-        "--audit-log",    "/absolute/path/to/your/project/.denyx/audit.jsonl",
-        "--confirm-mode", "auto"
-      ],
-      "enabled": true
-    }
-  }
-}
-```
+`host-config` writes (or merges into) `./opencode.json`:
 
-`tools: false` removes the built-in entirely — the model never
-sees it in its tool list. Restart opencode and the model now has
-exactly one path to side-effects: through the `denyx__*` tools,
-which all go through the policy gate.
+- A `tools` block with every built-in effecting tool set to
+  `false`. `tools: false` removes the built-in entirely — the
+  model never sees it in its tool list.
+- A `permission` block with `"*": "deny"` and `"denyx*": "allow"`.
+  This is opencode's **deny-by-default whitelist**: every tool
+  denied unless explicitly allowed. The `tools: false` denies
+  cover the built-ins opencode ships *today*; the
+  `permission: "*": "deny"` whitelist also catches:
+  - Future opencode versions adding new built-in tools.
+  - Other MCP servers exposing equivalent capabilities (e.g. a
+    `filesystem-mcp` with a `read_file` tool, or `shell-mcp`
+    with `run_command`).
+  This is the strongest shape: Denyx is the only path the model
+  has to side-effects, period. New tools are denied by default
+  until you explicitly allow them.
 
-**This is project-local** — `./opencode.json` only affects
-sessions started in this directory. Other projects on the same
-machine are unaffected. If you have a global
-`~/.config/opencode/opencode.json` with built-ins enabled, that
-global config is unchanged; opencode merges the project-local
-shape over it for sessions in this directory.
+The lockdown is project-local: `./opencode.json` only affects
+sessions started in that directory. Restart opencode after
+running `host-config` so it picks up the new file.
 
-### The whitelist shape (recommended for full lockdown)
-
-The `tools: { …: false }` block above explicitly denies the
-built-ins opencode ships *today*. It does NOT survive:
-
-- **Future opencode versions adding new built-in tools** —
-  `tools: false` only catches the names you've listed.
-- **Other MCP servers exposing equivalent capabilities** — if
-  the project has a second MCP server configured (e.g.
-  `filesystem-mcp` with a `read_file` tool, or `shell-mcp` with
-  `run_command`), the model can use those tools and bypass
-  Denyx the same way it would have bypassed via the built-ins.
-
-opencode's `permission` block supports a clean **deny-by-default
-whitelist** that closes both holes. Combine it with the explicit
-`tools` denies for belt-and-braces:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "permission": {
-    "*": "deny",
-    "denyx*": "allow"
-  },
-  "tools": {
-    "bash": false,
-    "read": false,
-    "write": false,
-    "edit": false,
-    "glob": false,
-    "grep": false,
-    "webfetch": false,
-    "websearch": false
-  },
-  "mcp": {
-    "denyx": {
-      "type": "local",
-      "command": [
-        "denyx-mcp",
-        "--policy",       "/absolute/path/to/your/project/denyx.toml",
-        "--audit-log",    "/absolute/path/to/your/project/.denyx/audit.jsonl",
-        "--confirm-mode", "auto"
-      ],
-      "enabled": true
-    }
-  }
-}
-```
-
-`permission` wildcards match against the underlying tool name:
-
-- `"*": "deny"` — every tool denied by default. Future built-ins
-  added by opencode are caught. Tools from other MCP servers
-  are caught.
-- `"denyx*": "allow"` — anything starting with `denyx` (i.e. all
-  tools exposed by your `denyx-mcp` server) is allowed.
-
-This is the strongest shape: **Denyx is the only path the model
-has to side-effects, period.** New tools — whether shipped by
-opencode itself, or exposed by an MCP server you didn't audit —
-are denied by default until you add an explicit `allow` for them.
+### Allowing additional servers alongside Denyx
 
 If you want to also use a *different* MCP server alongside Denyx
 (e.g. a read-only documentation lookup that doesn't side-effect
-anything), add its tool-name prefix to `permission`:
+anything), edit the generated `./opencode.json` and add its
+tool-name prefix to `permission`:
 
 ```json
 "permission": {
@@ -240,8 +149,10 @@ anything), add its tool-name prefix to `permission`:
 }
 ```
 
-That makes adding a new MCP server a deliberate decision —
-exactly the property you want for a security-critical setup.
+A subsequent `host-config` run preserves the addition (merge
+mode keeps existing `permission` entries). Adding a new MCP
+server is then a deliberate decision — exactly the property you
+want for a security-critical setup.
 
 ## Add opencode's memory files to the policy
 

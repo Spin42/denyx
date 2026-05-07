@@ -25,13 +25,18 @@ The agent will:
 3. Walk you through five questions about filesystem reads, network
    hosts, env vars, subprocess commands, and approval gates —
    editing `denyx.toml` as you answer.
-4. Write a project-local MCP config (`.mcp.json` for Claude Code,
-   `opencode.json` for opencode) that wires `denyx-mcp` into your
-   project for future sessions.
+4. Run `denyx host-config` once: it writes the MCP server entry
+   (`.mcp.json` for Claude Code, `opencode.json` for opencode),
+   the lockdown of every built-in effecting tool
+   (`.claude/settings.json` deny list + opencode `tools: false`),
+   and (with `--sandbox auto`) Claude Code's OS-level sandbox
+   stanza derived from the policy's network/filesystem allow
+   lists.
 5. Smoke-test by running an allowed read and a deliberately-denied
    read so you can see the gate fire.
 6. Tell you what to commit to git (`denyx.toml`, optionally
-   `.mcp.json`) and what not to.
+   `.mcp.json` / `opencode.json` / `.claude/settings.json`) and
+   what not to.
 
 Two-minute setup, project-specific, nothing in `~/.config/`,
 nothing system-wide. After it finishes, restart your agent host
