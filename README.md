@@ -19,21 +19,27 @@ the policy, the operation **fails** — no prompt-engineering bypass, no
 
 ## 60-second quickstart
 
-**1. Install `denyx` and `denyx-mcp` on your `$PATH`.** From source, on Linux:
+**1. Install `denyx` and `denyx-mcp` on your `$PATH`:**
 
 ```sh
-git clone https://github.com/Spin42/denyx
-cd denyx
-cargo build --release
-export PATH="$PWD/target/release:$PATH"   # or copy to ~/.local/bin
+cargo install denyx-cli denyx-mcp
 ```
 
-macOS and Windows users: the same `cargo build --release` works natively,
-but kernel-level subprocess sandboxing (`bwrap`) is Linux-only — see
-[Prerequisites](#prerequisites) for the trade-off and the Lima / WSL2
-guides if you want sandboxing too. When the crates are published to
-crates.io, Step 1 becomes a single
-`cargo install denyx-cli denyx-mcp`.
+Both binaries land in `~/.cargo/bin/`, which is normally already on
+your `$PATH`. This works natively on Linux, macOS, and Windows for the
+language-level gate. If you want kernel-level subprocess sandboxing
+too (`bwrap`, Linux-only), see [Prerequisites](#prerequisites) for the
+Lima / WSL2 guides — Denyx then installs *inside* the VM rather than
+on the host.
+
+> **Building from source instead?** Use this if you need an unreleased
+> feature or are contributing:
+> ```sh
+> git clone https://github.com/Spin42/denyx
+> cd denyx
+> cargo build --release
+> export PATH="$PWD/target/release:$PATH"
+> ```
 
 **2. `cd` to the project you want to gate** (NOT the Denyx checkout — your
 own codebase), open Claude Code or opencode in that directory, and paste
@@ -63,9 +69,9 @@ JSON Lines record you can later verify with `denyx audit verify`.
 
 ## Prerequisites
 
-The only universally-required dependency is a **Rust toolchain 1.74+** to
-build the binaries (or, when crates land on crates.io,
-`cargo install denyx-cli denyx-mcp`).
+The only universally-required dependency is a **Rust toolchain 1.74+** —
+needed for `cargo install denyx-cli denyx-mcp` (the recommended path)
+and for building from source if you'd rather.
 
 Kernel-level subprocess sandboxing (`[subprocess].sandbox = "bwrap"`) is
 **opt-in and Linux-only** — `bubblewrap` relies on Linux user namespaces,
@@ -174,8 +180,7 @@ Denyx is a serious prototype and a working policy gate, but **not yet
 hardened enough to be your default for unattended agentic work**. Keep this
 table in mind before deciding where to deploy it:
 
-- **Pre-1.0.** The schema may shift in minor ways before v1. No published
-  crates yet — build from source.
+- **Pre-1.0.** The schema may shift in minor ways before v1.
 - **AI-generated codebase.** Most code, tests, and docs were written by
   Claude (Anthropic) under human direction; the architecture and threat
   model are human, the implementation is not. Read diffs before trusting

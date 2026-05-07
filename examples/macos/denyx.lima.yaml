@@ -3,15 +3,18 @@
 # Usage:
 #   brew install lima
 #   limactl start --name=denyx examples/macos/denyx.lima.yaml
-#   limactl shell denyx -- bash -lc 'cd ~/Projects/post-sigil && cargo build --release'
+#   limactl shell denyx -- bash -lc 'cargo install denyx-cli denyx-mcp'
 #
 # Then point Claude Code (or any MCP-aware host) at:
 #   command = "limactl"
-#   args    = ["shell", "denyx", "<host-path-to>/target/release/denyx-mcp",
+#   args    = ["shell", "denyx", "<host-home>/.cargo/bin/denyx-mcp",
 #              "--policy", "<host-path-to>/denyx.toml"]
 #
 # The host's $HOME is mirrored at the same absolute path inside the VM,
 # so you write paths once and they resolve identically on both sides.
+# (Source-build fallback: clone the repo, swap cargo install for
+# `cd <repo> && cargo build --release`, and reference
+# `<repo>/target/release/denyx-mcp` instead.)
 # See docs/macos-deployment.md for the full walkthrough.
 
 # Ubuntu 24.04 LTS — recent kernel + bubblewrap available in apt.

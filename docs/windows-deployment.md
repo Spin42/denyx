@@ -57,13 +57,11 @@ In the resulting Ubuntu shell:
 
 ```sh
 sudo apt-get update -y
-sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl git
+sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-git clone https://github.com/<owner>/post-sigil denyx
-cd denyx
-cargo build --release
+cargo install denyx-cli denyx-mcp
 ```
 
 Then back on Windows, add this to your Claude Code (or other MCP
@@ -77,7 +75,7 @@ host) configuration:
       "args": [
         "-d", "Ubuntu-24.04",
         "-e",
-        "/home/YOU/denyx/target/release/denyx-mcp",
+        "/home/YOU/.cargo/bin/denyx-mcp",
         "--policy", "/mnt/c/Users/YOU/projects/myapp/denyx.toml"
       ]
     }
@@ -160,19 +158,28 @@ if ! command -v cargo >/dev/null; then
 fi
 ```
 
-### 3. Build Denyx inside WSL
+### 3. Install Denyx inside WSL
 
 ```sh
-git clone https://github.com/<owner>/post-sigil denyx
-cd denyx
-cargo build --release
+cargo install denyx-cli denyx-mcp
 ```
 
-The `target/release/denyx-mcp` is now a Linux ELF inside the WSL
+The `~/.cargo/bin/denyx-mcp` binary is now a Linux ELF inside the WSL
 distro. From Windows it's reachable at
-`\\wsl$\Ubuntu-24.04\home\YOU\denyx\target\release\denyx-mcp` — but
-you'll typically address it via `wsl.exe -e` rather than that UNC
-path.
+`\\wsl$\Ubuntu-24.04\home\YOU\.cargo\bin\denyx-mcp` — but you'll
+typically address it via `wsl.exe -e` rather than that UNC path.
+
+> **Building from source instead?** Use this if you need an unreleased
+> feature or are contributing.
+>
+> ```sh
+> sudo apt-get install -y git
+> git clone https://github.com/Spin42/denyx
+> cd denyx
+> cargo build --release
+> ```
+>
+> The MCP-config path then becomes `/home/YOU/denyx/target/release/denyx-mcp`.
 
 ### 4. Decide where the policy file lives
 
@@ -204,7 +211,7 @@ Edit your Claude Code MCP config (typically
       "args": [
         "-d", "Ubuntu-24.04",
         "-e",
-        "/home/YOU/denyx/target/release/denyx-mcp",
+        "/home/YOU/.cargo/bin/denyx-mcp",
         "--policy", "/mnt/c/Users/YOU/projects/myapp/denyx.toml"
       ]
     }
@@ -231,7 +238,7 @@ In the Ubuntu shell:
 
 ```sh
 echo 'fs.read("/etc/shadow")' > /tmp/check.star
-~/denyx/target/release/denyx run \
+~/.cargo/bin/denyx run \
   --policy /mnt/c/Users/YOU/projects/myapp/denyx.toml \
   /tmp/check.star
 ```
@@ -263,10 +270,11 @@ Ubuntu 24.04 inside WSL2:
 ## Updating
 
 ```sh
-cd ~/denyx
-git pull
-cargo build --release
+cargo install denyx-cli denyx-mcp --force
 ```
+
+(Or, if you're on the build-from-source path:
+`cd ~/denyx && git pull && cargo build --release`.)
 
 Or update the WSL distro itself:
 

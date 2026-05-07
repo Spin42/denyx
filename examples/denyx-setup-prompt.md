@@ -10,18 +10,18 @@ The prompt is project-specific by design: every file it writes lands in
 the current working directory. Nothing is installed system-wide; nothing
 in `~/.config/...` is touched.
 
-> **Prerequisite.** Either:
+> **Prerequisite — install Denyx first.** The default install is:
 >
-> - **Recommended:** install the published crates with
->   `cargo install denyx-cli denyx-mcp`. This puts a `denyx` and a
->   `denyx-mcp` binary into `~/.cargo/bin/`, which should already be
->   on your `$PATH`.
-> - **From source:** clone `Spin42/denyx`, run `cargo build --release`,
->   and the prompt will pick up
->   `<repo>/target/release/{denyx,denyx-mcp}`. Use this if you need
->   features not yet on crates.io, or are contributing.
+> ```sh
+> cargo install denyx-cli denyx-mcp
+> ```
 >
-> On **macOS** the binaries must be installed inside a Lima VM (see
+> Both binaries land in `~/.cargo/bin/` and should already be on your
+> `$PATH`. Build-from-source is a fallback for unreleased features or
+> contributors: clone `Spin42/denyx`, run `cargo build --release`, and
+> the prompt will pick up `<repo>/target/release/{denyx,denyx-mcp}`.
+>
+> On **macOS** the binaries are installed inside a Lima VM (see
 > [docs/macos-deployment.md](../docs/macos-deployment.md)). On
 > **Windows** they go inside WSL2 (see
 > [docs/windows-deployment.md](../docs/windows-deployment.md)). On
@@ -73,10 +73,10 @@ correct outcome, not a sign you should have stayed silent.
        up, stop and tell the user to follow
        docs/windows-deployment.md, then restart this prompt.
 
-3. Find the denyx binaries. Try the recommended path first, then
-   fall back to source-built:
+3. Find the denyx binaries. Default path first, then fall back to
+   source-built:
 
-   a. **Published install** — run `denyx --version` and
+   a. **Default (cargo install)** — run `denyx --version` and
       `denyx-mcp --version` (on Linux, on the host shell; on macOS,
       inside `limactl shell denyx ...`; on Windows, inside
       `wsl.exe -d <distro> -e ...`). If both succeed, use bare
@@ -84,14 +84,16 @@ correct outcome, not a sign you should have stayed silent.
       Set `<denyx>` and `<denyx-mcp>` to those bare command names
       for the rest of this prompt.
 
-   b. **Source build** — if either command isn't found, ask the user:
-      "Where is your Denyx checkout? (The directory containing
-      `Cargo.toml` for the `denyx-*` workspace.)"
-      Then verify `<repo>/target/release/denyx` and `denyx-mcp`
-      exist. Set `<denyx>` and `<denyx-mcp>` to those absolute paths.
-      If the binaries don't exist, stop and tell the user to either
-      run `cargo install denyx-cli denyx-mcp` (preferred) or
-      `cargo build --release` in their checkout.
+   b. **Source build (fallback)** — if either command isn't found,
+      first ask the user whether they want you to install via
+      `cargo install denyx-cli denyx-mcp` (the default — works for
+      most users) or to point at an existing source checkout. If
+      they want the source path, ask: "Where is your Denyx checkout?
+      (The directory containing `Cargo.toml` for the `denyx-*`
+      workspace.)" Then verify `<repo>/target/release/denyx` and
+      `denyx-mcp` exist; set `<denyx>` and `<denyx-mcp>` to those
+      absolute paths. If neither exists and the user can't run
+      `cargo install`, stop and explain why.
 
 == Step 1: Detect the project's language ==
 
@@ -113,8 +115,8 @@ Run from cwd:
     <denyx> init --lang <detected> --output ./denyx.toml
 
 (where `<denyx>` is whatever you resolved in Step 0.3 — bare
-`denyx` if installed via cargo, or
-`<repo>/target/release/denyx` if built from source).
+`denyx` if installed via `cargo install`, or
+`<repo>/target/release/denyx` on the source-build fallback).
 
 If `denyx.toml` already exists, ASK FIRST before clobbering. Offer
 to write `denyx.toml.new` instead and diff against the existing one.
@@ -229,8 +231,8 @@ defeating the audit feature for most users. **Always pass
 Build the MCP `command`/`args` based on the OS branch from Step 0
 and which install path resolved in 0.3. `<denyx-mcp>` below is
 either the bare command name (`denyx-mcp`, when installed via
-`cargo install denyx-mcp`) or the absolute path
-(`<repo>/target/release/denyx-mcp`, when built from source).
+`cargo install denyx-cli denyx-mcp` — the default) or the absolute path
+(`<repo>/target/release/denyx-mcp`, on the source-build fallback).
 
   - Linux native:
       command: <denyx-mcp>
@@ -449,21 +451,23 @@ Tell the user:
   - **Whether to commit `./.mcp.json` / `./opencode.json` /
     `./.claude/settings.json` depends on which install path you
     used:**
-      * If the MCP config invokes bare `denyx-mcp` (cargo-
-        installed path), it's portable across contributors who
-        have also run `cargo install denyx-mcp`. Safe to commit
-        — and recommended, so contributors don't each have to
+      * If the MCP config invokes bare `denyx-mcp` (the default,
+        `cargo install`-based path), it's portable across
+        contributors who have also run
+        `cargo install denyx-cli denyx-mcp`. Safe to commit —
+        and recommended, so contributors don't each have to
         re-run this prompt. The `.claude/settings.json` deny
         list and the `tools` block in `opencode.json` are also
         portable; commit them.
       * If the MCP config embeds an absolute path to a local
-        checkout (`<repo>/target/release/denyx-mcp`), that path
-        differs per machine. Either gitignore the MCP-config
-        file and have each contributor run this prompt, or commit
-        a templated version (e.g. `.mcp.json.example`) with
-        `${DENYX_MCP_BIN}` and document the env var in the project
-        README. Note: `.claude/settings.json` is still safe to
-        commit because it doesn't reference the binary path.
+        checkout (`<repo>/target/release/denyx-mcp`, the
+        source-build fallback), that path differs per machine.
+        Either gitignore the MCP-config file and have each
+        contributor re-run this prompt, or commit a templated
+        version (e.g. `.mcp.json.example`) with `${DENYX_MCP_BIN}`
+        and document the env var in the project README. Note:
+        `.claude/settings.json` is still safe to commit because it
+        doesn't reference the binary path.
   - For Linux operators who want OS-level isolation: edit
     `denyx.toml` and add `sandbox = "bwrap"` under
     `[subprocess]` (after installing bubblewrap with

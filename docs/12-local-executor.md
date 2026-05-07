@@ -202,7 +202,7 @@ be the layer that says no.
 
 Prerequisites:
 
-- Denyx built (`cargo build --release`); `denyx-mcp` on `$PATH`.
+- Denyx installed (`cargo install denyx-cli denyx-mcp`, or `cargo build --release` from a source checkout); `denyx-mcp` on `$PATH`.
 - Ollama running locally; `qwen2.5-coder:7b` and `nomic-embed-text`
   pulled (`ollama pull qwen2.5-coder:7b nomic-embed-text`).
 - For the orchestrated runs: `claude` CLI installed and authenticated.

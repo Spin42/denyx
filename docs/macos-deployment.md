@@ -60,7 +60,7 @@ brew install lima
 limactl start --name=denyx examples/macos/denyx.lima.yaml
 
 limactl shell denyx -- bash -lc \
-  "cd '$PWD' && cargo build --release"
+  "cargo install denyx-cli denyx-mcp"
 ```
 
 Then add this to your Claude Code (or other MCP host) configuration:
@@ -72,7 +72,7 @@ Then add this to your Claude Code (or other MCP host) configuration:
       "command": "limactl",
       "args": [
         "shell", "denyx",
-        "/Users/YOU/Projects/post-sigil/target/release/denyx-mcp",
+        "/Users/YOU/.cargo/bin/denyx-mcp",
         "--policy", "/Users/YOU/Projects/myapp/denyx.toml"
       ]
     }
@@ -84,7 +84,9 @@ The agent calls `denyx_run` from the host; the call traverses
 `limactl shell` (stdio JSON-RPC), lands in the VM, the script runs
 under bubblewrap, the printed output flows back up the pipe. Path
 arguments resolve identically on both sides because Lima mirrors the
-host's `$HOME` at the same absolute path inside the VM.
+host's `$HOME` at the same absolute path inside the VM —
+`~/.cargo/bin/denyx-mcp` is reachable as a single absolute path from
+both macOS and Linux.
 
 ## Prerequisites
 
@@ -133,23 +135,33 @@ The template:
 - Runs CPU/memory at 2 cores / 2 GiB by default. Bump in the YAML
   if you run heavy local-executor evals inside the VM.
 
-### 3. Build Denyx inside the VM
+### 3. Install Denyx inside the VM
 
-Because Lima mirrors `$HOME` at the same path, you build *once*
-inside the VM and the binary is reachable from both sides. From the
+Because Lima mirrors `$HOME` at the same path, anything `cargo install`
+puts under `~/.cargo/bin/` is reachable from both sides. From the
 host:
 
 ```sh
-cd ~/Projects/post-sigil    # wherever you cloned
-
 limactl shell denyx -- bash -lc \
-  "cd '$PWD' && cargo build --release"
+  "cargo install denyx-cli denyx-mcp"
 ```
 
-The `target/release/denyx-mcp` binary now exists at the same path on
-the host's filesystem (because `target/` is in your home, which is
-mirrored). It's a Linux ELF — you can't run it on macOS directly,
-which is fine: `limactl shell` is what runs it.
+The `~/.cargo/bin/denyx-mcp` binary now exists at the same absolute
+path on macOS and inside the VM. It's a Linux ELF — you can't run it
+natively on macOS, which is fine: `limactl shell` is what runs it.
+
+> **Building from source instead?** Use this if you need an unreleased
+> feature or are contributing.
+>
+> ```sh
+> cd ~/Projects/denyx     # or wherever you cloned
+> limactl shell denyx -- bash -lc \
+>   "cd '$PWD' && cargo build --release"
+> ```
+>
+> The MCP-config path then becomes the absolute `target/release/denyx-mcp`
+> path inside the mirrored project tree (e.g.
+> `/Users/YOU/Projects/denyx/target/release/denyx-mcp`).
 
 ### 4. Wire it into Claude Code
 
@@ -163,7 +175,7 @@ Edit your Claude Code MCP config (typically
       "command": "limactl",
       "args": [
         "shell", "denyx",
-        "/Users/YOU/Projects/post-sigil/target/release/denyx-mcp",
+        "/Users/YOU/.cargo/bin/denyx-mcp",
         "--policy", "/Users/YOU/Projects/myapp/denyx.toml"
       ]
     }
@@ -188,7 +200,7 @@ chain:
 ```sh
 limactl shell denyx -- bash -lc \
   "echo 'subprocess.exec([\"id\"])' > /tmp/check.star && \
-   ~/Projects/post-sigil/target/release/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check.star"
+   ~/.cargo/bin/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check.star"
 ```
 
 You should see the `id` output. Now flip the policy's
@@ -198,7 +210,7 @@ shouldn't reach (e.g. `/etc/shadow`) to a script:
 ```sh
 limactl shell denyx -- bash -lc \
   "echo 'fs.read(\"/etc/shadow\")' > /tmp/check2.star && \
-   ~/Projects/post-sigil/target/release/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check2.star"
+   ~/.cargo/bin/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check2.star"
 ```
 
 You should see a typed Policy denial — the path isn't in
@@ -232,11 +244,12 @@ RAM (`memory: "8GiB"` in the YAML) and CPUs (`cpus: 6`).
 To pick up new Denyx releases:
 
 ```sh
-cd ~/Projects/post-sigil
-git pull
 limactl shell denyx -- bash -lc \
-  "cd '$PWD' && cargo build --release"
+  "cargo install denyx-cli denyx-mcp --force"
 ```
+
+(Or, if you're on the build-from-source path:
+`cd ~/Projects/denyx && git pull && limactl shell denyx -- bash -lc "cd '$PWD' && cargo build --release"`.)
 
 The binary path doesn't change, so your Claude Code MCP config
 keeps working.

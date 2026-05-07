@@ -2,9 +2,14 @@
 
 > ← [Back to docs README](README.md)
 
-Denyx is a Rust workspace. There are no published crates yet — install
-from source. The build process is the same on every platform; the
-*runtime layer* differs because OS-level isolation is platform-specific.
+Denyx ships as four crates on crates.io: `denyx-policy`, `denyx-host`,
+`denyx-cli` (the `denyx` binary), and `denyx-mcp` (the MCP server
+binary). The recommended install is `cargo install denyx-cli
+denyx-mcp`. Build-from-source is a fallback for contributors and for
+unreleased features.
+
+The install command is the same on every platform; the *runtime layer*
+differs because OS-level isolation is platform-specific.
 
 ## Pick your platform
 
@@ -34,35 +39,40 @@ when `[subprocess].sandbox = "bwrap"` is enabled in the policy.
 
 | Component   | Why                                          | Install                                                                      |
 |-------------|----------------------------------------------|------------------------------------------------------------------------------|
-| Rust stable | Building the workspace.                      | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`            |
-| `git`       | Cloning the repo.                            | Distro package; almost always pre-installed.                                 |
+| Rust stable | `cargo install` and build-from-source both need it. | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`            |
 | `bubblewrap` | OS-level sandbox backend (optional but recommended). | Debian/Ubuntu: `apt install bubblewrap` · Fedora: `dnf install bubblewrap` · Arch: `pacman -S bubblewrap` |
+| `git`       | Only needed for the build-from-source fallback. | Distro package; almost always pre-installed.                                 |
 
 If you only want the language-level gate (Starlark + capability
 typing + audit log) without OS-level isolation, you can skip
 bubblewrap. The policy then must use `[subprocess].sandbox = "none"`.
 
-### 2. Build
+### 2. Install
 
 ```sh
-git clone https://github.com/<owner>/post-sigil denyx
-cd denyx
-cargo build --release
+cargo install denyx-cli denyx-mcp
 ```
 
-That produces three binaries under `target/release/`:
+That installs two binaries into `~/.cargo/bin/`:
 
-- `denyx` — the CLI (run + init subcommands)
-- `denyx-mcp` — the MCP server
-- (`denyx-host` and `denyx-policy` are libraries, linked into both)
+- `denyx` — the CLI (`run`, `init`, `policy explain`, `audit verify`, …)
+- `denyx-mcp` — the MCP server (stdio JSON-RPC for Claude Code, opencode, …)
 
-Optionally put them on your `PATH`:
+`~/.cargo/bin/` is on `$PATH` after rustup's standard install. If
+you've never used `cargo install` before, source `~/.cargo/env` (or
+restart your shell) so the binaries become reachable.
 
-```sh
-mkdir -p "$HOME/.local/bin"
-ln -sf "$PWD/target/release/denyx"     "$HOME/.local/bin/denyx"
-ln -sf "$PWD/target/release/denyx-mcp" "$HOME/.local/bin/denyx-mcp"
-```
+> **Building from source instead?** Use this if you need an unreleased
+> feature or are contributing to Denyx.
+>
+> ```sh
+> git clone https://github.com/Spin42/denyx
+> cd denyx
+> cargo build --release
+> mkdir -p "$HOME/.local/bin"
+> ln -sf "$PWD/target/release/denyx"     "$HOME/.local/bin/denyx"
+> ln -sf "$PWD/target/release/denyx-mcp" "$HOME/.local/bin/denyx-mcp"
+> ```
 
 ### 3. Smoke test
 
@@ -71,13 +81,14 @@ denyx --help
 denyx init --lang python --output -    # writes a sample policy to stdout
 ```
 
-### 4. Run the test suite (optional)
+### 4. Run the test suite (only relevant for build-from-source)
 
 ```sh
 cargo test --workspace
 ```
 
-You should see ~177 tests pass.
+(Run inside the `git clone`d checkout. `cargo install` doesn't ship the
+test code; if you want to run the suite you need a source build.)
 
 ## macOS
 
@@ -86,17 +97,18 @@ See **[macos-deployment.md](macos-deployment.md)**. Short version:
 ```sh
 brew install lima
 limactl start --name=denyx examples/macos/denyx.lima.yaml
-limactl shell denyx -- bash -lc "cd '$PWD' && cargo build --release"
+limactl shell denyx -- bash -lc "cargo install denyx-cli denyx-mcp"
 ```
 
 Then point Claude Code's MCP config at
-`limactl shell denyx <path-to>/target/release/denyx-mcp ...`.
+`limactl shell denyx /Users/YOU/.cargo/bin/denyx-mcp ...` (Lima mirrors
+your `$HOME` at the same absolute path inside the VM, so
+`~/.cargo/bin/denyx-mcp` is reachable from both sides).
 
 The Lima template in
 [`examples/macos/denyx.lima.yaml`](../examples/macos/denyx.lima.yaml)
-provisions bubblewrap and the Rust toolchain on first boot. Builds
-and runs identically to a native Linux deployment from that point
-on.
+provisions bubblewrap and the Rust toolchain on first boot. Runs
+identically to a native Linux deployment from that point on.
 
 ## Windows
 
@@ -114,13 +126,12 @@ sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl gi
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-git clone https://github.com/<owner>/post-sigil denyx
-cd denyx
-cargo build --release
+cargo install denyx-cli denyx-mcp
 ```
 
 Then point Claude Code's MCP config at
-`wsl.exe -d Ubuntu-24.04 -e <path-to>/target/release/denyx-mcp ...`.
+`wsl.exe -d Ubuntu-24.04 -e /home/YOU/.cargo/bin/denyx-mcp ...` (use
+the WSL-side username; `~/.cargo/bin/denyx-mcp` resolves there).
 
 ## Optional components
 

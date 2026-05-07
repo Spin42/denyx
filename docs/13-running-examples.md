@@ -82,15 +82,18 @@ Confirm both models are pulled:
 ollama list | grep -E "qwen2.5-coder:7b|nomic-embed-text"
 ```
 
-Build the workspace once:
+Build the workspace once. Because the harnesses live in
+`examples/local_executor/` you'll already have a clone of this repo,
+so the natural move is:
 
 ```sh
 cargo build --release
 ```
 
-That produces `target/release/denyx` and `target/release/denyx-mcp`.
-The harnesses look for `denyx-mcp` at that path by default; pass
-`--mcp-bin <path>` to override.
+That produces `target/release/denyx` and `target/release/denyx-mcp`,
+which the harnesses look for at that path by default. You can also
+`cargo install denyx-cli denyx-mcp` and pass `--mcp-bin
+$(which denyx-mcp)` to each harness instead.
 
 ## The three harnesses
 
