@@ -2,13 +2,21 @@
 
 > ← [Back to docs README](README.md)
 
-This document is the "I want to reproduce these numbers" guide. The
-project ships three evaluation harnesses under
+This document is the **"I want to reproduce the eval numbers"**
+guide. The project ships three evaluation harnesses under
 `examples/local_executor/`. Each one drives a real Ollama model + a
 real `denyx-mcp` subprocess against a curated task suite, so the
 results in [docs/12-local-executor.md](12-local-executor.md) are
 reproducible on any Linux/macOS machine with the prerequisites
 installed.
+
+> **If instead you want to USE the local-executor stack in your own
+> project** — Claude Code or opencode delegating to a local 7B for
+> your day-to-day work, not eval-replay — see
+> [12-local-executor.md → Using it in your own project](12-local-executor.md#using-it-in-your-own-project).
+> That walkthrough shows the Claude Code / opencode config diffs, the
+> built-in-tool lockdown, and the smoke test. This page is for
+> validating the project, not configuring it for daily use.
 
 ## Results at a glance
 

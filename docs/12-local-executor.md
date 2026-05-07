@@ -198,47 +198,231 @@ That's an architecturally interesting result: defense-in-depth at the
 security tool that needs an evidentiary trail, you want the runtime to
 be the layer that says no.
 
-## Reproducing the runs
+## Using it in your own project
 
-Prerequisites:
+The local-executor stack is not a single binary — `local_mcp.py` is a
+Python bridge that lives in `examples/local_executor/`. Wiring it
+into Claude Code or opencode for **your own work** (not just for
+reproducing the eval) means pointing the host at that script in a
+Denyx checkout and disabling the host's own built-in tools so the
+model has no path to side effects except through the bridge.
 
-- Denyx installed (`cargo install denyx-cli denyx-mcp`, or `cargo build --release` from a source checkout); `denyx-mcp` on `$PATH`.
-- Ollama running locally; `qwen2.5-coder:7b` and `nomic-embed-text`
-  pulled (`ollama pull qwen2.5-coder:7b nomic-embed-text`).
-- For the orchestrated runs: `claude` CLI installed and authenticated.
+### What changes vs. the standard Denyx wiring
 
-### Phase 1.5 (local 7B + Denyx only)
+If you've already wired `denyx-mcp` directly per
+[08-quickstart.md](08-quickstart.md), here's the diff:
+
+|                       | Direct (`denyx-mcp`)                  | Local-executor (`local_mcp.py`)                 |
+|-----------------------|---------------------------------------|-------------------------------------------------|
+| MCP `command`         | `denyx-mcp`                           | `python3`                                       |
+| MCP `args`            | `--policy ./denyx.toml ...`           | `<path>/local_mcp.py --policy ./denyx.toml ...` |
+| Tools the model sees  | Full `denyx_*` family                 | `delegate_to_local` only                        |
+| Who writes Starlark   | The cloud model                       | The local 7B (qwen2.5-coder:7b)                 |
+| Cloud-side context    | Every `fs.read` body, HTTP response, env value | Only the bridge's per-step result string |
+| Per-call latency      | Pipe round-trip (~ms)                 | + qwen inference (1–4 s typical)                |
+| Cost shape            | Cloud API tokens for every effect     | Cloud API for delegation only; local inference is free |
+
+Step 1 (policy) and Step 4 (built-in lockdown) are identical to the
+standard flow. Step 2 (MCP config) and Step 3 (Ollama) are what
+differ.
+
+### Step 0 — Prerequisites
+
+| Component                   | Why                                                                                       | Install                                                  |
+|-----------------------------|-------------------------------------------------------------------------------------------|----------------------------------------------------------|
+| Denyx **source checkout**   | `local_mcp.py` is a Python script; `cargo install` does not bundle it.                    | `git clone https://github.com/Spin42/denyx`              |
+| `denyx-mcp` binary          | The bridge spawns it as a subprocess.                                                     | `cargo install denyx-cli denyx-mcp` (or source build)    |
+| Ollama + `qwen2.5-coder:7b` | The local executor model. ~5 GB.                                                          | `ollama pull qwen2.5-coder:7b`                           |
+| Ollama + `nomic-embed-text` | RAG retrieval. Without it the model writes worse Starlark. ~270 MB.                       | `ollama pull nomic-embed-text`                           |
+| Python 3.11+                | `local_mcp.py` uses stdlib `tomllib`.                                                     | OS package manager                                       |
+| Claude Code 2.x or opencode | The cloud orchestrator.                                                                   | See [09-claude-code.md](09-claude-code.md) / [10-opencode.md](10-opencode.md) |
+
+`bubblewrap` is not required for this flow unless your `denyx.toml`
+opts into the Linux kernel sandbox.
+
+### Step 1 — Write your `denyx.toml`
+
+Same as the standalone-MCP flow. From your own project's root:
 
 ```sh
-python3 examples/local_executor/run_multistep.py
+cd ~/myproject
+denyx init --lang python --output denyx.toml
+# edit to allow the paths, hosts, env vars, and commands you actually
+# need — see docs/08-quickstart.md for the full walkthrough.
 ```
 
-Runs all 36 tasks against the local model. Prints per-task verdicts
-and a summary. No cloud cost.
+Two policy entries earn their keep specifically in the local-executor
+flow:
 
-### Phase 2 (orchestrated)
+- `[environment].local_only_vars = ["OPENAI_API_KEY"]` — the local 7B
+  can read the value; the cloud orchestrator never sees it. The
+  bridge redacts at the boundary.
+- A `[tools.WebSearch]` long-form entry with `backend_url`.
+  `local_mcp.py` reads the routing hint and injects "for WebSearch,
+  GET this URL" into the local model's prompt — see
+  [URL choice and search-style tasks](#url-choice-and-search-style-tasks)
+  below.
+
+### Step 2 — Wire `local_mcp.py` into Claude Code or opencode
+
+The MCP config now points at the Python bridge instead of `denyx-mcp`
+directly.
+
+**Claude Code** — write `./.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "local-executor": {
+      "command": "python3",
+      "args": [
+        "/abs/path/to/denyx/examples/local_executor/local_mcp.py",
+        "--policy", "./denyx.toml",
+        "--audit-log", "./.denyx/audit.jsonl"
+      ]
+    }
+  }
+}
+```
+
+**opencode** — write `./opencode.json` in your project root:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "tools": {
+    "bash": false, "read": false, "write": false, "edit": false,
+    "glob": false, "grep": false, "webfetch": false, "websearch": false
+  },
+  "mcp": {
+    "local-executor": {
+      "type": "local",
+      "command": [
+        "python3",
+        "/abs/path/to/denyx/examples/local_executor/local_mcp.py",
+        "--policy", "./denyx.toml",
+        "--audit-log", "./.denyx/audit.jsonl"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+Two things to know about that path:
+
+- **The path to `local_mcp.py` must be absolute.** Both hosts resolve
+  relative paths from wherever they were launched (often `/`,
+  sometimes `$HOME`), not your project directory. Hard-code the full
+  path to your Denyx checkout.
+- **`local_mcp.py` looks for `denyx-mcp` at
+  `<denyx-checkout>/target/release/denyx-mcp` by default.** If
+  you've installed via `cargo install denyx-cli denyx-mcp` and
+  there's no `target/release/` next to `local_mcp.py`, pass the
+  binary location explicitly:
+
+  ```diff
+    "args": [
+      "/abs/path/to/denyx/examples/local_executor/local_mcp.py",
+      "--policy", "./denyx.toml",
+      "--audit-log", "./.denyx/audit.jsonl",
+  +   "--mcp-bin", "/home/YOU/.cargo/bin/denyx-mcp"
+    ]
+  ```
+
+  Use `which denyx-mcp` on the shell where the host runs to find the
+  exact path.
+
+Make sure `./.denyx/` exists and is gitignored before launching the
+host:
 
 ```sh
-python3 examples/local_executor/run_orchestrated.py \
-  --models sonnet opus \
-  --all \
-  --include-network \
-  --show-final-text
+mkdir -p ./.denyx
+grep -q '^\.denyx/' ./.gitignore 2>/dev/null || echo '.denyx/' >> ./.gitignore
 ```
 
-This drives `claude -p ... --mcp-config ...` for each model and each
-task. Cost depends on model and budget cap (default `--max-budget-usd
-1.00` per task). The full 36-task × 2-orchestrator run was ~$4.20 in
-practice (Sonnet $1.37 + Opus $2.83) on a fresh GitHub quota.
-
-For a cheaper smoke test, drop `--all` and use the default 11-task
-curated subset:
+### Step 3 — Make sure Ollama is running
 
 ```sh
-python3 examples/local_executor/run_orchestrated.py --models sonnet
+# Confirm Ollama responds:
+curl -sf http://localhost:11434/api/tags | head -c 200
+
+# Confirm both models are pulled:
+ollama list | grep -E "qwen2.5-coder:7b|nomic-embed-text"
 ```
 
-That runs ~$0.20.
+If Ollama is not running, the first `delegate_to_local` call returns
+a connection error and the orchestrator surfaces it as a tool
+failure. The fix is `ollama serve` (or restart whatever launches it
+on your machine — systemd unit, brew service, etc.).
+
+### Step 4 — Disable the host's built-in tools
+
+**Critical step.** Without this, Claude Code uses its built-in
+`Read`, `Bash`, `Edit`, `WebFetch` etc. — none of which go through
+`local_mcp.py`. The whole point of the local-executor architecture
+is keeping secrets off the cloud side, and a built-in `Read` defeats
+it: the model just calls `Read("$HOME/.aws/credentials")` and the
+file body lands in the cloud orchestrator's context, no Denyx, no
+redaction.
+
+**Claude Code** — write `./.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Bash", "Edit", "Write", "Read",
+      "Glob", "Grep", "WebFetch", "WebSearch",
+      "Monitor", "NotebookEdit"
+    ]
+  },
+  "disableBypassPermissionsMode": "disable"
+}
+```
+
+(`disableBypassPermissionsMode` is silently ignored on Claude Code
+v1; including it unconditionally is safe.)
+
+**opencode** — already handled by Step 2's `tools: false` block. No
+extra file required.
+
+After this step the only effecting tool the model can call is
+`mcp__local-executor__delegate_to_local`. Every file read, HTTP
+fetch, and subprocess in your session goes through the local 7B →
+Denyx pipeline.
+
+### Step 5 — Smoke test
+
+Restart Claude Code (or opencode) in the project directory. Send a
+one-step probe like:
+
+> Use the local executor to print the first line of `README.md`.
+
+Expected behaviour: the host calls `delegate_to_local` once, the
+bridge spawns qwen (~10–30 s on the first call as the model loads
+into VRAM, 1–4 s thereafter), qwen emits a Starlark program, Denyx
+runs it under your policy, and the printed first line flows back to
+the chat. Tail `./.denyx/audit.jsonl` while you test — every gated
+call lands as one JSON line.
+
+Common failure shapes:
+
+| Symptom | Likely cause |
+|---|---|
+| Host calls `Read` / `Bash` directly instead of `delegate_to_local` | Step 4 did not take. Re-check `.claude/settings.json` (Claude Code) or the `tools` block in `opencode.json` (opencode). On Claude Code v2, also confirm `disableBypassPermissionsMode: "disable"` is set. |
+| `local_mcp.py: cannot connect to ollama` | Ollama isn't running on `:11434`. `ollama serve` or restart the daemon. |
+| `Denyx: parser error` after a `delegate_to_local` call | Local 7B emitted invalid Starlark. The bridge auto-retries once with the error fed back; if it still fails, the model genuinely can't write that program — try a simpler step description or add `[tools.X]` routing hints. |
+| First `delegate_to_local` takes 30+ seconds | Normal cold-start (qwen loading into VRAM). Subsequent calls are seconds. |
+| `cannot find local_mcp.py` at startup | Path isn't absolute or your Denyx checkout has moved. |
+
+## Reproducing the eval numbers
+
+The headline numbers — qwen alone **36/36**, Sonnet-orchestrated
+**30/36** ($1.37), Opus-orchestrated **35/36** ($2.83) — are
+reproduced by `python3 examples/local_executor/run_orchestrated.py
+--models sonnet opus --all`. Full guide with per-task expectations,
+flags, and budget caps in [13-running-examples.md](13-running-examples.md).
 
 ## How `local_mcp.py` works
 
