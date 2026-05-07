@@ -2,6 +2,17 @@
 
 > ← [Back to docs README](README.md) · [Install](07-install.md) · [Architecture](03-architecture.md)
 
+> ⚠️ **Not yet exhaustively tested — feedback wanted.** Denyx's CI runs
+> on Linux only. The macOS / Lima path below is the project's
+> recommended approach for getting bubblewrap on macOS, but it has not
+> been validated across many macOS versions, Lima versions, or
+> Apple-Silicon vs Intel hardware. If something doesn't work, please
+> [open an issue](https://github.com/Spin42/denyx/issues) or send a
+> PR — feedback from real macOS users is exactly what hardens this
+> path. Native (no-VM) macOS builds also compile but are similarly
+> untested; see the [README's Prerequisites table](../README.md#prerequisites)
+> for the trade-off.
+
 This is the supported macOS deployment shape: **run `denyx-mcp`
 inside a lightweight Linux VM (Lima) and let your host's MCP client
 talk to it through `limactl shell`.** No native macOS code, no

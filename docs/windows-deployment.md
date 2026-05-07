@@ -2,6 +2,17 @@
 
 > ← [Back to docs README](README.md) · [Install](07-install.md) · [Architecture](03-architecture.md)
 
+> ⚠️ **Not yet exhaustively tested — feedback wanted.** Denyx's CI runs
+> on Linux only. The WSL2 path below is the project's recommended
+> approach for getting bubblewrap on Windows, but it has not been
+> validated across many Windows builds, WSL kernel versions, or
+> distros. If something doesn't work, please
+> [open an issue](https://github.com/Spin42/denyx/issues) or send a
+> PR — feedback from real Windows users is exactly what hardens this
+> path. Native (no-WSL) Windows builds also compile but are similarly
+> untested; see the [README's Prerequisites table](../README.md#prerequisites)
+> for the trade-off.
+
 This is the supported Windows deployment shape: **run `denyx-mcp`
 inside WSL2 (Windows Subsystem for Linux) and let your host's MCP
 client talk to it through `wsl.exe -e`.** Windows ships a real Linux
