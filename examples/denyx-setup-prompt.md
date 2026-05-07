@@ -35,12 +35,12 @@ you're running in). Denyx is a Rust runtime that gates an agent's
 filesystem / network / subprocess / env access through a TOML policy
 the operator (not the model) controls.
 
-Goal: a working `denyx.toml` plus TWO project-local config
-changes — wiring `denyx-mcp` as an MCP server (Step 4a) AND
-disabling the host's built-in effecting tools so the model has no
-path to side-effects except through `denyx-mcp` (Step 4b). Both
-are required; wiring MCP without disabling built-ins gives the
-user a placebo sandbox the model will route around.
+Goal: a working `denyx.toml` plus a single `denyx host-config`
+invocation (Step 4) that writes both the MCP server wiring AND
+the lockdown of the host's built-in effecting tools. Wiring MCP
+without disabling built-ins gives the user a placebo sandbox the
+model will route around — `host-config` does both at once, so
+this can't be skipped by accident.
 **Project-specific. Don't write to $HOME or anywhere outside the
 cwd.**
 
@@ -126,7 +126,7 @@ inherits `secure-defaults`, allows the typical toolchain commands,
 denies destructive git operations, leaves `[network]` empty so any
 HTTP target is an explicit opt-in).
 
-**Add the host's memory files to the policy.** Because Step 4b
+**Add the host's memory files to the policy.** Because Step 4
 will disable the host's built-in `Read`/`Write`/`Edit` tools, the
 model has to use Denyx's `denyx_fs_*` MCP tools for everything,
 including updating its own memory. Those calls go through the
@@ -213,199 +213,111 @@ Q5. **Approval gates.**
     in `requires_approval`. Do you want to add anything else?"
     → Add to top-level `requires_approval = [...]` if so.
 
-== Step 4: Wire the project-local MCP config ==
+== Step 4: Wire the host config (one command) ==
 
-First, create the audit-log directory and gitignore it:
+The `denyx host-config` subcommand writes everything in one go:
 
-    mkdir -p ./.denyx
-    grep -q '^\.denyx/' ./.gitignore 2>/dev/null || echo '.denyx/' >> ./.gitignore
+  - creates `./.denyx/` and adds it to `./.gitignore` (audit-log dir)
+  - writes/merges `./.mcp.json` (Claude Code) — wires `denyx-mcp`
+  - writes/merges `./.claude/settings.json` (Claude Code) — denies
+    every built-in effecting tool (`Bash`, `Read`, `Edit`, `Write`,
+    `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Monitor`,
+    `NotebookEdit`, plus `PowerShell` on Windows), sets
+    `disableBypassPermissionsMode: "disable"` and
+    `disableAutoMode: "disable"`, and (with `--sandbox auto`)
+    emits the OS-level sandbox stanza derived from the policy
+    (Claude Code v2's bubblewrap/Seatbelt sandbox; allowedDomains
+    = the policy's `http_*_allow` union).
+  - writes/merges `./opencode.json` (opencode) — disables the same
+    built-ins via the `tools` block, adds the `permission` deny
+    wildcard, and includes the MCP server entry.
 
-The audit log captures every gated capability call (allowed AND
-denied) as one JSON Lines record. Without `--audit-log <path>` in
-the args below, denyx-mcp silently writes audit events to stderr,
-which the host (Claude Code / opencode) buries in its own MCP-
-server log directory — making the events hard to find and
-defeating the audit feature for most users. **Always pass
-`--audit-log` explicitly.**
+If any of these files already exists, host-config **merges**:
+unrelated keys are preserved, deny lists are unioned (no
+duplicates), the sandbox stanza is deep-merged. Pass
+`--existing replace` to overwrite instead of merge.
 
-Build the MCP `command`/`args` based on the OS branch from Step 0
-and which install path resolved in 0.3. `<denyx-mcp>` below is
-either the bare command name (`denyx-mcp`, when installed via
-`cargo install denyx-cli denyx-mcp` — the default) or the absolute path
-(`<repo>/target/release/denyx-mcp`, on the source-build fallback).
+Pick the right invocation based on the platform you detected in
+Step 0 and the binary location resolved in Step 0.3:
 
   - Linux native:
-      command: <denyx-mcp>
-      args:    ["--policy",       "./denyx.toml",
-                "--audit-log",    "./.denyx/audit.jsonl",
-                "--confirm-mode", "auto"]
+      <denyx> host-config \
+          --policy ./denyx.toml \
+          --host <claude|opencode|both> \
+          --platform native \
+          --denyx-mcp-binary <denyx-mcp> \
+          --sandbox auto
 
-  - macOS (Lima):
-      command: limactl
-      args:    ["shell", "denyx", "<denyx-mcp>",
-                "--policy",       "<absolute-policy-path>",
-                "--audit-log",    "<absolute-audit-log-path>",
-                "--confirm-mode", "auto"]
-      (Lima mirrors the host's $HOME at the same absolute path
-      inside the VM, so use the host's absolute path for both the
-      policy and the audit log. The `<denyx-mcp>` here is whatever
-      resolved inside the VM in Step 0.3 — usually bare `denyx-mcp`
-      since you'd `cargo install` inside the VM.)
+  - macOS (Lima): policy and audit-log paths must be ABSOLUTE
+    (Lima mirrors the host's `$HOME` inside the VM at the same
+    absolute path).
+      <denyx> host-config \
+          --policy <absolute-policy-path> \
+          --audit-log <absolute-audit-log-path> \
+          --host <claude|opencode|both> \
+          --platform lima \
+          --lima-vm denyx \
+          --denyx-mcp-binary denyx-mcp \
+          --sandbox auto
 
-  - Windows (WSL2):
-      command: wsl.exe
-      args:    ["-d", "<distro>", "-e", "<denyx-mcp>",
-                "--policy",       "<wsl-side-policy-path>",
-                "--audit-log",    "<wsl-side-audit-log-path>",
-                "--confirm-mode", "auto"]
-      (Ask the user which WSL distro hosts the denyx install. Both
-      paths are WSL-side; if the project lives on a Windows drive,
-      use `/mnt/c/...`. `<denyx-mcp>` is whatever resolved inside
-      WSL in Step 0.3 — usually bare `denyx-mcp`.)
+  - Windows (WSL2): policy and audit-log paths are WSL-side
+    (e.g. `/mnt/c/Users/<you>/proj/denyx.toml` if the project
+    lives on a Windows drive). Ask the user which WSL distro
+    hosts the denyx install.
+      <denyx> host-config \
+          --policy <wsl-side-policy-path> \
+          --audit-log <wsl-side-audit-log-path> \
+          --host <claude|opencode|both> \
+          --platform wsl \
+          --wsl-distro <distro> \
+          --denyx-mcp-binary denyx-mcp \
+          --windows \
+          --sandbox auto
 
-**Don't** add `./.denyx/audit.jsonl` to the policy's `write_allow`.
-denyx-mcp writes the audit log directly via its own filesystem
-access; it doesn't need to be in the policy. Keeping the audit
-log OUT of `write_allow` means the agent can't `fs.write` over
-its own audit trail to tamper with the record — defence-in-depth
-on top of the SHA-256 hash chain that denyx-mcp embeds in each
-audit line.
+After running, show the user `denyx host-config`'s stderr summary
+of what changed (it prints `+ wrote <path>` for each file). Then
+briefly explain: "I disabled the host's built-in effecting tools
+(`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`,
+`WebSearch`, plus `Monitor`/`NotebookEdit` on Claude Code). Every
+effecting operation in this project now goes through Denyx's
+MCP tools and is gated by `denyx.toml`. The agent's own memory
+files (`CLAUDE.md`, `AGENTS.md`, `.claude/CLAUDE.md`) are listed
+in `denyx.toml`'s `read_allow`/`write_allow` from Step 2, so
+memory updates still work — they just go through the policy
+gate now. If the model later complains it can't read or run
+something it needs, the choice is: widen `denyx.toml` to allow
+the operation through Denyx (preferred — keeps the policy under
+git review), or re-enable a specific built-in in
+`.claude/settings.json` / `opencode.json` (faster but breaks the
+gate for that operation)."
 
-Now write the config:
+A note on `--sandbox`:
+  - `auto` (default): emit the sandbox stanza with
+    `failIfUnavailable: false`. If the host is missing
+    bubblewrap/socat (Linux/WSL2 prereq), it warns at startup and
+    runs without sandboxing — defense-in-depth degrades
+    gracefully.
+  - `required`: emit with `failIfUnavailable: true`. Use for
+    managed deployments where sandboxing is a gate.
+  - `off`: omit the stanza. The Denyx policy gate is still in
+    effect; you lose the OS-level layer.
 
-  - **Claude Code**: `./.mcp.json` in the project root.
-      {
-        "mcpServers": {
-          "denyx": {
-            "command": "<command>",
-            "args": [...the args you built above...]
-          }
-        }
-      }
+A note on the audit log: `denyx-mcp` writes it directly via its
+own filesystem access; it does NOT need to be in the policy's
+`write_allow`. Keeping the audit log OUT of `write_allow` means
+the agent can't `fs.write` over its own audit trail to tamper
+with the record — defense-in-depth on top of the SHA-256 hash
+chain that denyx-mcp embeds in each audit line.
 
-  - **opencode**: `./opencode.json` (or create it). The opencode
-    config shape is **different** from Claude Code's — don't
-    copy-paste the Claude Code shape into opencode.json or
-    opencode rejects it at startup with "Unrecognized key:
-    mcpServers".
-      {
-        "$schema": "https://opencode.ai/config.json",
-        "mcp": {
-          "denyx": {
-            "type": "local",
-            "command": ["<command>", ...the args you built above...],
-            "enabled": true
-          }
-        }
-      }
-    Three opencode-specific quirks vs Claude Code:
-      * Top-level key is `mcp`, not `mcpServers`.
-      * Each server entry has `"type": "local"` (use `"remote"`
-        if you ever wire opencode at an HTTP-transport MCP
-        server; for `denyx-mcp` over stdio, it's `"local"`).
-      * `command` is a single ARRAY that contains the binary
-        AND its arguments — there is no separate `args` field.
-      * `"enabled": true` so opencode actually loads it.
-
-If a config already exists, MERGE — don't clobber. Add the `denyx`
-server alongside whatever else is there.
-
-== Step 4b: Disable the host's built-in effecting tools ==
-
-**Critical step. Don't skip this.**
-
-Both Claude Code and opencode ship with built-in tools (`Bash`,
-`Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`,
-plus host-specific ones like `Monitor`/`NotebookEdit` for Claude
-Code) that touch the filesystem, network, and subprocess
-**directly** — they do NOT go through any MCP server. If you only
-wire `denyx-mcp` and leave the built-ins enabled, the model
-ignores `denyx-mcp` and uses the cheaper built-in path. Result:
-Denyx is installed, but the policy gate never fires. The user
-believes they have a sandbox; they actually have a placebo.
-
-To actually enforce the policy, you have to disable the built-in
-effecting tools so the model has no path to side-effects except
-via `denyx-mcp`. This is a different config file from Step 4a.
-
-  - **Claude Code** (v1 and v2 both — see version note below):
-    write `./.claude/settings.json`:
-      {
-        "permissions": {
-          "deny": [
-            "Bash", "Edit", "Write", "Read",
-            "Glob", "Grep", "WebFetch", "WebSearch",
-            "Monitor", "NotebookEdit"
-          ]
-        }
-      }
-    Add `"PowerShell"` on Windows. The bare string form
-    (`"Bash"` not `"Bash(*)"`) means "block all invocations of
-    this tool." Deny rules always win against allow rules, so
-    this is hard-deny.
-
-    **For Claude Code v2** (run `claude --version` to check),
-    add ONE more field that prevents the user (or a tricked
-    user) from entering `bypassPermissions` mode, which would
-    skip the deny list entirely:
-      "disableBypassPermissionsMode": "disable"
-    The field is silently ignored on v1, so including it
-    unconditionally is safe.
-
-    The v2 tools that *aren't* on the deny list — `Agent` (sub-
-    agents), `Task*`, `Cron*`, `Skill`, `EnterWorktree`,
-    `SendMessage`, `Team*` — were verified empirically to inherit
-    the parent session's `.claude/settings.json` rather than
-    create independent bypass paths. A sub-agent hits the same
-    deny list; a cron-scheduled prompt re-fires through the same
-    deny list; etc. They don't need to be in the deny list. See
-    `docs/claude-code-permission-tests.md` for the test recipe
-    that confirmed this; re-run it after a Claude Code version
-    bump to verify nothing changed.
-
-    If `./.claude/settings.json` already exists with other
-    permissions, MERGE the deny array — don't clobber existing
-    keys. Existing entries in `permissions.deny` are kept;
-    Denyx's entries are added.
-
-  - **opencode**: ADD a `tools` block to the same
-    `./opencode.json` you wrote in Step 4a:
-      {
-        "$schema": "https://opencode.ai/config.json",
-        "tools": {
-          "bash": false,
-          "read": false,
-          "write": false,
-          "edit": false,
-          "glob": false,
-          "grep": false,
-          "webfetch": false,
-          "websearch": false
-        },
-        "mcp": {
-          "denyx": { ...the entry from Step 4a... }
-        }
-      }
-    `tools: false` removes the built-in entirely so it doesn't
-    appear in the model's tool list. opencode also accepts a
-    `permission` block with `"*": "deny"` + `"denyx*": "allow"`
-    as a defence-in-depth wildcard, but the `tools` block is the
-    primary mechanism — don't skip it.
-
-After writing both configs, briefly tell the user what just
-happened: "I disabled the host's built-in `Bash` / `Read` /
-`Write` / `Edit` / `Glob` / `Grep` / `WebFetch` / `WebSearch`
-tools. Every effecting operation in this project now goes
-through Denyx's MCP tools and is gated by `denyx.toml`. The
-agent's own memory files (`CLAUDE.md`, `AGENTS.md`,
-`.claude/CLAUDE.md`) are listed in `denyx.toml`'s
-`read_allow`/`write_allow` from Step 2, so memory updates still
-work — they just go through the policy gate now. If the model
-later complains it can't read or write something it needs, the
-choice is: widen `denyx.toml` to allow the operation (preferred
-— keeps the policy under git review), or re-enable a specific
-built-in in `.claude/settings.json` / `opencode.json` (faster but
-breaks the gate for that operation)."
+The v2 Claude Code tools that *aren't* on the deny list — `Agent`
+(sub-agents), `Task*`, `Cron*`, `Skill`, `EnterWorktree`,
+`SendMessage`, `Team*` — were verified empirically to inherit the
+parent session's `.claude/settings.json` rather than create
+independent bypass paths. A sub-agent hits the same deny list; a
+cron-scheduled prompt re-fires through the same deny list; etc.
+See `docs/claude-code-permission-tests.md` for the test recipe
+that confirmed this; re-run it after a Claude Code version bump
+to verify nothing changed.
 
 == Step 5: Smoke test ==
 
@@ -433,8 +345,13 @@ If the smoke test passes, tell the user:
   - After the restart, the model sees the `denyx-mcp` tools but
     NOT the host's built-in `Bash`/`Read`/`Write`/`Edit`/`Glob`/
     `Grep`/`WebFetch`/`WebSearch` tools — those were disabled in
-    Step 4b. Every effecting operation in this project now goes
+    Step 4. Every effecting operation in this project now goes
     through Denyx and is gated by `denyx.toml`.
+  - With `--sandbox auto` (the default), Claude Code's own
+    OS-level sandbox stanza is also wired in — bubblewrap on
+    Linux/WSL2, Seatbelt on macOS. This is defense-in-depth at
+    the kernel layer for any built-in tool that might slip
+    through.
   - If the model complains it can't read or run something it
     needs, that's the policy doing its job. Either widen
     `denyx.toml` to allow the operation through Denyx, or
@@ -468,16 +385,24 @@ Tell the user:
         and document the env var in the project README. Note:
         `.claude/settings.json` is still safe to commit because it
         doesn't reference the binary path.
-  - For Linux operators who want OS-level isolation: edit
-    `denyx.toml` and add `sandbox = "bwrap"` under
-    `[subprocess]` (after installing bubblewrap with
-    `apt install bubblewrap` or equivalent). For macOS/Windows
-    operators, the Lima/WSL2 setup already provides the kernel-
-    level boundary.
-  - Audit logs go to stderr by default. To capture them, add
-    `--audit-log /var/log/denyx/audit.jsonl` (or any path NOT in
-    write_allow) to the MCP server's args and `chattr +a` the file
-    so it's append-only.
+  - **Two sandbox layers, separately configurable.** With
+    `--sandbox auto` you already opted into Claude Code's own
+    OS-level sandbox (covers all built-in tools and any
+    subprocess they spawn). On top of that, Denyx has its own
+    `subprocess.sandbox = "bwrap"` mode that wraps every
+    `subprocess.exec` call from inside Starlark in a fresh
+    namespaced jail. They're complementary; running both at
+    once on Linux requires nested user namespaces, which is
+    fragile — pick one. For most workflows the Claude Code
+    sandbox is enough; reserve Denyx's bwrap mode for cases
+    where you want fine-grained per-call isolation of subprocess
+    invocations the agent makes from Starlark.
+  - Audit logs default to `./.denyx/audit.jsonl` (set by
+    host-config) and stay out of the policy's `write_allow`,
+    so the agent can't tamper with the record. To rotate to
+    a long-lived path like `/var/log/denyx/audit.jsonl`, edit
+    the `--audit-log` arg in the MCP config and `chattr +a` the
+    file so it's append-only.
 
 Stop after Step 6. Don't proceed to other tasks unless the user asks.
 ````
