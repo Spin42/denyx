@@ -17,6 +17,21 @@ the policy, the operation **fails** — no prompt-engineering bypass, no
 > enough for experimental setups and personal projects; not yet hardened for
 > unattended production work. [Full status →](#status--honest-disclosures)
 
+## See the difference
+
+Same Claude Code session, same two prompts ("show me my `.env` file" and
+"check if `sigil` is in my GitHub repos via `gh`"), with and without
+Denyx wired in:
+
+| Without Denyx | With Denyx |
+|:---:|:---:|
+| [![Claude Code reading .env and running gh unchecked](assets/without_denyx.png)](assets/without_denyx.png) | [![Claude Code blocked from reading .env and running gh by Denyx policy](assets/with_denyx.png)](assets/with_denyx.png) |
+| The agent reads `.env` and prints `API_KEY=dont_leak_me_please` straight into the chat, then runs `gh repo list` as a subprocess. Both happen because the host's built-in `Read` and `Bash` tools have no idea what's a secret or what's an unsanctioned command. | The agent tries the same operations and Denyx blocks both *by name*: `.env` is in the filesystem deny list, `gh` is not in `subprocess.allow_commands`, `api.github.com` is not in `network.http_get_allow`. The agent reports the blocks and asks the operator to widen the policy if needed. |
+
+The block is not a prompt-level "please don't do that" — it's a Rust-enforced
+denial at the capability gate. The model can't argue its way past it, and a
+prompt-injected instruction in fetched content can't either.
+
 ## 60-second quickstart
 
 **1. Install `denyx` and `denyx-mcp` on your `$PATH`:**
