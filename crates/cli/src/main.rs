@@ -16,11 +16,13 @@
 //!   5 — i/o or configuration error
 //!   6 — runtime cap exceeded (wall-time deadline / call-stack)
 
+mod host_config;
 mod init;
 
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -30,6 +32,10 @@ use denyx_host::{
 };
 use denyx_policy::Policy;
 
+use crate::host_config::{
+    claude_mcp, claude_settings, merge_claude_mcp, merge_claude_settings, merge_opencode,
+    opencode_config, prepare_audit_dir, Existing, Host, Opts, Platform, Sandbox,
+};
 use crate::init::Lang;
 
 #[derive(Parser, Debug)]
@@ -53,6 +59,10 @@ enum Command {
     Policy(PolicyCli),
     /// Inspect or verify the audit log.
     Audit(AuditCli),
+    /// Generate / merge Claude Code or opencode host configs from a
+    /// Denyx policy: MCP server wiring + lockdown of built-in
+    /// effecting tools + (opt-in) Claude Code OS sandbox stanza.
+    HostConfig(HostConfigArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -130,6 +140,207 @@ struct RunArgs {
 }
 
 #[derive(Parser, Debug)]
+struct HostConfigArgs {
+    /// Path to the policy TOML file. Used to derive sandbox
+    /// `allowedDomains` / `allowWrite` from the policy.
+    #[arg(long)]
+    policy: PathBuf,
+
+    /// Which host's configs to write.
+    #[arg(long, default_value = "both")]
+    host: HostArg,
+
+    /// Where to write the configs (project root). Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    output_dir: PathBuf,
+
+    /// How `denyx-mcp` is launched on this platform.
+    #[arg(long, default_value = "native")]
+    platform: PlatformArg,
+
+    /// Resolved location of the `denyx-mcp` binary as the host (or
+    /// VM/distro for lima/wsl) sees it. Defaults to the bare command
+    /// name, which works when `denyx-mcp` is on $PATH (e.g. via
+    /// `cargo install denyx-mcp`).
+    #[arg(long, default_value = "denyx-mcp")]
+    denyx_mcp_binary: String,
+
+    /// Lima VM name. Only used when `--platform lima`.
+    #[arg(long, default_value = "denyx")]
+    lima_vm: String,
+
+    /// WSL2 distro name. Required when `--platform wsl`.
+    #[arg(long)]
+    wsl_distro: Option<String>,
+
+    /// Where `denyx-mcp` writes the audit log. The default is project-
+    /// local under `./.denyx/`. For Lima/WSL2, pass an absolute path
+    /// the VM/distro can write to (the VM mirrors the host's `$HOME`,
+    /// so a host absolute path usually works for Lima).
+    #[arg(long, default_value = "./.denyx/audit.jsonl")]
+    audit_log: PathBuf,
+
+    /// OS-level sandbox emission policy.
+    /// - `auto` (default): emit the sandbox stanza with
+    ///   `failIfUnavailable: false`. Hosts without bubblewrap warn
+    ///   and fall back to non-sandboxed.
+    /// - `required`: emit with `failIfUnavailable: true`. The host
+    ///   refuses to start unless the sandbox can come up. Use in
+    ///   managed deployments where sandboxing is a security gate.
+    /// - `off`: omit the sandbox stanza entirely. Denyx still gates
+    ///   capabilities; you lose the OS-layer defense-in-depth.
+    #[arg(long, default_value = "auto")]
+    sandbox: SandboxArg,
+
+    /// Add `PowerShell` to the Claude Code deny list. Set on Windows
+    /// hosts; harmless on others (the rule just doesn't match anything).
+    #[arg(long)]
+    windows: bool,
+
+    /// How to handle existing config files.
+    /// - `merge` (default): preserve unrelated keys, union deny lists,
+    ///   replace the denyx MCP entry, deep-merge sandbox arrays.
+    /// - `replace`: write the generated config as if no file existed.
+    #[arg(long, default_value = "merge")]
+    existing: ExistingArg,
+
+    /// Print the generated configs to stdout instead of writing to disk.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Skip the MCP server wiring. Writes only the lockdown layer
+    /// (`.claude/settings.json` deny list + opencode `tools` /
+    /// `permission` blocks + sandbox stanza). Use this when the
+    /// project's MCP server is something other than `denyx-mcp` —
+    /// e.g. the local-executor flow uses `local_mcp.py`, which the
+    /// operator wires manually, and Denyx is responsible for the
+    /// lockdown only.
+    #[arg(long)]
+    no_mcp: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum HostArg {
+    Claude,
+    Opencode,
+    Both,
+}
+
+impl FromStr for HostArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "claude" | "claude-code" | "claudecode" => Ok(Self::Claude),
+            "opencode" => Ok(Self::Opencode),
+            "both" => Ok(Self::Both),
+            other => Err(format!(
+                "unknown host {other:?}; expected one of: claude, opencode, both"
+            )),
+        }
+    }
+}
+
+impl HostArg {
+    fn as_host(self) -> Host {
+        match self {
+            Self::Claude => Host::Claude,
+            Self::Opencode => Host::Opencode,
+            Self::Both => Host::Both,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PlatformArg {
+    Native,
+    Lima,
+    Wsl,
+}
+
+impl FromStr for PlatformArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "native" | "linux" => Ok(Self::Native),
+            "lima" | "macos" | "darwin" => Ok(Self::Lima),
+            "wsl" | "wsl2" | "windows" => Ok(Self::Wsl),
+            other => Err(format!(
+                "unknown platform {other:?}; expected one of: native, lima, wsl"
+            )),
+        }
+    }
+}
+
+impl PlatformArg {
+    fn as_platform(self) -> Platform {
+        match self {
+            Self::Native => Platform::Native,
+            Self::Lima => Platform::Lima,
+            Self::Wsl => Platform::Wsl,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SandboxArg {
+    Auto,
+    Required,
+    Off,
+}
+
+impl FromStr for SandboxArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" | "on" => Ok(Self::Auto),
+            "required" | "strict" => Ok(Self::Required),
+            "off" | "none" | "disable" => Ok(Self::Off),
+            other => Err(format!(
+                "unknown sandbox mode {other:?}; expected one of: auto, required, off"
+            )),
+        }
+    }
+}
+
+impl SandboxArg {
+    fn as_sandbox(self) -> Sandbox {
+        match self {
+            Self::Auto => Sandbox::Auto,
+            Self::Required => Sandbox::Required,
+            Self::Off => Sandbox::Off,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ExistingArg {
+    Merge,
+    Replace,
+}
+
+impl FromStr for ExistingArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "merge" => Ok(Self::Merge),
+            "replace" | "overwrite" => Ok(Self::Replace),
+            other => Err(format!(
+                "unknown existing-file mode {other:?}; expected: merge or replace"
+            )),
+        }
+    }
+}
+
+impl ExistingArg {
+    fn as_existing(self) -> Existing {
+        match self {
+            Self::Merge => Existing::Merge,
+            Self::Replace => Existing::Replace,
+        }
+    }
+}
+
+#[derive(Parser, Debug)]
 struct InitArgs {
     /// Project language. Determines the toolchain allowlist and
     /// project-layout read/write_allow defaults.
@@ -189,6 +400,171 @@ fn dispatch() -> Result<(), CliError> {
         Command::Audit(a) => match a.command {
             AuditCommand::Verify(args) => audit_verify(args),
         },
+        Command::HostConfig(args) => host_config_cmd(args),
+    }
+}
+
+fn host_config_cmd(args: HostConfigArgs) -> Result<(), CliError> {
+    if args.platform == PlatformArg::Wsl && args.wsl_distro.is_none() {
+        return Err(CliError::Other(
+            "--platform wsl requires --wsl-distro <distro-name>".to_string(),
+        ));
+    }
+
+    let policy = Policy::load(&args.policy)
+        .map_err(|e| CliError::Other(format!("load policy {:?}: {e}", args.policy)))?;
+
+    let opts = Opts {
+        host: args.host.as_host(),
+        platform: args.platform.as_platform(),
+        denyx_mcp_binary: args.denyx_mcp_binary,
+        policy_path: args.policy.clone(),
+        audit_log_path: args.audit_log,
+        lima_vm: args.lima_vm,
+        wsl_distro: args.wsl_distro,
+        sandbox: args.sandbox.as_sandbox(),
+        windows: args.windows,
+    };
+    let existing_mode = args.existing.as_existing();
+
+    if args.dry_run {
+        emit_dry_run(&policy, &opts, existing_mode, args.no_mcp);
+        return Ok(());
+    }
+
+    write_audit_dir(&args.output_dir)?;
+
+    match opts.host {
+        Host::Claude => write_claude(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?,
+        Host::Opencode => {
+            write_opencode(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?
+        }
+        Host::Both => {
+            write_claude(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?;
+            write_opencode(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?;
+        }
+    }
+
+    eprintln!("denyx host-config: done.");
+    Ok(())
+}
+
+fn write_audit_dir(dir: &Path) -> Result<(), CliError> {
+    let (created, gi_updated) =
+        prepare_audit_dir(dir).map_err(|e| CliError::Other(format!("prepare audit dir: {e}")))?;
+    if created {
+        eprintln!("  + created {}/.denyx/", dir.display());
+    }
+    if gi_updated {
+        eprintln!("  + added .denyx/ to {}/.gitignore", dir.display());
+    }
+    Ok(())
+}
+
+fn write_claude(
+    dir: &Path,
+    policy: &Policy,
+    opts: &Opts,
+    existing: Existing,
+    no_mcp: bool,
+) -> Result<(), CliError> {
+    let settings_path = dir.join(".claude").join("settings.json");
+
+    if !no_mcp {
+        let mcp_path = dir.join(".mcp.json");
+        let mcp_value = claude_mcp(opts);
+        let final_mcp = match (existing, read_json_if_exists(&mcp_path)?) {
+            (Existing::Replace, _) | (_, None) => mcp_value,
+            (Existing::Merge, Some(existing_val)) => merge_claude_mcp(existing_val, mcp_value),
+        };
+        write_json(&mcp_path, &final_mcp)?;
+        eprintln!("  + wrote {}", mcp_path.display());
+    }
+
+    let settings_value = claude_settings(policy, opts);
+    let final_settings = match (existing, read_json_if_exists(&settings_path)?) {
+        (Existing::Replace, _) | (_, None) => settings_value,
+        (Existing::Merge, Some(existing_val)) => {
+            merge_claude_settings(existing_val, settings_value)
+        }
+    };
+    write_json(&settings_path, &final_settings)?;
+    eprintln!("  + wrote {}", settings_path.display());
+    Ok(())
+}
+
+fn write_opencode(
+    dir: &Path,
+    policy: &Policy,
+    opts: &Opts,
+    existing: Existing,
+    no_mcp: bool,
+) -> Result<(), CliError> {
+    let path = dir.join("opencode.json");
+    let mut value = opencode_config(policy, opts);
+    if no_mcp {
+        // Drop the mcp.denyx entry; keep the tools and permission blocks.
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("mcp");
+        }
+    }
+    let final_value = match (existing, read_json_if_exists(&path)?) {
+        (Existing::Replace, _) | (_, None) => value,
+        (Existing::Merge, Some(existing_val)) => merge_opencode(existing_val, value),
+    };
+    write_json(&path, &final_value)?;
+    eprintln!("  + wrote {}", path.display());
+    Ok(())
+}
+
+fn read_json_if_exists(path: &Path) -> Result<Option<serde_json::Value>, CliError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(path)?;
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    let v = serde_json::from_str(&body)
+        .map_err(|e| CliError::Other(format!("parse {path:?} as JSON: {e}")))?;
+    Ok(Some(v))
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut body = serde_json::to_string_pretty(value)
+        .map_err(|e| CliError::Other(format!("serialize {path:?}: {e}")))?;
+    body.push('\n');
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+fn emit_dry_run(policy: &Policy, opts: &Opts, _existing: Existing, no_mcp: bool) {
+    if matches!(opts.host, Host::Claude | Host::Both) {
+        if !no_mcp {
+            println!("// .mcp.json");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&claude_mcp(opts)).expect("serialize")
+            );
+        }
+        println!("// .claude/settings.json");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&claude_settings(policy, opts)).expect("serialize")
+        );
+    }
+    if matches!(opts.host, Host::Opencode | Host::Both) {
+        let mut oc = opencode_config(policy, opts);
+        if no_mcp {
+            if let Some(obj) = oc.as_object_mut() {
+                obj.remove("mcp");
+            }
+        }
+        println!("// opencode.json");
+        println!("{}", serde_json::to_string_pretty(&oc).expect("serialize"));
     }
 }
 
