@@ -265,6 +265,17 @@ flow:
 
 ### Step 2 — Wire `local_mcp.py` into Claude Code or opencode
 
+> **Why `python3` and not `denyx-mcp` as the `command`?** In this
+> architecture, the MCP server the host talks to is the **Python
+> bridge** (`local_mcp.py`), not `denyx-mcp` directly. The bridge is
+> what exposes the `delegate_to_local` tool to the cloud orchestrator
+> and what runs the local-7B → denyx-mcp pipeline behind it.
+> `denyx-mcp` is still in the picture — `local_mcp.py` spawns it as
+> a subprocess for every gated call (see the architecture diagram at
+> the top of this doc) — but it isn't the process Claude Code or
+> opencode launches. `python3 local_mcp.py` is the MCP server in
+> this flow.
+
 The MCP config now points at the Python bridge instead of `denyx-mcp`
 directly.
 
