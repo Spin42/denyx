@@ -28,10 +28,12 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"   # or copy to ~/.local/bin
 ```
 
-macOS and Windows users: see [Prerequisites](#prerequisites) — Denyx runs
-inside a Lima VM (macOS) or WSL2 (Windows). When the crates are published
-to crates.io ([tracking](https://github.com/Spin42/denyx/issues)), this
-step becomes a single `cargo install denyx-cli denyx-mcp`.
+macOS and Windows users: the same `cargo build --release` works natively,
+but kernel-level subprocess sandboxing (`bwrap`) is Linux-only — see
+[Prerequisites](#prerequisites) for the trade-off and the Lima / WSL2
+guides if you want sandboxing too. When the crates are published to
+crates.io, Step 1 becomes a single
+`cargo install denyx-cli denyx-mcp`.
 
 **2. `cd` to the project you want to gate** (NOT the Denyx checkout — your
 own codebase), open Claude Code or opencode in that directory, and paste
@@ -61,11 +63,24 @@ JSON Lines record you can later verify with `denyx audit verify`.
 
 ## Prerequisites
 
-| Platform | Required (to run Denyx) | Optional (kernel-level sandbox) |
+The only universally-required dependency is a **Rust toolchain 1.74+** to
+build the binaries (or, when crates land on crates.io,
+`cargo install denyx-cli denyx-mcp`).
+
+Kernel-level subprocess sandboxing (`[subprocess].sandbox = "bwrap"`) is
+**opt-in and Linux-only** — `bubblewrap` relies on Linux user namespaces,
+which don't exist on macOS or native Windows. On those platforms you have
+two choices: run Denyx natively for the language-level gate only, or run
+it inside a Linux VM (Lima on macOS, WSL2 on Windows) to also get bwrap.
+Without bwrap, Denyx still enforces the full policy (filesystem / network /
+env / subprocess allowlist + taint redaction + audit log) — the script
+simply runs in the host's process namespace instead of a kernel-level jail.
+
+| Platform | Required | For kernel-level sandbox (optional) |
 |---|---|---|
-| **Linux** | Rust toolchain 1.74+ (`cargo`) | `apt install bubblewrap` (or your distro's equivalent), then add `sandbox = "bwrap"` under `[subprocess]` in your policy — paths outside the policy literally do not exist for the child process. |
-| **macOS** | [Lima](https://lima-vm.io/) (`brew install lima`); full guide in [docs/macos-deployment.md](docs/macos-deployment.md). Denyx and its targets run inside the VM. | `bubblewrap` inside the Lima VM (the macOS guide installs both). |
-| **Windows** | WSL2 with a Linux distro (`wsl --install -d Ubuntu-24.04`); full guide in [docs/windows-deployment.md](docs/windows-deployment.md). Denyx runs inside the WSL distro. | `bubblewrap` inside the WSL distro (the Windows guide installs both). |
+| **Linux** | Rust toolchain | `apt install bubblewrap` (or your distro's equivalent), then add `sandbox = "bwrap"` under `[subprocess]` in your policy. |
+| **macOS** | Rust toolchain — native build works for the language-level gate (untested in CI, but no platform-specific code paths). For the project's tested deployment shape, install [Lima](https://lima-vm.io/) (`brew install lima`) and follow [docs/macos-deployment.md](docs/macos-deployment.md). | `bubblewrap` inside a Lima VM. The macOS deployment guide sets up both. |
+| **Windows** | Rust toolchain — native build works for the language-level gate (untested in CI). For the project's tested deployment shape, install WSL2 (`wsl --install -d Ubuntu-24.04`) and follow [docs/windows-deployment.md](docs/windows-deployment.md). | `bubblewrap` inside the WSL2 distro. The Windows deployment guide sets up both. |
 
 You also need [Claude Code](https://github.com/anthropics/claude-code) or
 [opencode](https://opencode.ai) installed and reachable. Denyx wires into
