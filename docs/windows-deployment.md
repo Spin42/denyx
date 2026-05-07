@@ -64,30 +64,31 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 cargo install denyx-cli denyx-mcp
 ```
 
-Then back on Windows, add this to your Claude Code (or other MCP
-host) configuration:
+Then from your project directory (inside WSL, where the project
+tree lives — or on the Windows side if the project tree lives
+there), wire everything in one command:
 
-```jsonc
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "wsl.exe",
-      "args": [
-        "-d", "Ubuntu-24.04",
-        "-e",
-        "/home/YOU/.cargo/bin/denyx-mcp",
-        "--policy", "/mnt/c/Users/YOU/projects/myapp/denyx.toml"
-      ]
-    }
-  }
-}
+```sh
+denyx host-config \
+    --policy /mnt/c/Users/YOU/projects/myapp/denyx.toml \
+    --audit-log /mnt/c/Users/YOU/projects/myapp/.denyx/audit.jsonl \
+    --host both \
+    --platform wsl \
+    --wsl-distro Ubuntu-24.04 \
+    --denyx-mcp-binary denyx-mcp \
+    --windows \
+    --sandbox auto
 ```
 
-Replace `YOU` with your usernames (the WSL Linux user, and the
-Windows account name). The agent calls `denyx_run` from the host;
-the call traverses `wsl.exe -e` (stdio JSON-RPC), lands in the
-WSL2 distro, the script runs under bubblewrap, the printed output
-flows back up the pipe.
+(`--windows` adds `PowerShell` to the deny list. `denyx` itself
+runs inside WSL after `cargo install denyx-cli`; the JSON files
+it writes are read by Claude Code / opencode on the Windows side.)
+
+Replace `YOU` with your Windows username and adjust the policy
+path to wherever your project lives. The agent calls `denyx_run`
+from the host; the call traverses `wsl.exe -e` (stdio JSON-RPC),
+lands in the WSL2 distro, the script runs under bubblewrap, the
+printed output flows back up the pipe.
 
 ## Prerequisites
 
@@ -198,39 +199,48 @@ Linux side.**
 
 The MCP `args` change accordingly — see below.
 
-### 5. Wire it into Claude Code
+### 5. Wire it into Claude Code (or opencode)
 
-Edit your Claude Code MCP config (typically
-`%APPDATA%\Claude\mcp.json` or your project's `.mcp.json`):
+From the project directory:
 
-```jsonc
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "wsl.exe",
-      "args": [
-        "-d", "Ubuntu-24.04",
-        "-e",
-        "/home/YOU/.cargo/bin/denyx-mcp",
-        "--policy", "/mnt/c/Users/YOU/projects/myapp/denyx.toml"
-      ]
-    }
-  }
-}
+```sh
+denyx host-config \
+    --policy /mnt/c/Users/YOU/projects/myapp/denyx.toml \
+    --audit-log /mnt/c/Users/YOU/projects/myapp/.denyx/audit.jsonl \
+    --host both \
+    --platform wsl \
+    --wsl-distro Ubuntu-24.04 \
+    --denyx-mcp-binary denyx-mcp \
+    --windows \
+    --sandbox auto
 ```
+
+`host-config` writes:
+
+- `./.mcp.json` — the Claude Code MCP server entry, using
+  `command: "wsl.exe"` and
+  `args: ["-d", "Ubuntu-24.04", "-e", "denyx-mcp", ...]`.
+- `./.claude/settings.json` — deny list on every built-in
+  effecting tool (including `PowerShell` because of `--windows`),
+  plus the OS-level sandbox stanza.
+- `./opencode.json` — opencode equivalent (`tools: false` block,
+  `permission` deny wildcard, MCP entry).
+- `./.denyx/` (gitignored) — audit-log directory.
 
 Notes:
 
 - `-d Ubuntu-24.04` selects the distro. If you have only one
-  installed and made it default, you can omit it.
-- `-e` is the "execute" form: pass an executable path (no shell
-  interpretation), then args. Avoid `wsl.exe bash -lc '...'`
-  patterns for MCP wiring — they introduce shell-quoting bugs that
-  break stdio JSON-RPC.
-- The policy path is the *Linux-side* path, even if the file lives
-  on `C:`. Use `/mnt/c/...` for Windows-resident files.
-- WSL distros auto-start on first invocation; subsequent calls are
-  ~10 ms pipe-overhead.
+  installed and made it default, you can omit `--wsl-distro` and
+  edit the generated `.mcp.json` to drop `-d Ubuntu-24.04`.
+- `-e` is the "execute" form WSL uses to invoke a binary inside
+  the distro without shell interpretation — `host-config` always
+  emits this shape to avoid shell-quoting bugs that break stdio
+  JSON-RPC.
+- Policy and audit-log paths are *Linux-side* paths, even when
+  the files live on `C:`. Use `/mnt/c/...` for Windows-resident
+  files.
+- WSL distros auto-start on first invocation; subsequent calls
+  are ~10 ms pipe-overhead.
 
 ### 6. Verify the sandbox actually fired
 

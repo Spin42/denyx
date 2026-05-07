@@ -63,30 +63,36 @@ limactl shell denyx -- bash -lc \
   "cargo install denyx-cli denyx-mcp"
 ```
 
-Then add this to your Claude Code (or other MCP host) configuration:
+Then wire your project to Denyx with one command, run from the
+project root on the macOS side:
 
-```jsonc
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "limactl",
-      "args": [
-        "shell", "denyx",
-        "/Users/YOU/.cargo/bin/denyx-mcp",
-        "--policy", "/Users/YOU/Projects/myapp/denyx.toml"
-      ]
-    }
-  }
-}
+```sh
+denyx host-config \
+    --policy /Users/YOU/Projects/myapp/denyx.toml \
+    --audit-log /Users/YOU/Projects/myapp/.denyx/audit.jsonl \
+    --host both \
+    --platform lima \
+    --lima-vm denyx \
+    --denyx-mcp-binary denyx-mcp \
+    --sandbox auto
 ```
 
-The agent calls `denyx_run` from the host; the call traverses
-`limactl shell` (stdio JSON-RPC), lands in the VM, the script runs
-under bubblewrap, the printed output flows back up the pipe. Path
-arguments resolve identically on both sides because Lima mirrors the
-host's `$HOME` at the same absolute path inside the VM —
-`~/.cargo/bin/denyx-mcp` is reachable as a single absolute path from
-both macOS and Linux.
+(You can run `denyx` itself either on the macOS side after
+`cargo install denyx-cli`, or inside the VM via
+`limactl shell denyx -- denyx host-config ...`. Either works
+since `denyx host-config` only writes JSON files; it doesn't
+launch any sandbox itself.)
+
+This writes `./.mcp.json`, `./.claude/settings.json`, and
+`./opencode.json` with the `limactl shell denyx denyx-mcp ...`
+command shape baked in, plus the lockdown of every built-in
+effecting tool. The agent calls `denyx_run` from the host; the
+call traverses `limactl shell` (stdio JSON-RPC), lands in the VM,
+the script runs under bubblewrap, the printed output flows back
+up the pipe. Path arguments resolve identically on both sides
+because Lima mirrors the host's `$HOME` at the same absolute
+path inside the VM — `~/.cargo/bin/denyx-mcp` is reachable as a
+single absolute path from both macOS and Linux.
 
 ## Prerequisites
 
@@ -163,34 +169,40 @@ natively on macOS, which is fine: `limactl shell` is what runs it.
 > path inside the mirrored project tree (e.g.
 > `/Users/YOU/Projects/denyx/target/release/denyx-mcp`).
 
-### 4. Wire it into Claude Code
+### 4. Wire it into Claude Code (or opencode)
 
-Edit your Claude Code MCP config (typically
-`~/.config/claude/mcp.json` or your project's `.mcp.json`):
+From the project root on macOS:
 
-```jsonc
-{
-  "mcpServers": {
-    "denyx": {
-      "command": "limactl",
-      "args": [
-        "shell", "denyx",
-        "/Users/YOU/.cargo/bin/denyx-mcp",
-        "--policy", "/Users/YOU/Projects/myapp/denyx.toml"
-      ]
-    }
-  }
-}
+```sh
+denyx host-config \
+    --policy /Users/YOU/Projects/myapp/denyx.toml \
+    --audit-log /Users/YOU/Projects/myapp/.denyx/audit.jsonl \
+    --host both \
+    --platform lima \
+    --lima-vm denyx \
+    --denyx-mcp-binary denyx-mcp \
+    --sandbox auto
 ```
 
-Replace `YOU` with your username and the policy path with whatever
-applies to the project the agent is editing. **The path is the
-literal Mac path**; Lima translates it into the same path inside the
-VM automatically.
+Replace `YOU` with your username and the policy path with
+whatever applies to the project the agent is editing. **The
+paths are the literal Mac paths**; Lima translates them into the
+same paths inside the VM automatically.
+
+`host-config` writes:
+
+- `./.mcp.json` — the Claude Code MCP server entry, using
+  `command: "limactl"` and `args: ["shell", "denyx",
+  "denyx-mcp", ...]`.
+- `./.claude/settings.json` — deny list on every built-in
+  effecting tool, plus the OS-level sandbox stanza.
+- `./opencode.json` — opencode equivalent (`tools: false` block,
+  `permission` deny wildcard, MCP entry).
+- `./.denyx/` (gitignored) — audit-log directory.
 
 If the VM is stopped when Claude Code calls the MCP server,
-`limactl shell` will boot it. There's a one-time ~5 s cold-start cost
-for the first call; subsequent calls are stdio-pipe-fast.
+`limactl shell` will boot it. There's a one-time ~5 s cold-start
+cost for the first call; subsequent calls are stdio-pipe-fast.
 
 ### 5. Verify the sandbox actually fired
 
