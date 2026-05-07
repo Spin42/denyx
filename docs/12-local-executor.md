@@ -377,26 +377,28 @@ it: the model just calls `Read("$HOME/.aws/credentials")` and the
 file body lands in the cloud orchestrator's context, no Denyx, no
 redaction.
 
-**Claude Code** — write `./.claude/settings.json`:
+Run `denyx host-config --no-mcp` to write the lockdown layer
+without overwriting Step 2's `local-executor` MCP wiring:
 
-```json
-{
-  "permissions": {
-    "deny": [
-      "Bash", "Edit", "Write", "Read",
-      "Glob", "Grep", "WebFetch", "WebSearch",
-      "Monitor", "NotebookEdit"
-    ]
-  },
-  "disableBypassPermissionsMode": "disable"
-}
+```sh
+denyx host-config \
+    --policy ./denyx.toml \
+    --host both \
+    --no-mcp \
+    --sandbox auto
 ```
 
-(`disableBypassPermissionsMode` is silently ignored on Claude Code
-v1; including it unconditionally is safe.)
+`--no-mcp` tells host-config to skip the MCP server entry (the
+project's MCP server is `local-executor`, not `denyx-mcp`) and
+write only the lockdown — `.claude/settings.json` deny list +
+opencode `tools` / `permission` blocks + (with `--sandbox auto`)
+the OS-level sandbox stanza derived from the policy.
 
-**opencode** — already handled by Step 2's `tools: false` block. No
-extra file required.
+For opencode, host-config also rewrites the `tools` and
+`permission` blocks to match the values in
+[10-opencode.md](10-opencode.md). Step 2's `tools: false` block
+is already correct; running host-config is idempotent and merges
+without duplication.
 
 After this step the only effecting tool the model can call is
 `mcp__local-executor__delegate_to_local`. Every file read, HTTP
@@ -421,7 +423,7 @@ Common failure shapes:
 
 | Symptom | Likely cause |
 |---|---|
-| Host calls `Read` / `Bash` directly instead of `delegate_to_local` | Step 4 did not take. Re-check `.claude/settings.json` (Claude Code) or the `tools` block in `opencode.json` (opencode). On Claude Code v2, also confirm `disableBypassPermissionsMode: "disable"` is set. |
+| Host calls `Read` / `Bash` directly instead of `delegate_to_local` | Step 4 did not take. Re-run `denyx host-config --no-mcp` and inspect the resulting `.claude/settings.json` and `opencode.json` to confirm the deny list / `tools: false` block landed. On Claude Code v2, the file also gets `disableBypassPermissionsMode: "disable"`. |
 | `local_mcp.py: cannot connect to ollama` | Ollama isn't running on `:11434`. `ollama serve` or restart the daemon. |
 | `Denyx: parser error` after a `delegate_to_local` call | Local 7B emitted invalid Starlark. The bridge auto-retries once with the error fed back; if it still fails, the model genuinely can't write that program — try a simpler step description or add `[tools.X]` routing hints. |
 | First `delegate_to_local` takes 30+ seconds | Normal cold-start (qwen loading into VRAM). Subsequent calls are seconds. |

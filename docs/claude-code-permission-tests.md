@@ -12,6 +12,13 @@ This was the test methodology used to verify the deny list shape
 documented in [09-claude-code.md](09-claude-code.md). Re-run it
 after a Claude Code version bump to confirm nothing has changed.
 
+> **For production setup, use `denyx host-config` (see
+> [09-claude-code.md](09-claude-code.md))** — it writes the same
+> deny list automatically and merges with any existing
+> `.claude/settings.json`. The hand-written settings here are
+> deliberately minimal (one tool deny, no sandbox) to keep each
+> permission test focused on a single behavior.
+
 ## Why this exists
 
 `docs/09-claude-code.md` recommends a deny list with **ten** tools
