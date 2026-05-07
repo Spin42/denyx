@@ -45,7 +45,14 @@ user a placebo sandbox the model will route around.
 cwd.**
 
 Use Edit/Write/Bash/Read freely. Ask the user every question called
-out below — don't guess.
+out below — **don't guess, and don't skip**. The questions in Step 3
+are about the operator's *intent* (what this project is going to do),
+not what the current code already does. An empty project, a greenfield
+checkout, or a minimal scaffold is **not** grounds to skip them — the
+user knows they're going to call OpenAI / hit a database / run docker
+even if no code does so yet, and the policy has to be written for that
+intent. Asking five questions and confirming "no" five times is the
+correct outcome, not a sign you should have stayed silent.
 
 == Step 0: Pre-flight ==
 
@@ -149,8 +156,12 @@ ask the user; don't auto-add ~/.claude paths.**
 
 == Step 3: Customize for this project ==
 
-Walk through these four questions. Edit `./denyx.toml` after each
-answer; show the user the diff before moving on.
+Walk through **all five** questions below, in order. Ask each one as
+a real question to the user — do not pre-answer "no" on their behalf
+because the project looks empty or you can't see code that needs the
+capability. Greenfield projects still have intent: the user knows
+what they're about to build. Edit `./denyx.toml` after each answer
+and show the user the diff before moving on to the next question.
 
 Q1. **Filesystem read/write.**
     "Beyond the project tree, are there any directories or files
