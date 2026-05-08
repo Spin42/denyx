@@ -46,12 +46,18 @@ minimum_test_timeout = 30.0
 # equivalent. If you can't write the explanation, it's not equivalent
 # and you should add a test instead.
 exclude_re = [
+    # NOTE on regex format: cargo-mutants reports mutant names as
+    # `<file>:<line>:<col>: <description>`, where `<description>`
+    # is the form `replace X with Y in <function>` — i.e. the
+    # function name comes AFTER the operator change. Patterns below
+    # match against this full string; substring order matters.
+
     # b64_encode combines bytes via bitwise OR after shifting them
     # to non-overlapping positions (0-7, 8-15, 16-23). For non-
     # overlapping bit ranges, `|` and `^` produce identical results.
     # No security difference; mutation passes any test that exercises
     # b64 encoding correctness.
-    "taint\\.rs:.*b64_encode.*replace \\| with \\^",
+    "taint\\.rs:.*replace \\| with \\^ in b64_encode",
 
     # ROT-N math coincidence. Inside the alphabetic branch, the
     # original `b - 'A' + n` and the mutant `b + 'A' + n` are
@@ -60,8 +66,8 @@ exclude_re = [
     # to the same result under `% 26`. The same coincidence applies
     # to 'a' = 97 ≡ 19 (mod 26) — `(b - 'a' + n) % 26 == (b + 'a' + n) % 26`
     # holds. See the docstring on `compute_transforms`.
-    "taint\\.rs:24[12]:.*compute_transforms.*replace - with \\+",
-    "taint\\.rs:24[12]:.*compute_transforms.*replace - with /",
+    "taint\\.rs:24[12]:.*replace - with \\+ in compute_transforms",
+    "taint\\.rs:24[12]:.*replace - with / in compute_transforms",
 
     # *::as_str helpers (SandboxMode::as_str, FsAction::as_str,
     # HttpVerb::as_str) only feed into error-message rendering. The
@@ -72,5 +78,9 @@ exclude_re = [
     # cosmetic effect of returning the wrong as_str value is "the
     # error message names the wrong action," not a security
     # regression.
+    #
+    # Format note: this is an FnValue mutator (not BinaryOp), so
+    # the mutant name has function-then-return-then-value order:
+    # `replace <fn>::as_str -> &'static str with "<value>"`.
     "lib\\.rs:.*::as_str -> &'static str with \"",
 ]
