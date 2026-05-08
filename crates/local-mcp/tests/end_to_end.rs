@@ -342,6 +342,47 @@ impl Session {
 // ─────────────────────── Tests ───────────────────────
 
 #[test]
+fn legacy_no_subcommand_invocation_still_runs_serve_mode() {
+    // Pre-subcommand `.mcp.json` configs invoke the binary as
+    // `denyx-local-mcp --policy ./… --mcp-bin ./…` (no "serve"
+    // word). The implicit-default-subcommand back-compat layer must
+    // make this still work.
+    let mcp_bin = ensure_denyx_mcp();
+    let tmp = unique_tempdir("e2e_legacy_no_serve");
+    let policy = write_minimal_policy(&tmp);
+    let mock = MockOllama::new(vec!["print('legacy-shape ok')"]);
+
+    // NOTE: no "serve" in the args list.
+    let args: Vec<String> = vec![
+        "--policy".into(),
+        policy.to_string_lossy().into_owned(),
+        "--mcp-bin".into(),
+        mcp_bin.to_string_lossy().into_owned(),
+        "--endpoint".into(),
+        mock.url(),
+        "--no-precompute".into(),
+    ];
+
+    let mut s = Session::spawn(&args);
+    s.handshake();
+    s.send(&json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {
+            "name": "delegate_to_local",
+            "arguments": { "step": "say something" }
+        }
+    }));
+    let resp = s.recv();
+    let body = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        body.contains("legacy-shape ok"),
+        "expected program output in: {body}"
+    );
+    assert_eq!(resp["result"]["isError"], false);
+    s.close();
+}
+
+#[test]
 fn end_to_end_delegate_to_local_runs_program_and_returns_output() {
     let mcp_bin = ensure_denyx_mcp();
     let tmp = unique_tempdir("e2e_basic");

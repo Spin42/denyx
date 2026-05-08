@@ -161,7 +161,16 @@ struct DoctorCli {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // Implicit-default-subcommand back-compat. Existing `.mcp.json`
+    // entries from before subcommands were introduced look like
+    // `denyx-local-mcp --policy ./… --mcp-bin denyx-mcp …` (no
+    // "serve" word). Without rewriting, clap rejects those with a
+    // "missing subcommand" error. Detect that shape by checking
+    // whether argv[1] is a known subcommand or top-level flag — if
+    // not (i.e. it starts with `-`), inject "serve" so the existing
+    // configs keep working.
+    let argv: Vec<std::ffi::OsString> = inject_implicit_serve(std::env::args_os().collect());
+    let cli = Cli::parse_from(argv);
     match cli.command {
         Cmd::Serve(args) => match serve(args) {
             Ok(()) => ExitCode::from(0),
@@ -267,4 +276,74 @@ fn serve(cli: ServeArgs) -> Result<()> {
     drop(embed);
     denyx.close();
     Ok(())
+}
+
+/// Rewrite `argv` to inject "serve" as the implicit subcommand if
+/// `argv[1]` is a flag (starts with `-`) or absent. Preserves the
+/// "named subcommand" shape (`denyx-local-mcp serve …` and
+/// `denyx-local-mcp doctor …`) while keeping back-compat with
+/// pre-subcommand .mcp.json entries that look like
+/// `denyx-local-mcp --policy ./…`.
+fn inject_implicit_serve(mut argv: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    if argv.len() < 2 {
+        return argv;
+    }
+    let first = argv[1].to_string_lossy().into_owned();
+    // Pass through known subcommands and clap meta-flags untouched.
+    const PASSTHROUGH: &[&str] = &["serve", "doctor", "help", "--help", "-h", "--version", "-V"];
+    if PASSTHROUGH.iter().any(|p| first == *p) {
+        return argv;
+    }
+    // Anything else (typically `--policy`, `--mcp-bin`, etc.) is a
+    // legacy direct-serve invocation — inject "serve".
+    argv.insert(1, std::ffi::OsString::from("serve"));
+    argv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inject_implicit_serve;
+    use std::ffi::OsString;
+
+    fn os(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(|s| OsString::from(*s)).collect()
+    }
+
+    #[test]
+    fn injects_serve_when_first_arg_is_a_flag() {
+        let out = inject_implicit_serve(os(&["denyx-local-mcp", "--policy", "./denyx.toml"]));
+        assert_eq!(
+            out,
+            os(&["denyx-local-mcp", "serve", "--policy", "./denyx.toml"])
+        );
+    }
+
+    #[test]
+    fn passes_through_explicit_serve_subcommand() {
+        let out = inject_implicit_serve(os(&["denyx-local-mcp", "serve", "--policy", "x"]));
+        assert_eq!(out, os(&["denyx-local-mcp", "serve", "--policy", "x"]));
+    }
+
+    #[test]
+    fn passes_through_doctor_subcommand() {
+        let out = inject_implicit_serve(os(&["denyx-local-mcp", "doctor"]));
+        assert_eq!(out, os(&["denyx-local-mcp", "doctor"]));
+    }
+
+    #[test]
+    fn passes_through_help_and_version() {
+        for arg in ["--help", "-h", "--version", "-V", "help"] {
+            let out = inject_implicit_serve(os(&["denyx-local-mcp", arg]));
+            assert_eq!(out, os(&["denyx-local-mcp", arg]));
+        }
+    }
+
+    #[test]
+    fn empty_or_one_arg_is_unchanged() {
+        assert_eq!(inject_implicit_serve(os(&[])), Vec::<OsString>::new());
+        assert_eq!(
+            inject_implicit_serve(os(&["denyx-local-mcp"])),
+            os(&["denyx-local-mcp"])
+        );
+    }
 }
