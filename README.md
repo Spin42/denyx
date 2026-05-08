@@ -1,12 +1,12 @@
 # Denyx
 
-**Lock down what your AI coding agent can read, write, fetch, and run on your machine — with one TOML policy.**
-
-Bring your own policy. Plug into any MCP-aware coding host — [Claude Code](https://github.com/anthropics/claude-code), [opencode](https://opencode.ai), GitHub Copilot's agent mode, Cursor, [Continue](https://continue.dev), [Cline](https://cline.bot), and others — or run standalone. Adds what the hosts' built-in permissions can't: secret-aware redaction (values flagged `local_only` never bubble up to the chat), tamper-evident audit (SHA-256-chained, verifiable after the fact), and centralised team deployment (one policy and one audit endpoint across N developers).
-
 [![CI](https://github.com/Spin42/denyx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/ci.yml)
 [![Mutation testing (weekly)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml)
 [![codecov](https://codecov.io/gh/Spin42/denyx/branch/main/graph/badge.svg)](https://codecov.io/gh/Spin42/denyx)
+
+**Lock down what your AI coding agent can read, write, fetch, and run on your machine — with one TOML policy.**
+
+Bring your own policy. Plug into any MCP-aware coding host — [Claude Code](https://github.com/anthropics/claude-code), [opencode](https://opencode.ai), GitHub Copilot's agent mode, Cursor, [Continue](https://continue.dev), [Cline](https://cline.bot), and others — or run standalone. Adds what the hosts' built-in permissions can't: secret-aware redaction (values flagged `local_only` never bubble up to the chat), tamper-evident audit (SHA-256-chained, verifiable after the fact), and centralised team deployment (one policy and one audit endpoint across N developers).
 
 Denyx is a policy gate for [Claude Code](https://github.com/anthropics/claude-code),
 [opencode](https://opencode.ai), and any other MCP-aware coding agent. You
