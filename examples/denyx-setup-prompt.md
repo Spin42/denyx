@@ -56,10 +56,17 @@ correct outcome, not a sign you should have stayed silent.
 
 == Step 0: Pre-flight ==
 
-1. Detect host. If `.mcp.json` is the natural project-local MCP
-   config and you have access to the `Bash`/`Read`/`Edit`/`Write`
-   tools, you're in Claude Code. If `opencode.json` is the project-
-   local config, you're in opencode. If unsure, ask.
+1. Detect host. The well-tested hosts are:
+   - **Claude Code** — natural project-local MCP config is `.mcp.json`;
+     access to `Bash`/`Read`/`Edit`/`Write` tools.
+   - **opencode** — project-local config is `opencode.json`.
+
+   Other MCP-capable hosts also work (Cursor, VSCode + GitHub
+   Copilot agent mode, Continue, Cline / Roo Code) but their
+   integrations are **not yet thoroughly tested** — read
+   [`docs/14-other-hosts.md`](../docs/14-other-hosts.md) before
+   proceeding and tell the user explicitly which lockdown gaps to
+   expect on their host. If unsure which host you're in, ask.
 
 2. Detect OS via `uname -s` (Linux / Darwin) or `$OS` (Windows).
    Branch:
@@ -242,13 +249,24 @@ rather than a local TOML file, **also see Step 4b below** —
 add `--policy-url` / `--audit-url` to bake the team endpoints
 into the generated MCP entry.
 
+**Host selection.** The default `--host auto` reads `TERM_PROGRAM`,
+`CLAUDECODE`, `OPENCODE`, and existing config files in cwd to figure
+out which host(s) to wire. Since you (the assistant) already know
+which host you're running in from Step 0.1, you can either pass it
+explicitly (more deterministic) or rely on auto-detect.
+
+Recognised `--host` values: `claude`, `opencode`, `cursor`, `copilot`
+(VSCode + GitHub Copilot agent mode), `continue`, `cline`. Pass
+multiple comma-separated. Aliases: `both` = `claude,opencode`,
+`all` = every host, `auto` = detect.
+
 Pick the right invocation based on the platform you detected in
 Step 0 and the binary location resolved in Step 0.3:
 
   - Linux native:
       <denyx> host-config \
           --policy ./denyx.toml \
-          --host <claude|opencode|both> \
+          --host <claude|opencode|cursor|copilot|continue|cline|comma-list|auto> \
           --platform native \
           --denyx-mcp-binary <denyx-mcp> \
           --sandbox auto
@@ -259,7 +277,7 @@ Step 0 and the binary location resolved in Step 0.3:
       <denyx> host-config \
           --policy <absolute-policy-path> \
           --audit-log <absolute-audit-log-path> \
-          --host <claude|opencode|both> \
+          --host <as above> \
           --platform lima \
           --lima-vm denyx \
           --denyx-mcp-binary denyx-mcp \
@@ -272,12 +290,20 @@ Step 0 and the binary location resolved in Step 0.3:
       <denyx> host-config \
           --policy <wsl-side-policy-path> \
           --audit-log <wsl-side-audit-log-path> \
-          --host <claude|opencode|both> \
+          --host <as above> \
           --platform wsl \
           --wsl-distro <distro> \
           --denyx-mcp-binary denyx-mcp \
           --windows \
           --sandbox auto
+
+**For Cursor / Copilot / Continue / Cline: read
+[`docs/14-other-hosts.md`](../docs/14-other-hosts.md) first.** Those
+integrations are not yet thoroughly tested. The MCP wiring should
+work; the host-side lockdown layer varies and is incomplete for
+some hosts (Cursor and Copilot in particular have only UI-level
+tool toggles, not file-based deny lists). Tell the user that
+explicitly when wiring those.
 
 After running, show the user `denyx host-config`'s stderr summary
 of what changed (it prints `+ wrote <path>` for each file). Then
