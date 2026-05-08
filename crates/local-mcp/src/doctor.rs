@@ -1,15 +1,22 @@
 //! `denyx-local-mcp doctor` — diagnostic preflight.
 //!
-//! Probes the configured `--endpoint`, fingerprints the server
-//! (Ollama vs generic OpenAI-compat), verifies the configured chat
-//! and embed models are served, and on Ollama additionally reads
-//! `num_ctx` to flag the common "default 2048 too small for our
-//! prompt" pitfall. Prints copy-pasteable next-steps for every
-//! failure — never auto-fixes.
+//! Two modes:
 //!
-//! The doctor is intentionally read-only. It does not pull models,
-//! create Modelfiles, or restart anything. Its job is "tell the
-//! operator what's wrong and how to fix it."
+//! - **Scan mode** (default — `denyx-local-mcp doctor` with no
+//!   flags). Probes the standard local-LLM ports
+//!   (Ollama 11434, llama.cpp 8080, LM Studio 1234, vLLM 8000, Text
+//!   Gen WebUI 5000), lists every server that responds plus its
+//!   served models, and suggests a copy-pasteable `serve` command
+//!   with sensible chat + embed model picks.
+//! - **Targeted mode** (`--endpoint X`). Verifies the operator's
+//!   chosen endpoint, chat model, and embed model are reachable +
+//!   correct. On Ollama also reads `num_ctx` to flag the common
+//!   "default 2048 too small for our prompt" pitfall.
+//!
+//! Both modes print copy-pasteable next-steps for every failure
+//! and never auto-fix anything. The doctor is read-only by
+//! design — its job is "tell the operator what's wrong and how to
+//! fix it," not "fix it for them."
 
 use std::time::Duration;
 
@@ -450,6 +457,276 @@ fn http_post_json(url: &str, body: &str, timeout_secs: u64) -> Result<String> {
     Ok(body)
 }
 
+// ─────────────────────── scan mode ───────────────────────
+
+/// Default endpoints scanned when `denyx-local-mcp doctor` is run
+/// without `--endpoint`. Ordered roughly by popularity so the first
+/// hit is the most likely "right" one. Probed sequentially with a
+/// short timeout — total scan time is bounded by the sum of
+/// timeouts for the absent ones.
+const DEFAULT_SCAN_ENDPOINTS: &[(&str, &str)] = &[
+    ("http://localhost:11434/v1", "Ollama"),
+    ("http://localhost:8080/v1", "llama.cpp / LocalAI / MLX-LM"),
+    ("http://localhost:1234/v1", "LM Studio / mistral.rs"),
+    ("http://localhost:8000/v1", "vLLM"),
+    (
+        "http://localhost:5000/v1",
+        "Text Generation WebUI / TabbyAPI",
+    ),
+];
+
+/// One server discovered by the scan.
+#[derive(Debug, Clone)]
+pub struct DetectedServer {
+    pub endpoint: String,
+    pub kind: ServerKind,
+    pub models: Vec<String>,
+}
+
+/// Result of a scan: every endpoint we probed, in order, paired
+/// with its detection result. Endpoints that didn't respond carry
+/// `kind = Unreachable` and an empty `models` list.
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub probes: Vec<(String, String, ServerKind, Vec<String>)>, // (endpoint, label, kind, models)
+}
+
+impl ScanResult {
+    pub fn detected(&self) -> impl Iterator<Item = DetectedServer> + '_ {
+        self.probes.iter().filter_map(|(ep, _label, kind, models)| {
+            if matches!(kind, ServerKind::Unreachable) {
+                None
+            } else {
+                Some(DetectedServer {
+                    endpoint: ep.clone(),
+                    kind: kind.clone(),
+                    models: models.clone(),
+                })
+            }
+        })
+    }
+}
+
+/// Probe every endpoint in [`scan_targets`] and return the result.
+pub fn scan() -> ScanResult {
+    let targets = scan_targets();
+    let probes = targets
+        .into_iter()
+        .map(|(ep, label)| {
+            let kind = fingerprint(&ep);
+            let models = if matches!(kind, ServerKind::Unreachable) {
+                Vec::new()
+            } else {
+                list_models(&ep, None).unwrap_or_default()
+            };
+            (ep, label, kind, models)
+        })
+        .collect();
+    ScanResult { probes }
+}
+
+/// The list of endpoints scan mode probes. By default this is
+/// [`DEFAULT_SCAN_ENDPOINTS`]; the env var
+/// `DENYX_LOCAL_MCP_DOCTOR_SCAN` overrides it as a comma-separated
+/// list (used by integration tests to point at a mock server).
+pub fn scan_targets() -> Vec<(String, String)> {
+    if let Ok(v) = std::env::var("DENYX_LOCAL_MCP_DOCTOR_SCAN") {
+        return v
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| (s.to_string(), "test override".to_string()))
+            .collect();
+    }
+    DEFAULT_SCAN_ENDPOINTS
+        .iter()
+        .map(|(ep, label)| (ep.to_string(), label.to_string()))
+        .collect()
+}
+
+// ─────────────────────── model heuristics ───────────────────────
+
+/// Heuristic: does this model id look like an embedding model?
+///
+/// Catches the common patterns: anything containing `embed`,
+/// `nomic-` (Nomic AI's embed family), `bge-` (BGE family),
+/// `e5-` / `gte-` (Microsoft / Alibaba families). Errs toward
+/// labelling as embed: a false positive demotes the model to embed
+/// suggestions where it'd otherwise be in chat suggestions; the
+/// operator can override with `--model` either way.
+pub fn looks_like_embed_model(id: &str) -> bool {
+    let lc = id.to_ascii_lowercase();
+    lc.contains("embed")
+        || lc.contains("nomic-")
+        || lc.starts_with("bge-")
+        || lc.contains("/bge-")
+        || lc.starts_with("e5-")
+        || lc.contains("/e5-")
+        || lc.starts_with("gte-")
+        || lc.contains("/gte-")
+}
+
+/// Pick the most-likely-good chat model from a server's served list.
+/// Heuristic: prefer code-tuned > qwen-family > llama-family > any
+/// non-embed model. Returns the id directly so callers can drop it
+/// into a `--model` flag.
+pub fn suggest_chat_model(models: &[String]) -> Option<String> {
+    let candidates: Vec<&String> = models
+        .iter()
+        .filter(|id| !looks_like_embed_model(id))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let scored = |id: &str| -> i32 {
+        let lc = id.to_ascii_lowercase();
+        let mut score = 0;
+        if lc.contains("coder") || lc.contains("code") {
+            score += 100;
+        }
+        if lc.contains("qwen") {
+            score += 30;
+        }
+        if lc.contains("llama") {
+            score += 20;
+        }
+        // Prefer "instruct" / "chat" tuned variants.
+        if lc.contains("instruct") || lc.contains("chat") {
+            score += 10;
+        }
+        // Sweet spot 7B-class for local hardware.
+        if lc.contains("7b") {
+            score += 5;
+        }
+        score
+    };
+    candidates.into_iter().max_by_key(|id| scored(id)).cloned()
+}
+
+/// Pick the most-likely-good embed model from a served list.
+pub fn suggest_embed_model(models: &[String]) -> Option<String> {
+    models.iter().find(|id| looks_like_embed_model(id)).cloned()
+}
+
+// ─────────────────────── scan-mode rendering ───────────────────────
+
+/// Render a [`ScanResult`] as human-readable output. Returns the
+/// string and the exit code (0 if at least one server with both a
+/// suggested chat and embed model was found; 1 otherwise — there's
+/// always something to do).
+pub fn render_scan(scan: &ScanResult) -> (String, i32) {
+    let mut out = String::new();
+    out.push_str("denyx-local-mcp doctor — scanning common local-LLM endpoints\n\n");
+
+    for (ep, label, kind, models) in &scan.probes {
+        match kind {
+            ServerKind::Unreachable => {
+                out.push_str(&format!("  {ep:<40} (no response — {label})\n"));
+            }
+            _ => {
+                out.push_str(&format!("  {ep:<40} {server} ✓\n", server = kind.label()));
+                let chat_models: Vec<&String> = models
+                    .iter()
+                    .filter(|m| !looks_like_embed_model(m))
+                    .collect();
+                let embed_models: Vec<&String> = models
+                    .iter()
+                    .filter(|m| looks_like_embed_model(m))
+                    .collect();
+                if !chat_models.is_empty() {
+                    out.push_str(&format!("    Chat models ({}):\n", chat_models.len()));
+                    for m in chat_models.iter().take(8) {
+                        out.push_str(&format!("      - {m}\n"));
+                    }
+                    if chat_models.len() > 8 {
+                        out.push_str(&format!(
+                            "      … and {n} more\n",
+                            n = chat_models.len() - 8
+                        ));
+                    }
+                }
+                if !embed_models.is_empty() {
+                    out.push_str(&format!("    Embed models ({}):\n", embed_models.len()));
+                    for m in embed_models.iter().take(4) {
+                        out.push_str(&format!("      - {m}\n"));
+                    }
+                }
+                if models.is_empty() {
+                    out.push_str("    (no models served — pull/load one before using)\n");
+                }
+            }
+        }
+    }
+    out.push('\n');
+
+    // Pick the first detected server with at least one chat + one
+    // embed model, generate a suggested `serve` command.
+    let detected: Vec<DetectedServer> = scan.detected().collect();
+    if detected.is_empty() {
+        out.push_str(
+            "No local LLM server detected on the standard ports.\n\n\
+             Common starts:\n  \
+             Ollama:     `ollama serve` (then `ollama pull qwen2.5-coder:7b`)\n  \
+             llama.cpp:  `llama-server -m <model.gguf> -c 8192 --port 8080`\n  \
+             LM Studio:  open the app and start the local server in the UI\n  \
+             vLLM:       `vllm serve <model> --port 8000`\n\n\
+             Or pass an explicit endpoint:\n  \
+             denyx-local-mcp doctor --endpoint http://your-host:port/v1\n",
+        );
+        return (out, 1);
+    }
+
+    let pick = detected
+        .iter()
+        .find(|s| {
+            suggest_chat_model(&s.models).is_some() && suggest_embed_model(&s.models).is_some()
+        })
+        .or_else(|| detected.first());
+    let pick = match pick {
+        Some(s) => s,
+        None => return (out, 1),
+    };
+    let chat = suggest_chat_model(&pick.models);
+    let embed = suggest_embed_model(&pick.models);
+
+    out.push_str("Suggested setup\n");
+    out.push_str(&format!("  Endpoint:   {}\n", pick.endpoint));
+    match &chat {
+        Some(c) => out.push_str(&format!("  Chat model: {c}\n")),
+        None => out.push_str("  Chat model: (none found — pull a coder/instruct model)\n"),
+    }
+    match &embed {
+        Some(e) => out.push_str(&format!("  Embed model: {e}\n")),
+        None => out.push_str(
+            "  Embed model: (none found — pull an embedding model, e.g. `ollama pull nomic-embed-text`)\n",
+        ),
+    }
+
+    if let (Some(c), Some(e)) = (&chat, &embed) {
+        out.push_str("\nReady-to-paste invocation:\n");
+        out.push_str(&format!(
+            "  denyx-local-mcp serve \\\n    \
+             --policy ./denyx.toml \\\n    \
+             --mcp-bin denyx-mcp \\\n    \
+             --endpoint {endpoint} \\\n    \
+             --model {c} \\\n    \
+             --embed-model {e}\n",
+            endpoint = pick.endpoint
+        ));
+        if matches!(pick.kind, ServerKind::Ollama { .. }) {
+            out.push_str(
+                "\nNote (Ollama): default models often ship with num_ctx=2048, \
+                 too small for our system prompt. Run \
+                 `denyx-local-mcp doctor --endpoint <above> --model <above>` \
+                 to verify; if it warns, build a Modelfile variant with \
+                 PARAMETER num_ctx 8192.\n",
+            );
+        }
+        return (out, 0);
+    }
+    (out, 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +858,158 @@ mod tests {
         assert_eq!(code, 1);
         assert!(out.contains("[WARN] ollama num_ctx"));
         assert!(out.contains("Usable, but with caveats"));
+    }
+
+    #[test]
+    fn looks_like_embed_model_classifies_common_names() {
+        assert!(looks_like_embed_model("nomic-embed-text"));
+        assert!(looks_like_embed_model("nomic-embed-text:latest"));
+        assert!(looks_like_embed_model("nomic-ai/nomic-embed-text-v1.5"));
+        assert!(looks_like_embed_model("BAAI/bge-base-en-v1.5"));
+        assert!(looks_like_embed_model("intfloat/e5-large-v2"));
+        assert!(looks_like_embed_model("Alibaba-NLP/gte-large"));
+        assert!(looks_like_embed_model("snowflake-arctic-embed:33m"));
+
+        assert!(!looks_like_embed_model("qwen2.5-coder:7b"));
+        assert!(!looks_like_embed_model("llama3.2:3b"));
+        assert!(!looks_like_embed_model("mistral-7b-instruct"));
+    }
+
+    #[test]
+    fn suggest_chat_model_prefers_coder_then_qwen_then_llama() {
+        let models = vec![
+            "llama3.2:3b".to_string(),
+            "mistral-7b-instruct".to_string(),
+            "qwen2.5:7b".to_string(),
+            "qwen2.5-coder:7b".to_string(),
+            "nomic-embed-text".to_string(),
+        ];
+        assert_eq!(
+            suggest_chat_model(&models),
+            Some("qwen2.5-coder:7b".to_string())
+        );
+    }
+
+    #[test]
+    fn suggest_chat_model_skips_embed_models() {
+        let models = vec![
+            "nomic-embed-text".to_string(),
+            "BAAI/bge-base-en-v1.5".to_string(),
+        ];
+        assert_eq!(suggest_chat_model(&models), None);
+    }
+
+    #[test]
+    fn suggest_chat_model_falls_back_to_any_non_embed_when_none_match() {
+        let models = vec!["foo-bar:1b".to_string(), "nomic-embed-text".to_string()];
+        assert_eq!(suggest_chat_model(&models), Some("foo-bar:1b".to_string()));
+    }
+
+    #[test]
+    fn suggest_embed_model_returns_first_embed_in_list() {
+        let models = vec![
+            "qwen2.5-coder:7b".to_string(),
+            "nomic-embed-text".to_string(),
+            "BAAI/bge-base-en-v1.5".to_string(),
+        ];
+        assert_eq!(
+            suggest_embed_model(&models),
+            Some("nomic-embed-text".to_string())
+        );
+    }
+
+    #[test]
+    fn suggest_embed_model_returns_none_when_no_embed_in_list() {
+        let models = vec!["qwen2.5-coder:7b".to_string()];
+        assert_eq!(suggest_embed_model(&models), None);
+    }
+
+    #[test]
+    fn render_scan_when_no_servers_detected_returns_exit_code_1() {
+        let scan = ScanResult {
+            probes: vec![
+                (
+                    "http://localhost:11434/v1".to_string(),
+                    "Ollama".to_string(),
+                    ServerKind::Unreachable,
+                    Vec::new(),
+                ),
+                (
+                    "http://localhost:8080/v1".to_string(),
+                    "llama.cpp".to_string(),
+                    ServerKind::Unreachable,
+                    Vec::new(),
+                ),
+            ],
+        };
+        let (out, code) = render_scan(&scan);
+        assert_eq!(code, 1);
+        assert!(out.contains("(no response"));
+        assert!(out.contains("No local LLM server detected"));
+        assert!(out.contains("ollama serve"));
+        assert!(out.contains("llama-server"));
+    }
+
+    #[test]
+    fn render_scan_with_complete_setup_returns_ready_to_paste_command() {
+        let scan = ScanResult {
+            probes: vec![(
+                "http://localhost:11434/v1".to_string(),
+                "Ollama".to_string(),
+                ServerKind::Ollama {
+                    version: Some("0.5.7".to_string()),
+                },
+                vec![
+                    "qwen2.5-coder:7b".to_string(),
+                    "nomic-embed-text".to_string(),
+                ],
+            )],
+        };
+        let (out, code) = render_scan(&scan);
+        assert_eq!(code, 0);
+        assert!(out.contains("Ollama v0.5.7"));
+        assert!(out.contains("Chat models (1)"));
+        assert!(out.contains("- qwen2.5-coder:7b"));
+        assert!(out.contains("Embed models (1)"));
+        assert!(out.contains("- nomic-embed-text"));
+        assert!(out.contains("Ready-to-paste invocation"));
+        assert!(out.contains("--endpoint http://localhost:11434/v1"));
+        assert!(out.contains("--model qwen2.5-coder:7b"));
+        assert!(out.contains("--embed-model nomic-embed-text"));
+        assert!(
+            out.contains("num_ctx"),
+            "should hint about Ollama num_ctx for Ollama servers"
+        );
+    }
+
+    #[test]
+    fn render_scan_with_server_but_no_models_returns_exit_code_1() {
+        let scan = ScanResult {
+            probes: vec![(
+                "http://localhost:11434/v1".to_string(),
+                "Ollama".to_string(),
+                ServerKind::Ollama { version: None },
+                Vec::new(),
+            )],
+        };
+        let (out, code) = render_scan(&scan);
+        assert_eq!(code, 1);
+        assert!(out.contains("(no models served"));
+    }
+
+    #[test]
+    fn render_scan_with_chat_but_no_embed_model_warns() {
+        let scan = ScanResult {
+            probes: vec![(
+                "http://localhost:11434/v1".to_string(),
+                "Ollama".to_string(),
+                ServerKind::Ollama { version: None },
+                vec!["qwen2.5-coder:7b".to_string()],
+            )],
+        };
+        let (out, code) = render_scan(&scan);
+        assert_eq!(code, 1);
+        assert!(out.contains("Embed model: (none found"));
     }
 
     #[test]

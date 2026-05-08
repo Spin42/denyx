@@ -123,19 +123,25 @@ struct ServeArgs {
 
 #[derive(Parser, Debug)]
 struct DoctorCli {
-    /// OpenAI-compatible API base URL to probe.
-    #[arg(long, default_value = "http://localhost:11434/v1")]
-    endpoint: String,
+    /// OpenAI-compatible API base URL to verify. **If omitted**,
+    /// doctor runs in scan mode: probes the standard local-LLM
+    /// ports (Ollama 11434, llama.cpp 8080, LM Studio 1234, vLLM
+    /// 8000, Text Gen WebUI 5000), lists what's running, and
+    /// suggests a copy-pasteable `serve` command.
+    #[arg(long)]
+    endpoint: Option<String>,
 
     /// Bearer token, if the server requires auth.
     #[arg(long, env = "DENYX_LOCAL_API_KEY")]
     api_key: Option<String>,
 
-    /// Chat model id to verify is served.
+    /// Chat model id to verify is served. Only used in targeted
+    /// mode (when `--endpoint` is set).
     #[arg(long, default_value = "qwen2.5-coder:7b")]
     model: String,
 
     /// Embed model id to verify is served + can produce a vector.
+    /// Only used in targeted mode.
     #[arg(long, default_value = "nomic-embed-text")]
     embed_model: String,
 }
@@ -150,17 +156,27 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Cmd::Doctor(args) => {
-            let report = doctor::run(&DoctorArgs {
-                endpoint: args.endpoint,
-                api_key: args.api_key,
-                chat_model: args.model,
-                embed_model: args.embed_model,
-            });
-            let (out, code) = doctor::render(&report);
-            print!("{out}");
-            ExitCode::from(code as u8)
-        }
+        Cmd::Doctor(args) => match args.endpoint {
+            None => {
+                // Scan mode: probe known ports, suggest a setup.
+                let scan = doctor::scan();
+                let (out, code) = doctor::render_scan(&scan);
+                print!("{out}");
+                ExitCode::from(code as u8)
+            }
+            Some(ep) => {
+                // Targeted mode: verify a specific endpoint + models.
+                let report = doctor::run(&DoctorArgs {
+                    endpoint: ep,
+                    api_key: args.api_key,
+                    chat_model: args.model,
+                    embed_model: args.embed_model,
+                });
+                let (out, code) = doctor::render(&report);
+                print!("{out}");
+                ExitCode::from(code as u8)
+            }
+        },
     }
 }
 

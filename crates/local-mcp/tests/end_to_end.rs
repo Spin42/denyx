@@ -581,6 +581,17 @@ fn run_doctor(endpoint: &str, model: &str, embed_model: &str) -> std::process::O
         .expect("spawn denyx-local-mcp doctor")
 }
 
+/// Scan mode: no `--endpoint`. The binary reads the
+/// `DENYX_LOCAL_MCP_DOCTOR_SCAN` env var to override the default
+/// endpoint list — the tests use that to point at the mock.
+fn run_doctor_scan(scan_endpoints: &str) -> std::process::Output {
+    Command::new(BIN)
+        .args(["doctor"])
+        .env("DENYX_LOCAL_MCP_DOCTOR_SCAN", scan_endpoints)
+        .output()
+        .expect("spawn denyx-local-mcp doctor (scan mode)")
+}
+
 #[test]
 fn doctor_passes_when_models_present_and_num_ctx_ok() {
     let mock = MockOllama::new(vec![]);
@@ -620,6 +631,52 @@ fn doctor_fails_with_pull_instructions_when_chat_model_missing() {
         "expected pull instruction; stdout:\n{stdout}"
     );
     assert!(stdout.contains("NOT ready"));
+}
+
+#[test]
+fn doctor_scan_mode_finds_running_server_and_emits_serve_command() {
+    let mock = MockOllama::new(vec![]);
+    let out = run_doctor_scan(&mock.url());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "scan mode with running server should exit 0; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("scanning common local-LLM endpoints"));
+    assert!(stdout.contains("Ollama"));
+    assert!(stdout.contains("Chat models"));
+    assert!(stdout.contains("qwen2.5-coder:7b"));
+    assert!(stdout.contains("Embed models"));
+    assert!(stdout.contains("nomic-embed-text"));
+    assert!(stdout.contains("Ready-to-paste invocation"));
+    assert!(stdout.contains("denyx-local-mcp serve"));
+    assert!(stdout.contains("--model qwen2.5-coder:7b"));
+    assert!(stdout.contains("--embed-model nomic-embed-text"));
+}
+
+#[test]
+fn doctor_scan_mode_with_no_servers_running_prints_install_hints() {
+    // Bind+drop two ports so we have known-unreachable URLs.
+    let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let a1 = l1.local_addr().unwrap();
+    drop(l1);
+    let l2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let a2 = l2.local_addr().unwrap();
+    drop(l2);
+    let scan = format!("http://{a1}/v1,http://{a2}/v1");
+    let out = run_doctor_scan(&scan);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "scan mode with no servers should exit 1; stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("(no response"));
+    assert!(stdout.contains("No local LLM server detected"));
+    assert!(stdout.contains("ollama serve"));
+    assert!(stdout.contains("llama-server"));
+    assert!(stdout.contains("LM Studio"));
 }
 
 #[test]
