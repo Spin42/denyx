@@ -385,10 +385,39 @@ See `docs/claude-code-permission-tests.md` for the test recipe
 that confirmed this; re-run it after a Claude Code version bump
 to verify nothing changed.
 
-== Step 5: Smoke test ==
+== Step 5: Verify with `doctor` ==
 
-After the config is in place, run a manual sanity check yourself
-(no need to ask the user to restart the host):
+Run the doctor commands to verify the setup is consistent. **You
+can run these now via Bash even though Step 4 just wrote a deny
+list — the deny list is loaded by the host on its next session
+start, so your current session still has Bash. After the user
+restarts the host (Step 6), they'll re-run doctor from a regular
+terminal, outside the agent.**
+
+  1. `<denyx> doctor` — operator-facing comprehensive check.
+     Inspects denyx.toml, host-config wiring, audit-dir, .gitignore,
+     plus cross-cutting consistency (e.g., does any [tools.X]
+     backend_url point at a host that's not in network.http_*_allow?
+     does the launch shape bypass requires_approval?). Exit 0 = OK,
+     1 = warnings, 2 = failures. Show the user the output. If it
+     reports anything beyond [INFO], walk back through Steps 2-4
+     and apply the suggested fixes.
+
+  2. `<denyx-mcp> doctor` — gate's perspective on the project.
+     Treats wiring `denyx-mcp` as the canonical OK shape, INFO on
+     `denyx-local-mcp` (local-executor flow), warns when the
+     built-in deny list is incomplete.
+
+  3. (Local-executor flow only) `<denyx-local-mcp> doctor` —
+     additionally scans for a running local LLM server, checks
+     the configured chat + embed models are served, and on Ollama
+     reads `num_ctx` (warns when < 8192 since our system prompt
+     needs more context).
+
+== Step 5b: Manual smoke test (optional) ==
+
+If `denyx doctor` reported all-OK and you want to see the gate
+fire end-to-end before declaring victory:
 
   1. From cwd, spawn `<denyx-mcp>` directly with the same flags
      the config uses, send an `initialize` JSON-RPC, then
@@ -408,6 +437,13 @@ If the smoke test passes, tell the user:
   - The host (Claude Code or opencode) picks up the new
     project-local config at the next session start. Tell them to
     restart their host process.
+  - After the restart, doctor commands are no longer reachable
+    from the agent (Bash is denied). To re-verify the setup at
+    any time, run `denyx doctor` (or `denyx-mcp doctor` /
+    `denyx-local-mcp doctor`) **from a regular terminal in this
+    project's directory**. Doctor is operator-facing and lives
+    outside the gated agent session by design — it's read-only
+    and never modifies the policy.
   - After the restart, the model sees the `denyx-mcp` tools but
     NOT the host's built-in `Bash`/`Read`/`Write`/`Edit`/`Glob`/
     `Grep`/`WebFetch`/`WebSearch` tools — those were disabled in
