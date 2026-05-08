@@ -592,6 +592,29 @@ fn run_doctor_scan(scan_endpoints: &str) -> std::process::Output {
         .expect("spawn denyx-local-mcp doctor (scan mode)")
 }
 
+/// Bind a TCP listener on a random port and spawn a background
+/// thread that accepts incoming connections and immediately drops
+/// them. From the client's POV: TCP handshake succeeds, then the
+/// server closes — any HTTP read returns EOF / connection reset,
+/// which the doctor's fingerprint treats as unreachable.
+///
+/// This is deterministic on CI (no port-reuse races, no DNS
+/// shenanigans, no flaky timeouts). The listener stays bound for
+/// the lifetime of the spawned thread, which the test process owns
+/// until exit. Returns the URL pointing at it.
+fn spawn_dead_endpoint() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind dead endpoint");
+    let addr = listener.local_addr().expect("local_addr");
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            // Accept then immediately drop: client sees connection
+            // reset on the first read.
+            drop(stream);
+        }
+    });
+    format!("http://{addr}")
+}
+
 #[test]
 fn doctor_passes_when_models_present_and_num_ctx_ok() {
     let mock = MockOllama::new(vec![]);
@@ -657,14 +680,14 @@ fn doctor_scan_mode_finds_running_server_and_emits_serve_command() {
 
 #[test]
 fn doctor_scan_mode_with_no_servers_running_prints_install_hints() {
-    // Bind+drop two ports so we have known-unreachable URLs.
-    let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let a1 = l1.local_addr().unwrap();
-    drop(l1);
-    let l2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let a2 = l2.local_addr().unwrap();
-    drop(l2);
-    let scan = format!("http://{a1}/v1,http://{a2}/v1");
+    // Two endpoints with TCP listeners that accept-and-drop. From
+    // the doctor's POV they're unreachable (HTTP read fails
+    // immediately). Holding the listeners for the lifetime of the
+    // test prevents the port-reuse race that bind+drop would have
+    // on parallel-test CI runs.
+    let bogus_a = spawn_dead_endpoint();
+    let bogus_b = spawn_dead_endpoint();
+    let scan = format!("{bogus_a}/v1,{bogus_b}/v1");
     let out = run_doctor_scan(&scan);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
@@ -681,14 +704,12 @@ fn doctor_scan_mode_with_no_servers_running_prints_install_hints() {
 
 #[test]
 fn doctor_fails_when_endpoint_unreachable() {
-    // Bind a port and immediately close it to get a definitively
-    // unreachable address. Use 127.0.0.1:1 (port 1 is reserved and
-    // typically rejected). 0 picks a free port; we then drop the
-    // listener so connecting fails.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    let bogus = format!("http://{addr}");
+    // Spawn a TCP listener that accepts and immediately closes
+    // every connection. From the doctor's POV: HTTP reads fail,
+    // the endpoint is "unreachable" — but we hold the listener for
+    // the duration of the test to avoid the port-reuse race that
+    // bind+drop would create on parallel-test CI runs.
+    let bogus = spawn_dead_endpoint();
     let out = run_doctor(&bogus, "qwen2.5-coder:7b", "nomic-embed-text");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
