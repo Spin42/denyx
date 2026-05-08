@@ -389,6 +389,213 @@ fn audit_url_alone_keeps_local_policy() {
 }
 
 #[test]
+fn cursor_writes_dotcursor_mcp_json() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "cursor",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(
+        out.status.success(),
+        "exit={:?} stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mcp = read_json(&tmp.join(".cursor").join("mcp.json"));
+    assert_eq!(mcp["mcpServers"]["denyx"]["command"], "denyx-mcp");
+    assert!(mcp["mcpServers"]["denyx"]["args"].is_array());
+    // Cursor doesn't get a Claude or opencode file.
+    assert!(!tmp.join(".mcp.json").exists());
+    assert!(!tmp.join("opencode.json").exists());
+}
+
+#[test]
+fn copilot_writes_vscode_settings_with_chat_mcp_servers() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "copilot",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(out.status.success());
+    let s = read_json(&tmp.join(".vscode").join("settings.json"));
+    let entry = &s["chat.mcp.servers"]["denyx"];
+    assert_eq!(entry["command"], "denyx-mcp");
+    assert!(entry["args"].is_array());
+}
+
+#[test]
+fn continue_writes_dotcontinue_config_with_mcp_servers_array() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "continue",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(out.status.success());
+    let c = read_json(&tmp.join(".continue").join("config.json"));
+    let arr = c["mcpServers"].as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "denyx");
+    assert_eq!(arr[0]["command"], "denyx-mcp");
+}
+
+#[test]
+fn cline_prints_pasteable_snippet_to_stderr_and_writes_no_files() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "cline",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Cline"),
+        "expected Cline instructions on stderr; got: {stderr}"
+    );
+    assert!(stderr.contains("denyx-mcp"));
+    // No file written for Cline.
+    assert!(!tmp.join(".cursor").exists());
+    assert!(!tmp.join(".vscode").exists());
+    assert!(!tmp.join(".continue").exists());
+    assert!(!tmp.join(".mcp.json").exists());
+}
+
+#[test]
+fn comma_separated_host_list_writes_multiple() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "claude,cursor,copilot",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(
+        out.status.success(),
+        "exit={:?} stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(tmp.join(".mcp.json").exists(), "claude file");
+    assert!(tmp.join(".cursor").join("mcp.json").exists(), "cursor file");
+    assert!(
+        tmp.join(".vscode").join("settings.json").exists(),
+        "copilot file"
+    );
+}
+
+#[test]
+fn auto_detection_falls_back_to_claude_and_opencode_when_no_signals() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = std::process::Command::new(BIN)
+        .args([
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "auto",
+            "--sandbox",
+            "off",
+        ])
+        .current_dir(&tmp)
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .env_remove("OPENCODE")
+        .env_remove("OPENCODE_BIN")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("CURSOR_TRACE_ID")
+        .output()
+        .expect("spawn denyx");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("found no signals"),
+        "expected fallback message on stderr: {stderr}"
+    );
+    assert!(tmp.join(".mcp.json").exists());
+    assert!(tmp.join("opencode.json").exists());
+}
+
+#[test]
+fn auto_detection_picks_up_term_program_cursor() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = std::process::Command::new(BIN)
+        .args([
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "auto",
+            "--sandbox",
+            "off",
+        ])
+        .current_dir(&tmp)
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .env_remove("OPENCODE")
+        .env("TERM_PROGRAM", "cursor")
+        .output()
+        .expect("spawn denyx");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cursor"),
+        "expected cursor in detected list: {stderr}"
+    );
+    assert!(tmp.join(".cursor").join("mcp.json").exists());
+}
+
+#[test]
 fn no_mcp_writes_lockdown_only() {
     let tmp = tempdir();
     let policy = write_minimal_policy(&tmp);

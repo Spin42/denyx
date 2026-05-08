@@ -25,12 +25,38 @@ use serde_json::{json, Map, Value};
 
 use denyx_policy::Policy;
 
-/// Which host's configs to emit.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Which host's configs to emit. Multiple hosts can be selected; the
+/// CLI accepts a comma-separated list (e.g. `--host claude,cursor`).
+///
+/// Lockdown maturity varies. Claude Code and opencode are the
+/// well-tested integrations (host-specific config + built-in tool
+/// deny list + OS sandbox where applicable). The VSCode-side hosts
+/// (Cursor, Copilot, Continue, Cline) are wired via the same MCP
+/// pattern but their lockdown surfaces differ — see
+/// `docs/14-other-hosts.md` for what each host covers and where the
+/// gate is incomplete.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Host {
+    /// Anthropic Claude Code. Writes `.mcp.json` + `.claude/settings.json`.
+    /// Full lockdown: built-in deny list + OS sandbox.
     Claude,
+    /// opencode. Writes `opencode.json`. Lockdown via `tools` block +
+    /// `permission` deny wildcard.
     Opencode,
-    Both,
+    /// Cursor (VSCode fork). Writes `.cursor/mcp.json`. **MCP entry only**;
+    /// built-in tool lockdown is via Cursor's UI tool toggles, not file-based.
+    Cursor,
+    /// VSCode + GitHub Copilot agent mode. Writes `.vscode/settings.json`.
+    /// **MCP entry only**; Copilot's tool approval is per-call at runtime,
+    /// no project-local deny list.
+    Copilot,
+    /// VSCode + Continue extension. Writes `.continue/config.json`.
+    /// MCP entry + built-in tool block (similar to opencode).
+    Continue,
+    /// VSCode + Cline / Roo Code. Cline's MCP config lives in extension
+    /// storage, not a project-local file — host-config emits the wiring
+    /// snippet to stderr so the operator can paste it in via Cline's UI.
+    Cline,
 }
 
 /// How `denyx-mcp` is launched. Affects the `command`/`args` shape
@@ -84,7 +110,6 @@ pub enum Sandbox {
 /// snapshot to seed itself with.
 #[derive(Debug, Clone)]
 pub struct Opts {
-    pub host: Host,
     pub platform: Platform,
     pub denyx_mcp_binary: String,
     pub policy_path: PathBuf,
@@ -311,6 +336,157 @@ pub fn opencode_config(_policy: &Policy, opts: &Opts) -> Value {
             }
         }
     })
+}
+
+// ──────────────────────── VSCode-side hosts ────────────────────────
+//
+// Each host below has its own config-file path and JSON shape. None
+// of them have an OS-level sandbox (those are Claude-specific). The
+// built-in-tool lockdown coverage varies — see `docs/14-other-hosts.md`.
+//
+// Status disclaimer: these integrations are wired via the same MCP
+// pattern as Claude/opencode but have not been exercised by the eval
+// harness. Treat as "should work; please report when you confirm."
+
+/// Cursor (VSCode fork). MCP config format is identical to Claude
+/// Code's `.mcp.json` — Cursor reuses the same `{"mcpServers": ...}`
+/// shape. Returns the JSON body for `<dir>/.cursor/mcp.json`.
+pub fn cursor_mcp(opts: &Opts) -> Value {
+    claude_mcp(opts)
+}
+
+/// Merge an existing Cursor `.cursor/mcp.json`. Same shape as Claude.
+pub fn merge_cursor_mcp(existing: Value, generated: Value) -> Value {
+    merge_claude_mcp(existing, generated)
+}
+
+/// VSCode + GitHub Copilot agent mode. The MCP server entry lives
+/// under `chat.mcp.servers` in the workspace `.vscode/settings.json`.
+/// (Copilot has used several keys for this since launch; this is the
+/// stable shape as of early 2026 — the doc flags the risk.)
+///
+/// Copilot does not have a project-local deny list for built-in tools
+/// in the way Claude or opencode do; tool approval is per-call at
+/// runtime via UI prompts. So this function emits *only* the MCP entry.
+pub fn copilot_workspace_settings(opts: &Opts) -> Value {
+    let (cmd, args) = build_command_and_args(opts);
+    json!({
+        "chat.mcp.servers": {
+            "denyx": {
+                "command": cmd,
+                "args": args,
+            }
+        }
+    })
+}
+
+/// Merge a workspace `.vscode/settings.json`. Preserves all unrelated
+/// keys; replaces the `chat.mcp.servers.denyx` entry only.
+pub fn merge_copilot_workspace(existing: Value, generated: Value) -> Value {
+    let mut out = if existing.is_object() {
+        existing
+    } else {
+        json!({})
+    };
+    let denyx_entry = generated
+        .pointer("/chat.mcp.servers/denyx")
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let obj = out.as_object_mut().expect("normalized");
+    let servers = obj
+        .entry("chat.mcp.servers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    if let Some(servers) = servers {
+        servers.insert("denyx".to_string(), denyx_entry);
+    }
+    out
+}
+
+/// Continue (VSCode extension). Workspace config at
+/// `<dir>/.continue/config.json`. Has both an `mcpServers` block and
+/// a `tools` array — we emit the MCP entry plus a tool-disable block
+/// for any built-in capability that overlaps Denyx's gate.
+///
+/// Continue's `tools` array uses string entries naming built-in
+/// tools to enable; if the tool isn't listed, it isn't available to
+/// the model. So "lockdown" is achieved by *omitting* the names
+/// rather than emitting a deny list. We provide a minimal empty
+/// `tools: []` to make the omission explicit; operators can extend
+/// it for any non-effecting tool they want to keep.
+pub fn continue_config(_policy: &Policy, opts: &Opts) -> Value {
+    let (cmd, args) = build_command_and_args(opts);
+    let mut command_array: Vec<String> = vec![cmd];
+    command_array.extend(args);
+
+    json!({
+        "mcpServers": [
+            {
+                "name": "denyx",
+                "command": command_array[0].clone(),
+                "args": command_array[1..].to_vec(),
+            }
+        ],
+        "tools": []
+    })
+}
+
+/// Merge an existing Continue `.continue/config.json`. Preserves all
+/// unrelated keys; replaces or inserts the `denyx` MCP entry in the
+/// `mcpServers` array. Leaves `tools` alone if it exists (the operator
+/// has presumably curated it).
+pub fn merge_continue_config(existing: Value, generated: Value) -> Value {
+    let mut out = if existing.is_object() {
+        existing
+    } else {
+        json!({})
+    };
+    let denyx_entry = generated
+        .pointer("/mcpServers/0")
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let obj = out.as_object_mut().expect("normalized");
+    // mcpServers: array. Insert/replace the entry whose name=="denyx".
+    let servers = obj.entry("mcpServers").or_insert_with(|| json!([]));
+    if let Some(arr) = servers.as_array_mut() {
+        arr.retain(|v| v.get("name").and_then(|n| n.as_str()) != Some("denyx"));
+        arr.push(denyx_entry);
+    }
+    if !obj.contains_key("tools") {
+        obj.insert("tools".to_string(), json!([]));
+    }
+    out
+}
+
+/// Cline (and forks like Roo Code). Cline's MCP config lives in
+/// extension storage — not a project-local file we can write to from
+/// the CWD. So instead of writing a file, return the wiring snippet
+/// the operator should paste into Cline's "MCP Servers" UI.
+pub fn cline_instructions(opts: &Opts) -> String {
+    let (cmd, args) = build_command_and_args(opts);
+    let snippet = json!({
+        "mcpServers": {
+            "denyx": {
+                "command": cmd,
+                "args": args,
+                "disabled": false
+            }
+        }
+    });
+    let pretty = serde_json::to_string_pretty(&snippet).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "Cline / Roo Code stores its MCP config in extension storage,\n\
+         not in a project-local file. Open Cline in VSCode → click the\n\
+         MCP Servers icon → 'Edit Global MCP' (or 'Edit Project MCP'\n\
+         if your version supports it) → paste the following entry:\n\n\
+         {pretty}\n\n\
+         Cline approves every tool call by default; the model will\n\
+         prompt before each denyx_* call. There is no project-local\n\
+         deny list for Cline's built-in tools — disable them via the\n\
+         extension's settings UI if you want strict lockdown."
+    )
 }
 
 // ─────────────────────────── merge logic ───────────────────────────
@@ -574,7 +750,6 @@ mod tests {
 
     fn opts_native() -> Opts {
         Opts {
-            host: Host::Both,
             platform: Platform::Native,
             denyx_mcp_binary: "denyx-mcp".to_string(),
             policy_path: PathBuf::from("./denyx.toml"),
@@ -958,6 +1133,77 @@ write_allow = ["src/**", "/tmp/**", "~/.cache/myproj/**"]
         let merged = merge_opencode(existing, generated);
         assert_eq!(merged["tools"]["bash"], json!(false));
         assert_eq!(merged["tools"]["myCustom"], json!("keep-me"));
+    }
+
+    #[test]
+    fn cursor_mcp_uses_same_shape_as_claude() {
+        let cursor = cursor_mcp(&opts_native());
+        let claude = claude_mcp(&opts_native());
+        assert_eq!(cursor, claude, "cursor reuses the .mcp.json shape");
+    }
+
+    #[test]
+    fn copilot_workspace_settings_carries_chat_mcp_servers_key() {
+        let v = copilot_workspace_settings(&opts_native());
+        let entry = v
+            .pointer("/chat.mcp.servers/denyx")
+            .expect("chat.mcp.servers.denyx");
+        assert_eq!(entry["command"], json!("denyx-mcp"));
+        assert!(entry["args"].is_array());
+    }
+
+    #[test]
+    fn merge_copilot_workspace_preserves_unrelated_keys() {
+        let existing = json!({
+            "editor.fontSize": 14,
+            "files.autoSave": "afterDelay",
+            "chat.mcp.servers": {
+                "github": { "command": "github-mcp", "args": [] }
+            }
+        });
+        let generated = copilot_workspace_settings(&opts_native());
+        let merged = merge_copilot_workspace(existing, generated);
+        assert_eq!(merged["editor.fontSize"], json!(14));
+        assert_eq!(merged["files.autoSave"], json!("afterDelay"));
+        assert!(merged["chat.mcp.servers"]["github"].is_object());
+        assert!(merged["chat.mcp.servers"]["denyx"].is_object());
+    }
+
+    #[test]
+    fn continue_config_emits_mcp_servers_array() {
+        let v = continue_config(&empty_policy(), &opts_native());
+        let arr = v["mcpServers"].as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], json!("denyx"));
+        assert_eq!(arr[0]["command"], json!("denyx-mcp"));
+        assert!(arr[0]["args"].is_array());
+    }
+
+    #[test]
+    fn merge_continue_config_replaces_existing_denyx_entry() {
+        let existing = json!({
+            "mcpServers": [
+                { "name": "github", "command": "github-mcp", "args": [] },
+                { "name": "denyx", "command": "stale", "args": [] }
+            ],
+            "tools": ["readFile"]
+        });
+        let generated = continue_config(&empty_policy(), &opts_native());
+        let merged = merge_continue_config(existing, generated);
+        let arr = merged["mcpServers"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "github stays, denyx replaced");
+        let denyx = arr.iter().find(|v| v["name"] == "denyx").unwrap();
+        assert_eq!(denyx["command"], json!("denyx-mcp"));
+        // tools array left as-is (operator-curated).
+        assert_eq!(merged["tools"], json!(["readFile"]));
+    }
+
+    #[test]
+    fn cline_instructions_contains_pasteable_json_snippet() {
+        let s = cline_instructions(&opts_native());
+        assert!(s.contains("\"denyx\""));
+        assert!(s.contains("\"denyx-mcp\""));
+        assert!(s.contains("Cline"));
     }
 
     #[test]

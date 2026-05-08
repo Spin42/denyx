@@ -146,9 +146,14 @@ struct HostConfigArgs {
     #[arg(long)]
     policy: PathBuf,
 
-    /// Which host's configs to write.
-    #[arg(long, default_value = "both")]
-    host: HostArg,
+    /// Which host(s) to wire. Comma-separated list. Recognised values:
+    /// `claude` (Claude Code), `opencode`, `cursor`, `copilot`
+    /// (VSCode + GitHub Copilot agent mode), `continue`, `cline`.
+    /// Convenience aliases: `both` = `claude,opencode` (legacy);
+    /// `all` = every supported host; `auto` = detect from environment
+    /// variables and cwd files.
+    #[arg(long, default_value = "auto")]
+    host: HostList,
 
     /// Where to write the configs (project root). Defaults to cwd.
     #[arg(long, default_value = ".")]
@@ -235,34 +240,76 @@ struct HostConfigArgs {
     no_mcp: bool,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum HostArg {
-    Claude,
-    Opencode,
-    Both,
+/// One or more hosts to wire. Wraps a `Vec<Host>` so clap can parse
+/// the comma-separated CLI form into the dispatch list. `auto` means
+/// "detect from env vars and cwd files at run time"; we represent
+/// it by storing an empty `hosts` and a `was_auto` flag so the dispatch
+/// can re-resolve it.
+#[derive(Clone, Debug)]
+struct HostList {
+    hosts: Vec<Host>,
+    was_auto: bool,
 }
 
-impl FromStr for HostArg {
+impl FromStr for HostList {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "claude" | "claude-code" | "claudecode" => Ok(Self::Claude),
-            "opencode" => Ok(Self::Opencode),
-            "both" => Ok(Self::Both),
-            other => Err(format!(
-                "unknown host {other:?}; expected one of: claude, opencode, both"
-            )),
+        let lc = s.to_ascii_lowercase();
+        let lc = lc.trim();
+        if lc == "auto" {
+            return Ok(HostList {
+                hosts: Vec::new(),
+                was_auto: true,
+            });
         }
-    }
-}
-
-impl HostArg {
-    fn as_host(self) -> Host {
-        match self {
-            Self::Claude => Host::Claude,
-            Self::Opencode => Host::Opencode,
-            Self::Both => Host::Both,
+        if lc == "all" {
+            return Ok(HostList {
+                hosts: vec![
+                    Host::Claude,
+                    Host::Opencode,
+                    Host::Cursor,
+                    Host::Copilot,
+                    Host::Continue,
+                    Host::Cline,
+                ],
+                was_auto: false,
+            });
         }
+        let mut out: std::collections::BTreeSet<Host> = std::collections::BTreeSet::new();
+        for raw in lc.split(',') {
+            let part = raw.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let host = match part {
+                "claude" | "claude-code" | "claudecode" => Host::Claude,
+                "opencode" => Host::Opencode,
+                "cursor" => Host::Cursor,
+                "copilot" | "github-copilot" | "vscode-copilot" => Host::Copilot,
+                "continue" | "continue-dev" => Host::Continue,
+                "cline" | "roo" | "roo-code" => Host::Cline,
+                "both" => {
+                    out.insert(Host::Claude);
+                    out.insert(Host::Opencode);
+                    continue;
+                }
+                other => {
+                    return Err(format!(
+                        "unknown host {other:?}; expected one or more of: \
+                         claude, opencode, cursor, copilot, continue, cline \
+                         (or aliases: both, all, auto)"
+                    ));
+                }
+            };
+            out.insert(host);
+        }
+        if out.is_empty() {
+            return Err("--host got an empty list; pass at least one value".into());
+        }
+        Ok(HostList {
+            hosts: out.into_iter().collect(),
+            was_auto: false,
+        })
     }
 }
 
@@ -431,7 +478,6 @@ fn host_config_cmd(args: HostConfigArgs) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("load policy {:?}: {e}", args.policy)))?;
 
     let opts = Opts {
-        host: args.host.as_host(),
         platform: args.platform.as_platform(),
         denyx_mcp_binary: args.denyx_mcp_binary,
         policy_path: args.policy.clone(),
@@ -465,26 +511,132 @@ fn host_config_cmd(args: HostConfigArgs) -> Result<(), CliError> {
         );
     }
 
+    // Resolve `--host auto` to the actually-detected list. Done lazily
+    // so the standard `--host claude,opencode` path doesn't pay for it.
+    let hosts: Vec<Host> = if args.host.was_auto {
+        let detected = detect_hosts(&args.output_dir);
+        if detected.is_empty() {
+            eprintln!(
+                "denyx host-config: --host=auto found no signals; \
+                 defaulting to claude,opencode. Pass --host explicitly \
+                 to override."
+            );
+            vec![Host::Claude, Host::Opencode]
+        } else {
+            eprintln!(
+                "denyx host-config: detected host(s): {}",
+                detected
+                    .iter()
+                    .map(host_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            detected
+        }
+    } else {
+        args.host.hosts.clone()
+    };
+
     if args.dry_run {
-        emit_dry_run(&policy, &opts, existing_mode, args.no_mcp);
+        emit_dry_run(&policy, &opts, existing_mode, args.no_mcp, &hosts);
         return Ok(());
     }
 
     write_audit_dir(&args.output_dir)?;
 
-    match opts.host {
-        Host::Claude => write_claude(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?,
-        Host::Opencode => {
-            write_opencode(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?
-        }
-        Host::Both => {
-            write_claude(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?;
-            write_opencode(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?;
+    for host in &hosts {
+        match host {
+            Host::Claude => {
+                write_claude(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?
+            }
+            Host::Opencode => {
+                write_opencode(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?
+            }
+            Host::Cursor => write_cursor(&args.output_dir, &opts, existing_mode, args.no_mcp)?,
+            Host::Copilot => write_copilot(&args.output_dir, &opts, existing_mode, args.no_mcp)?,
+            Host::Continue => {
+                write_continue(&args.output_dir, &policy, &opts, existing_mode, args.no_mcp)?
+            }
+            Host::Cline => {
+                if args.no_mcp {
+                    eprintln!(
+                        "denyx host-config: --no-mcp + --host cline: \
+                         nothing to write (Cline has no project-local \
+                         lockdown layer Denyx can target)."
+                    );
+                } else {
+                    eprintln!("\n{}", host_config::cline_instructions(&opts));
+                }
+            }
         }
     }
 
     eprintln!("denyx host-config: done.");
     Ok(())
+}
+
+/// Auto-detect which hosts are likely active. Order: env-var signals
+/// (most reliable when this CLI is invoked from inside an agent's
+/// shell), then cwd file signals (useful when run from a plain
+/// terminal in a project that already has host configs).
+fn detect_hosts(cwd: &Path) -> Vec<Host> {
+    let mut detected: std::collections::BTreeSet<Host> = std::collections::BTreeSet::new();
+
+    // Env-var signals.
+    if std::env::var_os("CLAUDECODE").is_some()
+        || std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some()
+    {
+        detected.insert(Host::Claude);
+    }
+    if std::env::var_os("OPENCODE").is_some() || std::env::var_os("OPENCODE_BIN").is_some() {
+        detected.insert(Host::Opencode);
+    }
+    if let Ok(term) = std::env::var("TERM_PROGRAM") {
+        match term.as_str() {
+            "cursor" | "Cursor" => {
+                detected.insert(Host::Cursor);
+            }
+            "vscode" | "VSCode" => {
+                // Plain VSCode terminal — we can't tell which AI extension
+                // is active, but Copilot agent mode is the most common.
+                detected.insert(Host::Copilot);
+            }
+            _ => {}
+        }
+    }
+    if std::env::var_os("CURSOR_TRACE_ID").is_some() {
+        detected.insert(Host::Cursor);
+    }
+
+    // File signals from cwd (cumulative — a project may have multiple).
+    if cwd.join(".mcp.json").exists() || cwd.join(".claude").join("settings.json").exists() {
+        detected.insert(Host::Claude);
+    }
+    if cwd.join("opencode.json").exists() {
+        detected.insert(Host::Opencode);
+    }
+    if cwd.join(".cursor").join("mcp.json").exists() {
+        detected.insert(Host::Cursor);
+    }
+    if cwd.join(".vscode").join("settings.json").exists() {
+        detected.insert(Host::Copilot);
+    }
+    if cwd.join(".continue").join("config.json").exists() {
+        detected.insert(Host::Continue);
+    }
+
+    detected.into_iter().collect()
+}
+
+fn host_label(h: &Host) -> &'static str {
+    match h {
+        Host::Claude => "claude",
+        Host::Opencode => "opencode",
+        Host::Cursor => "cursor",
+        Host::Copilot => "copilot",
+        Host::Continue => "continue",
+        Host::Cline => "cline",
+    }
 }
 
 fn write_audit_dir(dir: &Path) -> Result<(), CliError> {
@@ -555,6 +707,84 @@ fn write_opencode(
     Ok(())
 }
 
+fn write_cursor(dir: &Path, opts: &Opts, existing: Existing, no_mcp: bool) -> Result<(), CliError> {
+    if no_mcp {
+        // Cursor's only Denyx-relevant file is the MCP entry; with
+        // --no-mcp there's nothing to do.
+        eprintln!("  - skipping cursor (--no-mcp; nothing else to write)");
+        return Ok(());
+    }
+    let path = dir.join(".cursor").join("mcp.json");
+    let value = host_config::cursor_mcp(opts);
+    let final_value = match (existing, read_json_if_exists(&path)?) {
+        (Existing::Replace, _) | (_, None) => value,
+        (Existing::Merge, Some(existing_val)) => host_config::merge_cursor_mcp(existing_val, value),
+    };
+    write_json(&path, &final_value)?;
+    eprintln!("  + wrote {} (Cursor)", path.display());
+    eprintln!(
+        "    Cursor's built-in tool toggles are UI-only; lockdown of \
+         Edit / Read / Bash equivalents is not project-local."
+    );
+    Ok(())
+}
+
+fn write_copilot(
+    dir: &Path,
+    opts: &Opts,
+    existing: Existing,
+    no_mcp: bool,
+) -> Result<(), CliError> {
+    if no_mcp {
+        eprintln!("  - skipping copilot (--no-mcp; nothing else to write)");
+        return Ok(());
+    }
+    let path = dir.join(".vscode").join("settings.json");
+    let value = host_config::copilot_workspace_settings(opts);
+    let final_value = match (existing, read_json_if_exists(&path)?) {
+        (Existing::Replace, _) | (_, None) => value,
+        (Existing::Merge, Some(existing_val)) => {
+            host_config::merge_copilot_workspace(existing_val, value)
+        }
+    };
+    write_json(&path, &final_value)?;
+    eprintln!(
+        "  + wrote {} (VSCode + GitHub Copilot agent mode)",
+        path.display()
+    );
+    eprintln!(
+        "    Copilot has no project-local deny list; tool approval \
+         happens per-call at runtime. The Denyx gate still applies to \
+         every MCP-routed call."
+    );
+    Ok(())
+}
+
+fn write_continue(
+    dir: &Path,
+    policy: &Policy,
+    opts: &Opts,
+    existing: Existing,
+    no_mcp: bool,
+) -> Result<(), CliError> {
+    let path = dir.join(".continue").join("config.json");
+    let mut value = host_config::continue_config(policy, opts);
+    if no_mcp {
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("mcpServers");
+        }
+    }
+    let final_value = match (existing, read_json_if_exists(&path)?) {
+        (Existing::Replace, _) | (_, None) => value,
+        (Existing::Merge, Some(existing_val)) => {
+            host_config::merge_continue_config(existing_val, value)
+        }
+    };
+    write_json(&path, &final_value)?;
+    eprintln!("  + wrote {} (Continue)", path.display());
+    Ok(())
+}
+
 fn read_json_if_exists(path: &Path) -> Result<Option<serde_json::Value>, CliError> {
     if !path.exists() {
         return Ok(None);
@@ -579,30 +809,71 @@ fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), CliError> {
     Ok(())
 }
 
-fn emit_dry_run(policy: &Policy, opts: &Opts, _existing: Existing, no_mcp: bool) {
-    if matches!(opts.host, Host::Claude | Host::Both) {
-        if !no_mcp {
-            println!("// .mcp.json");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&claude_mcp(opts)).expect("serialize")
-            );
-        }
-        println!("// .claude/settings.json");
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&claude_settings(policy, opts)).expect("serialize")
-        );
-    }
-    if matches!(opts.host, Host::Opencode | Host::Both) {
-        let mut oc = opencode_config(policy, opts);
-        if no_mcp {
-            if let Some(obj) = oc.as_object_mut() {
-                obj.remove("mcp");
+fn emit_dry_run(policy: &Policy, opts: &Opts, _existing: Existing, no_mcp: bool, hosts: &[Host]) {
+    for host in hosts {
+        match host {
+            Host::Claude => {
+                if !no_mcp {
+                    println!("// .mcp.json");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&claude_mcp(opts)).expect("serialize")
+                    );
+                }
+                println!("// .claude/settings.json");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&claude_settings(policy, opts))
+                        .expect("serialize")
+                );
+            }
+            Host::Opencode => {
+                let mut oc = opencode_config(policy, opts);
+                if no_mcp {
+                    if let Some(obj) = oc.as_object_mut() {
+                        obj.remove("mcp");
+                    }
+                }
+                println!("// opencode.json");
+                println!("{}", serde_json::to_string_pretty(&oc).expect("serialize"));
+            }
+            Host::Cursor => {
+                if !no_mcp {
+                    println!("// .cursor/mcp.json");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&host_config::cursor_mcp(opts))
+                            .expect("serialize")
+                    );
+                }
+            }
+            Host::Copilot => {
+                if !no_mcp {
+                    println!("// .vscode/settings.json");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&host_config::copilot_workspace_settings(
+                            opts
+                        ))
+                        .expect("serialize")
+                    );
+                }
+            }
+            Host::Continue => {
+                let mut c = host_config::continue_config(policy, opts);
+                if no_mcp {
+                    if let Some(obj) = c.as_object_mut() {
+                        obj.remove("mcpServers");
+                    }
+                }
+                println!("// .continue/config.json");
+                println!("{}", serde_json::to_string_pretty(&c).expect("serialize"));
+            }
+            Host::Cline => {
+                println!("// Cline (paste into the extension UI):");
+                println!("{}", host_config::cline_instructions(opts));
             }
         }
-        println!("// opencode.json");
-        println!("{}", serde_json::to_string_pretty(&oc).expect("serialize"));
     }
 }
 
