@@ -1,6 +1,8 @@
 # Denyx
 
-**Lock down what your AI coding agent can read, write, fetch, and run on your machine — with one TOML file.**
+**Lock down what your AI coding agent can read, write, fetch, and run on your machine — with one TOML policy.**
+
+Bring your own policy. Plug into any MCP-aware coding host — [Claude Code](https://github.com/anthropics/claude-code), [opencode](https://opencode.ai), GitHub Copilot's agent mode, Cursor, [Continue](https://continue.dev), [Cline](https://cline.bot), and others — or run standalone. Adds what the hosts' built-in permissions can't: secret-aware redaction (values flagged `local_only` never bubble up to the chat), tamper-evident audit (SHA-256-chained, verifiable after the fact), and centralised team deployment (one policy and one audit endpoint across N developers).
 
 [![CI](https://github.com/Spin42/denyx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/ci.yml)
 [![Mutation testing (weekly)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml/badge.svg?branch=main)](https://github.com/Spin42/denyx/actions/workflows/mutants.yml)
@@ -32,6 +34,43 @@ The block is not a prompt-level "please don't do that" — it's a Rust-enforced
 denial at the capability gate. The model can't argue its way past it, and a
 prompt-injected instruction in fetched content can't either.
 
+## Why Denyx, if Claude Code and opencode already have permissions?
+
+Both hosts ship deny lists. They're real and useful — Denyx wires into them
+rather than replacing them (the setup prompt configures both). Where Denyx
+adds something the host's permissions can't:
+
+- **Capability-typed policy with three visibility levels.** *Forbidden* /
+  *local-only* / *public*. `local_only_*` lets the agent **use** an API key
+  or vendor response without that value bubbling up to the chat transcript.
+  The host model is binary allow/deny; this is a structurally different
+  kind of policy.
+- **Output-boundary redaction (IFC).** Once a value is `local_only`, Denyx
+  scrubs it from stdout, audit logs, and MCP tool results — including
+  encoded forms (hex, base64, XOR, ROT-N, subsequence-chunking). A deny
+  list cannot do this; the leak path is a `print()` inside an *allowed*
+  tool call.
+- **One TOML, every host.** `denyx host-config` translates a single
+  `denyx.toml` into Claude Code's `settings.json` shape *and* opencode's
+  `permission` block — the same source of truth for both, and any other
+  MCP-aware host you choose to wire in.
+- **Centralised policy + tamper-evident audit.** Optional team mode fetches
+  the active policy from a URL at startup and POSTs every capability call
+  to an audit endpoint. Audit lines are SHA-256-chained, so a tampered or
+  missing event is detectable with `denyx audit verify`. Neither host has
+  this; their settings are per-machine.
+- **Standalone + local-executor patterns.** Use Denyx as a CLI gate in CI
+  with no host at all, or run a small local model under the gate while a
+  cloud model orchestrates — the eval at
+  [docs/12-local-executor.md](docs/12-local-executor.md) measures both
+  shapes against a 31-task suite.
+
+If your threat model is "block specific bad commands," the hosts'
+permissions are enough. If it's *"let the agent use credentials and vendor
+responses without those values leaking back through the chat / logs / a
+prompt-injected exfil request"* — that's the slice Denyx covers, and a
+deny list architecturally can't.
+
 ## 60-second quickstart
 
 **1. Install `denyx` and `denyx-mcp` on your `$PATH`:**
@@ -40,12 +79,13 @@ prompt-injected instruction in fetched content can't either.
 cargo install denyx-cli denyx-mcp
 ```
 
-Both binaries land in `~/.cargo/bin/`, which is normally already on
-your `$PATH`. This works natively on Linux, macOS, and Windows for the
-language-level gate. If you want kernel-level subprocess sandboxing
-too (`bwrap`, Linux-only), see [Prerequisites](#prerequisites) for the
-Lima / WSL2 guides — Denyx then installs *inside* the VM rather than
-on the host.
+Both binaries land in `~/.cargo/bin/`, which is normally already on your
+`$PATH`. This works natively on Linux, macOS, and Windows for the policy
+gate, taint redaction, audit log, and host wiring. If you want the
+optional Linux-only `bwrap` subprocess sandbox or to run Claude Code v2's
+OS sandbox (also Linux/WSL2-side), install Denyx *inside* a Lima VM
+(macOS) or WSL2 distro (Windows) — see [Prerequisites](#prerequisites)
+and the deployment guides.
 
 > **Building from source instead?** Use this if you need an unreleased
 > feature or are contributing:
@@ -84,29 +124,43 @@ JSON Lines record you can later verify with `denyx audit verify`.
 
 ## Prerequisites
 
-The only universally-required dependency is a **Rust toolchain 1.74+** —
-needed for `cargo install denyx-cli denyx-mcp` (the recommended path)
-and for building from source if you'd rather.
+**Required:** a **Rust toolchain 1.74+** for `cargo install denyx-cli denyx-mcp`
+(or to build from source).
 
-Kernel-level subprocess sandboxing (`[subprocess].sandbox = "bwrap"`) is
-**opt-in and Linux-only** — `bubblewrap` relies on Linux user namespaces,
-which don't exist on macOS or native Windows. On those platforms you have
-two choices: run Denyx natively for the language-level gate only, or run
-it inside a Linux VM (Lima on macOS, WSL2 on Windows) to also get bwrap.
-Without bwrap, Denyx still enforces the full policy (filesystem / network /
-env / subprocess allowlist + taint redaction + audit log) — the script
-simply runs in the host's process namespace instead of a kernel-level jail.
+**One way to use Denyx — pick one or more:**
 
-| Platform | Required | For kernel-level sandbox (optional) |
-|---|---|---|
-| **Linux** | Rust toolchain | `apt install bubblewrap` (or your distro's equivalent), then add `sandbox = "bwrap"` under `[subprocess]` in your policy. |
-| **macOS** | Rust toolchain — native build works for the language-level gate (untested in CI, but no platform-specific code paths). For the project's tested deployment shape, install [Lima](https://lima-vm.io/) (`brew install lima`) and follow [docs/macos-deployment.md](docs/macos-deployment.md). | `bubblewrap` inside a Lima VM. The macOS deployment guide sets up both. |
-| **Windows** | Rust toolchain — native build works for the language-level gate (untested in CI). For the project's tested deployment shape, install WSL2 (`wsl --install -d Ubuntu-24.04`) and follow [docs/windows-deployment.md](docs/windows-deployment.md). | `bubblewrap` inside the WSL2 distro. The Windows deployment guide sets up both. |
+- [**Claude Code**](https://github.com/anthropics/claude-code) — Denyx wires
+  in as an MCP server and locks down the built-in tools. See
+  [docs/09-claude-code.md](docs/09-claude-code.md).
+- [**opencode**](https://opencode.ai) — same shape; one `denyx.toml`, both
+  hosts. See [docs/10-opencode.md](docs/10-opencode.md).
+- **Other MCP-aware coding hosts** — GitHub Copilot's agent mode, Cursor,
+  [Continue](https://continue.dev), [Cline](https://cline.bot), and others
+  all consume MCP servers; the wiring pattern is the same as Claude Code's
+  but each host has its own settings file. The MCP entry generated by
+  `denyx host-config` is portable JSON; the lockdown layer is per-host.
+- **Local-executor pattern** — Ollama running a small model under the gate
+  while a cloud model orchestrates. Cheaper, stronger trust boundary, and
+  hits 28-31/31 on the eval suite. See
+  [docs/12-local-executor.md](docs/12-local-executor.md).
+- **Standalone CLI** — `denyx run script.star --policy denyx.toml` for
+  CI/cron/scripts with no host at all. See
+  [docs/08-quickstart.md](docs/08-quickstart.md).
 
-You also need [Claude Code](https://github.com/anthropics/claude-code) or
-[opencode](https://opencode.ai) installed and reachable. Denyx wires into
-them; it does not replace them. To use Denyx standalone (without an MCP
-host), the CLI is documented in [docs/08-quickstart.md](docs/08-quickstart.md).
+**Optional (Linux only):** `bubblewrap` for `[subprocess].sandbox = "bwrap"`
+mode — wraps any subprocess spawned from your Starlark policy in a kernel
+namespace jail. **Off by default**; install with `apt install bubblewrap`
+if you want it. The rest of Denyx (the policy gate, taint redaction, audit
+log, MCP wiring, host lockdown) works on every platform without it.
+
+**Platform notes:** Denyx is platform-portable. The tested deployment shape
+uses [Lima](https://lima-vm.io/) on macOS and WSL2 on Windows — not because
+the language-level gate needs them, but because `bubblewrap` and Claude
+Code v2's OS sandbox are Linux-side features. Native macOS and Windows
+builds work for the policy gate (no platform-specific code paths, untested
+in CI). See [docs/macos-deployment.md](docs/macos-deployment.md) and
+[docs/windows-deployment.md](docs/windows-deployment.md) for the
+recommended VM setups.
 
 ## What Denyx actually does
 
