@@ -1967,3 +1967,399 @@ fn canonicalize_with_unresolved_tail(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
+
+#[cfg(test)]
+mod helpers_tests {
+    //! Direct unit tests for private helpers used by the policy
+    //! engine. These complement the integration tests in `tests/`
+    //! by exercising helpers that the public API hides — mutation
+    //! testing showed those helpers' behaviour is under-constrained
+    //! by integration-only coverage because their effects often
+    //! collapse before reaching the public surface.
+    use super::*;
+    use std::sync::Mutex;
+
+    /// `HOME` and `PATH` are process-global. Tests that mutate
+    /// them must not run concurrently with each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Generate a unique, ad-hoc temp directory rooted under
+    /// `std::env::temp_dir()`. Mirrors the pattern used in
+    /// `host/src/project_diagnosis.rs` so we don't pull in the
+    /// `tempfile` crate just for these helper tests.
+    fn unique_tempdir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "denyx-policy-helpers-{}-{}-{}",
+            label,
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    // --- concrete_prefix_of (lines 1830-1858) ---
+
+    #[test]
+    fn concrete_prefix_of_empty_input_returns_none() {
+        assert_eq!(concrete_prefix_of(""), None);
+    }
+
+    #[test]
+    fn concrete_prefix_of_glob_only_returns_none() {
+        assert_eq!(concrete_prefix_of("**"), None);
+        assert_eq!(concrete_prefix_of("*.json"), None);
+        assert_eq!(concrete_prefix_of("?abc"), None);
+        assert_eq!(concrete_prefix_of("[ab]xyz"), None);
+        assert_eq!(concrete_prefix_of("{a,b}"), None);
+    }
+
+    #[test]
+    fn concrete_prefix_of_relative_pattern_with_glob() {
+        assert_eq!(concrete_prefix_of("src/**"), Some("src"));
+    }
+
+    #[test]
+    fn concrete_prefix_of_nested_relative_pattern_with_glob() {
+        assert_eq!(concrete_prefix_of("src/foo/*.py"), Some("src/foo"));
+    }
+
+    #[test]
+    fn concrete_prefix_of_absolute_root_only_returns_root() {
+        // Kills 1848:16 (== → !=): mutant takes the else-branch and
+        // returns &head[..0] = "" instead of "/".
+        assert_eq!(concrete_prefix_of("/foo*"), Some("/"));
+    }
+
+    #[test]
+    fn concrete_prefix_of_no_glob_no_slash_returns_bare_name() {
+        assert_eq!(concrete_prefix_of("envvar"), Some("envvar"));
+    }
+
+    #[test]
+    fn concrete_prefix_of_strips_leading_negation() {
+        assert_eq!(concrete_prefix_of("!src/**"), Some("src"));
+    }
+
+    #[test]
+    fn concrete_prefix_of_tilde_pattern() {
+        assert_eq!(concrete_prefix_of("~/.aws/**"), Some("~/.aws"));
+    }
+
+    // --- collect_concrete_prefixes (lines 1774-1814) ---
+
+    #[test]
+    fn collect_concrete_prefixes_returns_root_for_globless_relative() {
+        let root = PathBuf::from("/policy_root");
+        let out = collect_concrete_prefixes(&root, &["src".to_string()]);
+        assert_eq!(out, vec![PathBuf::from("/policy_root/src")]);
+    }
+
+    #[test]
+    fn collect_concrete_prefixes_returns_policy_root_for_pure_glob() {
+        let root = PathBuf::from("/policy_root");
+        let out = collect_concrete_prefixes(&root, &["**".to_string()]);
+        assert_eq!(out, vec![PathBuf::from("/policy_root")]);
+    }
+
+    #[test]
+    fn collect_concrete_prefixes_resolves_tilde_only_via_home_dir() {
+        // Kills 1789:26 (== → !=): mutant flips so prefix == "~"
+        // skips the home_dir branch.
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/test_home"); }
+        let root = PathBuf::from("/policy_root");
+        let out = collect_concrete_prefixes(&root, &["~".to_string()]);
+        match saved {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(out, vec![PathBuf::from("/test_home")]);
+    }
+
+    #[test]
+    fn collect_concrete_prefixes_keeps_disjoint_paths_and_dedups_children() {
+        // Kills 1809:12 (delete `!` on `if !covered`): mutant only
+        // keeps already-covered paths → vec![] for this input.
+        let root = PathBuf::from("/r");
+        let out = collect_concrete_prefixes(
+            &root,
+            &[
+                "src/foo/**".to_string(),
+                "src/bar/**".to_string(),
+                "src/foo/baz/*.txt".to_string(),
+            ],
+        );
+        assert_eq!(
+            out,
+            vec![PathBuf::from("/r/src/bar"), PathBuf::from("/r/src/foo")]
+        );
+    }
+
+    // --- which_on_path (lines 1866-1875) ---
+
+    #[test]
+    fn which_on_path_finds_existing_binary() {
+        // Kills FnValue Some(Default::default()) — Default is empty
+        // PathBuf, which `is_file()` rejects.
+        let r = which_on_path("sh");
+        assert!(r.is_some(), "sh should be on PATH");
+        let p = r.unwrap();
+        assert!(!p.as_os_str().is_empty(), "result must be non-empty: {p:?}");
+        assert!(p.is_file(), "result must be a real file: {p:?}");
+    }
+
+    #[test]
+    fn which_on_path_returns_none_for_missing_binary() {
+        // Kills Some(Default::default()) — mutant returns Some
+        // (empty PathBuf) for ANY name.
+        let r = which_on_path("denyx_definitely_not_a_real_bin_xyzzy_42");
+        assert_eq!(r, None);
+    }
+
+    // --- home_dir (lines 1877-1879) ---
+
+    #[test]
+    fn home_dir_returns_some_when_home_set() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/test_home_42"); }
+        let r = home_dir();
+        match saved {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(r, Some(PathBuf::from("/test_home_42")));
+    }
+
+    #[test]
+    fn home_dir_returns_none_when_home_unset() {
+        // Kills FnValue Some(Default::default()) — empty PathBuf is
+        // Some, not None.
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("HOME");
+        unsafe { std::env::remove_var("HOME"); }
+        let r = home_dir();
+        match saved {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(r, None);
+    }
+
+    // --- canonicalize_with_unresolved_tail (lines 1947-1969) ---
+
+    #[test]
+    fn canonicalize_with_unresolved_tail_resolves_symlink_in_existing_prefix() {
+        // Kills 1957:12 (delete `!` on `if !current.pop()`): mutant
+        // breaks on FIRST successful pop → never reaches the
+        // canonicalize-after-pop block → returns the unresolved
+        // input. Original walks back through nonexistent components,
+        // canonicalizes the existing prefix, and reattaches the tail.
+        let tmp = unique_tempdir("canon_tail");
+        let real = tmp.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.join("link");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let probe = link.join("foo").join("bar");
+            let got = canonicalize_with_unresolved_tail(&probe);
+            let canon_real = std::fs::canonicalize(&real).unwrap();
+            let expected = canon_real.join("foo").join("bar");
+            assert_eq!(got, expected, "symlink in existing prefix must resolve");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- translate_pattern (line 1678) ---
+
+    #[test]
+    fn translate_pattern_relative_no_slash_uses_recursive_glob() {
+        // Kills 1692:8 (delete `!`): mutant inverts the condition →
+        // a no-slash pattern would route to the final
+        // `<root>/<pattern>` form (no `**/`).
+        let root = PathBuf::from("/p");
+        assert_eq!(translate_pattern(&root, ".env"), "/p/**/.env");
+    }
+
+    #[test]
+    fn translate_pattern_relative_with_slash_root_anchors() {
+        // Kills 1692:8 in the other direction: a slash-bearing
+        // relative pattern would become `<root>/**/<pattern>`,
+        // changing match semantics (matches at any nesting depth).
+        let root = PathBuf::from("/p");
+        assert_eq!(translate_pattern(&root, "src/foo"), "/p/src/foo");
+    }
+
+    #[test]
+    fn translate_pattern_absolute_passes_through() {
+        let root = PathBuf::from("/p");
+        assert_eq!(translate_pattern(&root, "/etc/passwd"), "/etc/passwd");
+    }
+
+    // --- merge_policy_files sandbox overlay (line 619) ---
+
+    #[test]
+    fn merge_policy_files_sandbox_default_keeps_base() {
+        // Kills 619:49 (== → !=): mutant flips the predicate and
+        // would take OVER's default value, dropping base's bwrap.
+        let base = PolicyFile::from_toml_str(
+            r#"
+[subprocess]
+sandbox = "bwrap"
+"#,
+        )
+        .unwrap();
+        let over = PolicyFile::from_toml_str("").unwrap();
+        let merged = merge_policy_files(base, over);
+        assert_eq!(merged.subprocess.sandbox, SandboxMode::Bwrap);
+    }
+
+    #[test]
+    fn merge_policy_files_sandbox_explicit_over_wins() {
+        let base = PolicyFile::from_toml_str(
+            r#"
+[subprocess]
+sandbox = "none"
+"#,
+        )
+        .unwrap();
+        let over = PolicyFile::from_toml_str(
+            r#"
+[subprocess]
+sandbox = "bwrap"
+"#,
+        )
+        .unwrap();
+        let merged = merge_policy_files(base, over);
+        assert_eq!(merged.subprocess.sandbox, SandboxMode::Bwrap);
+    }
+
+    // --- guard_sandbox_available (line 727) ---
+
+    #[test]
+    fn guard_sandbox_available_errors_when_bwrap_missing() {
+        // Kills FnValue `Result<()> with Ok(())` — mutant would
+        // silently approve a misconfigured policy where
+        // sandbox=bwrap but bwrap is not on PATH.
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", ""); }
+
+        let file = PolicyFile::from_toml_str(
+            r#"
+[subprocess]
+sandbox = "bwrap"
+"#,
+        )
+        .unwrap();
+        let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
+        let result = policy.guard_sandbox_available();
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        assert!(
+            result.is_err(),
+            "guard_sandbox_available must Err when bwrap is not on PATH"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("bwrap"), "error must mention bwrap: {msg}");
+    }
+
+    #[test]
+    fn guard_sandbox_available_ok_when_sandbox_none() {
+        let file = PolicyFile::from_toml_str(
+            r#"
+[subprocess]
+sandbox = "none"
+"#,
+        )
+        .unwrap();
+        let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
+        assert!(policy.guard_sandbox_available().is_ok());
+    }
+
+    // --- guard_audit_log (line 808) ---
+
+    #[test]
+    fn guard_audit_log_errors_when_policy_grants_write() {
+        // Kills FnValue `Result<(), PolicyError> with Ok(())` —
+        // mutant would silently approve any path.
+        let file = PolicyFile::from_toml_str(
+            r#"
+[filesystem]
+write_allow = ["**"]
+"#,
+        )
+        .unwrap();
+        let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
+        let r = policy.guard_audit_log(&PathBuf::from("/tmp/audit.jsonl"));
+        assert!(matches!(
+            r,
+            Err(PolicyError::ProtectedPath {
+                role: "audit log",
+                action: "write",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn guard_audit_log_errors_when_policy_grants_delete() {
+        let file = PolicyFile::from_toml_str(
+            r#"
+[filesystem]
+delete_allow = ["**"]
+"#,
+        )
+        .unwrap();
+        let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
+        let r = policy.guard_audit_log(&PathBuf::from("/tmp/audit.jsonl"));
+        assert!(matches!(
+            r,
+            Err(PolicyError::ProtectedPath {
+                role: "audit log",
+                action: "delete",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn guard_audit_log_errors_when_policy_grants_read() {
+        let file = PolicyFile::from_toml_str(
+            r#"
+[filesystem]
+read_allow = ["**"]
+"#,
+        )
+        .unwrap();
+        let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
+        let r = policy.guard_audit_log(&PathBuf::from("/tmp/audit.jsonl"));
+        assert!(matches!(
+            r,
+            Err(PolicyError::ProtectedPath {
+                role: "audit log",
+                action: "read",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn guard_audit_log_ok_when_policy_grants_no_access() {
+        let file = PolicyFile::from_toml_str("").unwrap();
+        let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
+        assert!(policy
+            .guard_audit_log(&PathBuf::from("/tmp/audit.jsonl"))
+            .is_ok());
+    }
+}
