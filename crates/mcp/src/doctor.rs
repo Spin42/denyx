@@ -388,4 +388,75 @@ mod tests {
         let (out, _code) = render(&d);
         assert!(out.contains("denyx-mcp wired via lima"));
     }
+
+    #[test]
+    fn render_via_wrapper_label_includes_wsl() {
+        let mut d = empty_diag();
+        d.host_configs.push(HostConfigEntry {
+            path: PathBuf::from(".mcp.json"),
+            host: HostName::Claude,
+            denyx_servers: vec![DetectedDenyxServer {
+                name: "denyx".into(),
+                flavor: DenyxFlavor::DenyxMcp,
+                command: "denyx-mcp".into(),
+                args: vec![],
+                via_wrapper: Some(project_diagnosis::PlatformWrapper::Wsl),
+            }],
+            lockdown_state: LockdownState::Active,
+        });
+        let (out, _code) = render(&d);
+        assert!(out.contains("denyx-mcp wired via wsl"));
+    }
+
+    #[test]
+    fn render_valid_policy_shows_name_and_capability_count() {
+        let mut d = empty_diag();
+        d.policy = PolicyCheck::Valid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            name: Some("my-project".to_string()),
+            capability_count: 7,
+        };
+        let (out, code) = render(&d);
+        assert_eq!(code, 0);
+        assert!(out.contains("[OK]   denyx.toml"));
+        assert!(out.contains("'my-project'"));
+        assert!(out.contains("(7 capabilities)"));
+    }
+
+    #[test]
+    fn render_warn_when_host_config_has_mcp_entry_but_no_denyx_binary() {
+        let mut d = empty_diag();
+        d.host_configs.push(HostConfigEntry {
+            path: PathBuf::from(".mcp.json"),
+            host: HostName::Claude,
+            denyx_servers: vec![DetectedDenyxServer {
+                name: "github".into(),
+                // Some other tool the host-config wires — not Denyx.
+                flavor: DenyxFlavor::Other("github-mcp".to_string()),
+                command: "github-mcp".into(),
+                args: vec![],
+                via_wrapper: None,
+            }],
+            lockdown_state: LockdownState::Absent,
+        });
+        let (out, code) = render(&d);
+        // Worst is WARN (missing denyx wiring + lockdown absent).
+        assert_eq!(code, 1);
+        assert!(out.contains("MCP entries present but no Denyx binary wired"));
+        assert!(out.contains("github"));
+    }
+
+    #[test]
+    fn render_warn_when_host_config_file_has_no_mcp_entries_at_all() {
+        let mut d = empty_diag();
+        d.host_configs.push(HostConfigEntry {
+            path: PathBuf::from("opencode.json"),
+            host: HostName::Opencode,
+            denyx_servers: vec![],
+            lockdown_state: LockdownState::Active,
+        });
+        let (out, code) = render(&d);
+        assert_eq!(code, 1);
+        assert!(out.contains("no MCP server entries in this file"));
+    }
 }

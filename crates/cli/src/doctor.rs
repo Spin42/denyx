@@ -949,4 +949,177 @@ mod tests {
         let items = vec!["a".to_string(), "b".to_string()];
         assert_eq!(summarise_list(&items, 5), "a, b");
     }
+
+    // ─────────────────── apply_fix tests ───────────────────
+    //
+    // Cover the actual apply path that integration tests can't
+    // reach (they refuse non-TTY stdin). PrepareAuditDir is pure
+    // filesystem I/O against a tempdir, so it tests cleanly.
+    // RefreshHostConfig shells out to `denyx` so we don't unit-
+    // test it (the seam is the subprocess); its planning logic
+    // is covered by plan_fixes tests above.
+
+    fn fix_tempdir(label: &str) -> PathBuf {
+        // CARGO_BIN_EXE_<name> is only set for integration tests
+        // under tests/, not for unit tests inside the bin itself.
+        // std::env::temp_dir() is fine here: prepare_audit_dir
+        // doesn't touch denyx.toml or trip the self-writable guard.
+        let p = std::env::temp_dir().join(format!(
+            "denyx_doctor_fix_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn apply_fix_prepare_audit_dir_creates_dir_and_gitignore() {
+        let tmp = fix_tempdir("apply_audit_fresh");
+        let fix = AutoFix {
+            label: "test".into(),
+            targets: vec![],
+            reasons: vec![],
+            action: FixAction::PrepareAuditDir,
+        };
+        let result = apply_fix(&fix, &tmp).expect("apply should succeed");
+        assert!(result.contains("created `.denyx/`"));
+        assert!(result.contains("updated `.gitignore`"));
+        assert!(tmp.join(".denyx").is_dir());
+        let gi = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
+        assert!(gi.contains(".denyx/"));
+    }
+
+    #[test]
+    fn apply_fix_prepare_audit_dir_is_idempotent_when_already_present() {
+        let tmp = fix_tempdir("apply_audit_idem");
+        std::fs::create_dir_all(tmp.join(".denyx")).unwrap();
+        std::fs::write(tmp.join(".gitignore"), ".denyx/\n").unwrap();
+        let fix = AutoFix {
+            label: "test".into(),
+            targets: vec![],
+            reasons: vec![],
+            action: FixAction::PrepareAuditDir,
+        };
+        let result = apply_fix(&fix, &tmp).expect("apply should succeed");
+        // Already-present case: function returns "nothing to do".
+        assert!(
+            result.contains("nothing to do") || result.is_empty(),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_fix_prepare_audit_dir_appends_to_existing_gitignore() {
+        let tmp = fix_tempdir("apply_audit_existing_gi");
+        std::fs::write(tmp.join(".gitignore"), "target/\n").unwrap();
+        let fix = AutoFix {
+            label: "test".into(),
+            targets: vec![],
+            reasons: vec![],
+            action: FixAction::PrepareAuditDir,
+        };
+        apply_fix(&fix, &tmp).expect("apply should succeed");
+        let gi = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
+        assert!(gi.contains("target/"), "should preserve existing entry");
+        assert!(gi.contains(".denyx/"), "should add denyx entry");
+    }
+
+    // ─────────────────── plan_fixes coverage gaps ───────────────────
+
+    #[test]
+    fn plan_fixes_handles_sandbox_allow_write_stale() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::Excluded;
+        d.policy = PolicyCheck::Valid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            name: None,
+            capability_count: 1,
+        };
+        let issues = vec![ConsistencyIssue::SandboxAllowWriteStale {
+            missing_paths: vec!["/var/log/myapp".into(), "/opt/cache".into()],
+        }];
+        let fixes = plan_fixes(&d, &issues);
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].action {
+            FixAction::RefreshHostConfig { hosts, .. } => {
+                assert_eq!(hosts, &vec!["claude".to_string()]);
+            }
+            other => panic!("expected RefreshHostConfig, got {other:?}"),
+        }
+        assert!(fixes[0]
+            .reasons
+            .iter()
+            .any(|r| r.contains("path(s) missing from sandbox.allowWrite")));
+    }
+
+    #[test]
+    fn plan_fixes_collects_lockdown_drift_for_cursor_copilot_continue() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::Excluded;
+        d.policy = PolicyCheck::Valid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            name: None,
+            capability_count: 1,
+        };
+        for (path, host) in [
+            (".cursor/mcp.json", HostName::Cursor),
+            (".vscode/settings.json", HostName::Copilot),
+            (".continue/config.json", HostName::Continue),
+        ] {
+            d.host_configs.push(HostConfigEntry {
+                path: PathBuf::from(format!("/proj/{path}")),
+                host,
+                denyx_servers: vec![],
+                lockdown_state: LockdownState::Absent,
+            });
+        }
+        let fixes = plan_fixes(&d, &[]);
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].action {
+            FixAction::RefreshHostConfig { hosts, .. } => {
+                assert!(hosts.contains(&"cursor".to_string()));
+                assert!(hosts.contains(&"copilot".to_string()));
+                assert!(hosts.contains(&"continue".to_string()));
+                assert_eq!(hosts.len(), 3);
+            }
+            other => panic!("expected RefreshHostConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_fixes_combines_audit_dir_and_host_config_fixes() {
+        // Both kinds of drift simultaneously → two distinct AutoFix
+        // entries (one PrepareAuditDir + one RefreshHostConfig).
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        // audit_dir + gitignore drift left as default Absent / Missing.
+        d.policy = PolicyCheck::Valid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            name: None,
+            capability_count: 1,
+        };
+        d.host_configs.push(HostConfigEntry {
+            path: PathBuf::from("/proj/.mcp.json"),
+            host: HostName::Claude,
+            denyx_servers: vec![],
+            lockdown_state: LockdownState::Absent,
+        });
+        let fixes = plan_fixes(&d, &[]);
+        assert_eq!(fixes.len(), 2);
+        assert!(fixes
+            .iter()
+            .any(|f| matches!(f.action, FixAction::PrepareAuditDir)));
+        assert!(fixes
+            .iter()
+            .any(|f| matches!(f.action, FixAction::RefreshHostConfig { .. })));
+    }
 }
