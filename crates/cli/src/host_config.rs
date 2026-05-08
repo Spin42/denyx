@@ -72,13 +72,25 @@ pub enum Sandbox {
 
 /// Inputs to every generator. The CLI layer parses flags into this
 /// struct and threads it through.
+///
+/// Policy/audit can each be wired as either a local file or a remote
+/// HTTP endpoint. When `policy_url` is `Some`, the generated MCP entry
+/// uses `--policy-url <URL>` instead of `--policy <path>`; same for
+/// `audit_url` vs `--audit-log <path>`. A local `policy_path` is still
+/// required at host-config time because the OS-sandbox stanza
+/// (`allowedDomains`/`allowWrite`) is derived from the policy's
+/// `http_*_allow` and `write_allow` lists — the URL the runtime
+/// fetches at startup may differ, but the sandbox layer needs *some*
+/// snapshot to seed itself with.
 #[derive(Debug, Clone)]
 pub struct Opts {
     pub host: Host,
     pub platform: Platform,
     pub denyx_mcp_binary: String,
     pub policy_path: PathBuf,
+    pub policy_url: Option<String>,
     pub audit_log_path: PathBuf,
+    pub audit_url: Option<String>,
     pub lima_vm: String,
     pub wsl_distro: Option<String>,
     pub sandbox: Sandbox,
@@ -123,17 +135,26 @@ const OPENCODE_DENY_TOOLS: &[&str] = &[
 
 /// Build the (`command`, `args`) pair for the MCP server entry given
 /// the platform and the resolved binary location. The denyx-mcp args
-/// (`--policy`, `--audit-log`, `--confirm-mode auto`) are appended
-/// after any platform wrapper args.
+/// (`--policy`/`--policy-url`, `--audit-log`/`--audit-url`,
+/// `--confirm-mode auto`) are appended after any platform wrapper args.
 pub fn build_command_and_args(opts: &Opts) -> (String, Vec<String>) {
-    let denyx_args = vec![
-        "--policy".to_string(),
-        opts.policy_path.display().to_string(),
-        "--audit-log".to_string(),
-        opts.audit_log_path.display().to_string(),
-        "--confirm-mode".to_string(),
-        "auto".to_string(),
-    ];
+    let mut denyx_args: Vec<String> = Vec::new();
+    if let Some(url) = &opts.policy_url {
+        denyx_args.push("--policy-url".to_string());
+        denyx_args.push(url.clone());
+    } else {
+        denyx_args.push("--policy".to_string());
+        denyx_args.push(opts.policy_path.display().to_string());
+    }
+    if let Some(url) = &opts.audit_url {
+        denyx_args.push("--audit-url".to_string());
+        denyx_args.push(url.clone());
+    } else {
+        denyx_args.push("--audit-log".to_string());
+        denyx_args.push(opts.audit_log_path.display().to_string());
+    }
+    denyx_args.push("--confirm-mode".to_string());
+    denyx_args.push("auto".to_string());
     match opts.platform {
         Platform::Native => (opts.denyx_mcp_binary.clone(), denyx_args),
         Platform::Lima => {
@@ -557,7 +578,9 @@ mod tests {
             platform: Platform::Native,
             denyx_mcp_binary: "denyx-mcp".to_string(),
             policy_path: PathBuf::from("./denyx.toml"),
+            policy_url: None,
             audit_log_path: PathBuf::from("./.denyx/audit.jsonl"),
+            audit_url: None,
             lima_vm: "denyx".to_string(),
             wsl_distro: None,
             sandbox: Sandbox::Auto,
@@ -649,6 +672,67 @@ write_allow = ["src/**", "/tmp/**", "~/.cache/myproj/**"]
         assert_eq!(args[1], "Ubuntu-22.04");
         assert_eq!(args[2], "-e");
         assert_eq!(args[3], "denyx-mcp");
+    }
+
+    #[test]
+    fn policy_url_replaces_policy_path_in_args() {
+        let mut o = opts_native();
+        o.policy_url = Some("https://denyx.example.com/policy".to_string());
+        let (cmd, args) = build_command_and_args(&o);
+        assert_eq!(cmd, "denyx-mcp");
+        assert!(
+            args.iter().any(|a| a == "--policy-url"),
+            "expected --policy-url in args: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--policy"),
+            "should NOT carry --policy when --policy-url is set: {args:?}"
+        );
+        assert!(args.contains(&"https://denyx.example.com/policy".to_string()));
+    }
+
+    #[test]
+    fn audit_url_replaces_audit_log_in_args() {
+        let mut o = opts_native();
+        o.audit_url = Some("https://denyx.example.com/audit".to_string());
+        let (_cmd, args) = build_command_and_args(&o);
+        assert!(
+            args.iter().any(|a| a == "--audit-url"),
+            "expected --audit-url in args: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--audit-log"),
+            "should NOT carry --audit-log when --audit-url is set: {args:?}"
+        );
+        assert!(args.contains(&"https://denyx.example.com/audit".to_string()));
+    }
+
+    #[test]
+    fn policy_and_audit_urls_can_be_set_independently() {
+        let mut o = opts_native();
+        o.policy_url = Some("https://srv/policy".to_string());
+        // audit_url left as None — local audit + remote policy
+        let (_cmd, args) = build_command_and_args(&o);
+        assert!(args.iter().any(|a| a == "--policy-url"));
+        assert!(args.iter().any(|a| a == "--audit-log"));
+        assert!(!args.iter().any(|a| a == "--policy"));
+        assert!(!args.iter().any(|a| a == "--audit-url"));
+    }
+
+    #[test]
+    fn url_mode_works_through_lima_wrapper() {
+        let mut o = opts_lima();
+        o.policy_url = Some("https://srv/policy".to_string());
+        o.audit_url = Some("https://srv/audit".to_string());
+        let (cmd, args) = build_command_and_args(&o);
+        assert_eq!(cmd, "limactl");
+        // limactl shell <vm> denyx-mcp ... — denyx-mcp is at index 2,
+        // then the URL flags.
+        assert_eq!(args[0], "shell");
+        assert_eq!(args[1], "denyx");
+        assert_eq!(args[2], "denyx-mcp");
+        assert!(args.iter().any(|a| a == "--policy-url"));
+        assert!(args.iter().any(|a| a == "--audit-url"));
     }
 
     #[test]

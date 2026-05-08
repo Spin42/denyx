@@ -180,6 +180,22 @@ struct HostConfigArgs {
     #[arg(long, default_value = "./.denyx/audit.jsonl")]
     audit_log: PathBuf,
 
+    /// Team mode: bake `--policy-url <URL>` into the MCP entry instead
+    /// of `--policy <path>`. The local `--policy` file is still required
+    /// because the OS-sandbox stanza is derived from it; at runtime
+    /// `denyx-mcp` fetches the URL and ignores the local file. Pair
+    /// with `DENYX_AUTH_TOKEN` distributed via direnv / your secrets
+    /// tool. See docs/11-denyx-for-teams.md.
+    #[arg(long)]
+    policy_url: Option<String>,
+
+    /// Team mode: bake `--audit-url <URL>` into the MCP entry instead
+    /// of `--audit-log <path>`. Audit events POST to the URL with the
+    /// same auth token. May be combined with `--policy-url` (full team
+    /// mode) or used alone (centralised audit, local policy).
+    #[arg(long)]
+    audit_url: Option<String>,
+
     /// OS-level sandbox emission policy.
     /// - `auto` (default): emit the sandbox stanza with
     ///   `failIfUnavailable: false`. Hosts without bubblewrap warn
@@ -419,13 +435,35 @@ fn host_config_cmd(args: HostConfigArgs) -> Result<(), CliError> {
         platform: args.platform.as_platform(),
         denyx_mcp_binary: args.denyx_mcp_binary,
         policy_path: args.policy.clone(),
+        policy_url: args.policy_url.clone(),
         audit_log_path: args.audit_log,
+        audit_url: args.audit_url.clone(),
         lima_vm: args.lima_vm,
         wsl_distro: args.wsl_distro,
         sandbox: args.sandbox.as_sandbox(),
         windows: args.windows,
     };
     let existing_mode = args.existing.as_existing();
+
+    if opts.policy_url.is_some() {
+        eprintln!(
+            "denyx host-config: team mode — generated MCP entry uses \
+             --policy-url; local --policy {:?} is only used to derive \
+             the OS-sandbox stanza (re-run after policy edits to refresh).",
+            args.policy
+        );
+        eprintln!(
+            "  Distribute DENYX_AUTH_TOKEN via direnv / your secrets tool. \
+             See docs/11-denyx-for-teams.md."
+        );
+    }
+    if opts.audit_url.is_some() {
+        eprintln!(
+            "denyx host-config: team mode — generated MCP entry uses \
+             --audit-url; the local audit log under .denyx/ will not be \
+             written (events POST to the URL instead)."
+        );
+    }
 
     if args.dry_run {
         emit_dry_run(&policy, &opts, existing_mode, args.no_mcp);

@@ -281,6 +281,114 @@ fn sandbox_required_sets_fail_if_unavailable_true() {
 }
 
 #[test]
+fn policy_url_bakes_url_into_mcp_args() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "both",
+            "--policy-url",
+            "https://denyx.example.com/policy",
+            "--audit-url",
+            "https://denyx.example.com/audit",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(
+        out.status.success(),
+        "exit={:?} stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Claude .mcp.json should carry --policy-url + --audit-url, not --policy / --audit-log.
+    let mcp = read_json(&tmp.join(".mcp.json"));
+    let args: Vec<&str> = mcp["mcpServers"]["denyx"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        args.contains(&"--policy-url"),
+        "expected --policy-url, got {args:?}"
+    );
+    assert!(
+        args.contains(&"--audit-url"),
+        "expected --audit-url, got {args:?}"
+    );
+    assert!(
+        !args.contains(&"--policy"),
+        "should NOT include --policy in URL mode"
+    );
+    assert!(
+        !args.contains(&"--audit-log"),
+        "should NOT include --audit-log in URL mode"
+    );
+    assert!(args.contains(&"https://denyx.example.com/policy"));
+    assert!(args.contains(&"https://denyx.example.com/audit"));
+
+    // opencode.json command array carries the same.
+    let oc = read_json(&tmp.join("opencode.json"));
+    let oc_cmd: Vec<&str> = oc["mcp"]["denyx"]["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(oc_cmd.contains(&"--policy-url"));
+    assert!(oc_cmd.contains(&"--audit-url"));
+
+    // The team-mode warning should land on stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("team mode"),
+        "expected team-mode warning, stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn audit_url_alone_keeps_local_policy() {
+    let tmp = tempdir();
+    let policy = write_minimal_policy(&tmp);
+
+    let out = run(
+        &[
+            "host-config",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--host",
+            "claude",
+            "--audit-url",
+            "https://denyx.example.com/audit",
+            "--sandbox",
+            "off",
+        ],
+        &tmp,
+    );
+    assert!(out.status.success());
+
+    let mcp = read_json(&tmp.join(".mcp.json"));
+    let args: Vec<&str> = mcp["mcpServers"]["denyx"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(args.contains(&"--policy"), "policy stays local");
+    assert!(args.contains(&"--audit-url"), "audit goes remote");
+    assert!(!args.contains(&"--audit-log"));
+    assert!(!args.contains(&"--policy-url"));
+}
+
+#[test]
 fn no_mcp_writes_lockdown_only() {
     let tmp = tempdir();
     let policy = write_minimal_policy(&tmp);
