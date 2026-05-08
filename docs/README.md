@@ -44,6 +44,7 @@ The index below lists everything in both groups in one place.
 | 11 | [denyx-for-teams](11-denyx-for-teams.md)                           | The team-deployment shape: one policy + one audit trail across many developers, via a central server. Philosophy, trade-offs of every shape, rollout stages. |
 | 12 | [local-executor](12-local-executor.md)                             | The full agentic stack: cloud orchestrator → local 7B executor → Denyx runtime. The architecture the eval harness measures. |
 | 13 | [running-examples](13-running-examples.md)                         | Reproduction guide for the three eval harnesses (single-step, 36-task multi-step, Sonnet/Opus orchestrated). Read this to confirm the headline numbers on your own machine. |
+| 14 | [other-hosts](14-other-hosts.md)                                   | Setup guide for VSCode (GitHub Copilot agent mode, Continue, Cline) and Cursor. **Not thoroughly tested** — MCP wiring should work universally; the host-side lockdown varies and is incomplete for some hosts. |
 
 ## Reference (lowercase)
 
