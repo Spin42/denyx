@@ -12,7 +12,7 @@
 //! language as `denyx-mcp doctor` and `denyx-local-mcp doctor`.
 //! Doesn't talk to a network or modify anything.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use denyx_host::policy_host_consistency::{self, ConsistencyIssue, Severity};
@@ -26,6 +26,22 @@ pub struct DoctorArgs {
     /// Project root to inspect. Defaults to the current directory.
     #[arg(long)]
     pub project_path: Option<PathBuf>,
+
+    /// Apply mechanical fixes for issues that can be safely
+    /// re-derived from the policy:
+    ///   - missing `.denyx/` audit dir → `mkdir`
+    ///   - `.gitignore` missing `.denyx/` line → append
+    ///   - stale sandbox stanza in `.claude/settings.json` →
+    ///     re-emit from policy via `host-config --existing replace`
+    ///   - missing / partial built-in deny list → same
+    ///
+    /// Issues that require operator judgment (policy decisions —
+    /// adding hosts to allow lists, granting capabilities,
+    /// resolving conflicting policy paths) are NEVER auto-fixed.
+    /// Those still require manual action and remain in the
+    /// post-fix report.
+    #[arg(long)]
+    pub fix: bool,
 }
 
 pub fn run(args: DoctorArgs) -> i32 {
@@ -39,19 +55,374 @@ pub fn run(args: DoctorArgs) -> i32 {
                 .unwrap_or_else(|| PathBuf::from("."))
         });
 
-    let diagnosis = project_diagnosis::diagnose(&project_path);
+    let (out, code, diagnosis, issues) = run_diagnosis(&project_path);
+    print!("{out}");
 
-    // Load policy if present + valid; only then can the
-    // consistency-checker run its policy-side checks.
+    if !args.fix {
+        return code;
+    }
+
+    // ── --fix: plan, confirm, apply, re-diagnose ───────────────────
+    let fixes = plan_fixes(&diagnosis, &issues);
+    let non_fixable = non_fixable_issues(&issues);
+
+    if fixes.is_empty() {
+        println!();
+        println!("--fix: no auto-fixable issues to apply.");
+        if !non_fixable.is_empty() {
+            println!(
+                "       {} issue(s) above require operator decision; see the fix \
+                 instructions in the report.",
+                non_fixable.len()
+            );
+        }
+        return code;
+    }
+
+    print!("{}", render_fix_plan(&fixes, &non_fixable));
+
+    let approved = confirm(&format!(
+        "Apply the {} auto-fix{} above? [y/N]: ",
+        fixes.len(),
+        if fixes.len() == 1 { "" } else { "es" }
+    ));
+    if !approved {
+        println!();
+        println!(
+            "Skipped. Re-run `denyx doctor --fix` from a terminal to apply, or \
+             fix manually using the instructions in the report above."
+        );
+        return code;
+    }
+
+    println!();
+    let mut all_ok = true;
+    for fix in &fixes {
+        match apply_fix(fix, &project_path) {
+            Ok(detail) => println!("  [FIX] {}: {detail}", fix.label),
+            Err(e) => {
+                println!("  [ERR] {}: {e}", fix.label);
+                all_ok = false;
+            }
+        }
+    }
+
+    if !all_ok {
+        return 2;
+    }
+
+    println!();
+    println!("Re-running doctor to verify …");
+    println!();
+    let (out2, code2, _, _) = run_diagnosis(&project_path);
+    print!("{out2}");
+    code2
+}
+
+fn run_diagnosis(
+    project_path: &Path,
+) -> (
+    String,
+    i32,
+    project_diagnosis::ProjectDiagnosis,
+    Vec<ConsistencyIssue>,
+) {
+    let diagnosis = project_diagnosis::diagnose(project_path);
     let loaded_policy: Option<Policy> = match &diagnosis.policy {
         PolicyCheck::Valid { path, .. } => Policy::load(path).ok(),
         _ => None,
     };
     let issues = policy_host_consistency::check(loaded_policy.as_ref(), &diagnosis);
-
     let (out, code) = render(&diagnosis, &issues);
-    print!("{out}");
-    code
+    (out, code, diagnosis, issues)
+}
+
+// ─────────────────────────── --fix support ───────────────────────────
+
+#[derive(Debug, Clone)]
+struct AutoFix {
+    /// One-line description of what the fix does.
+    label: String,
+    /// Files / directories the fix will touch.
+    targets: Vec<PathBuf>,
+    /// Why the fix is being proposed (which issues triggered it).
+    reasons: Vec<String>,
+    /// What action to take.
+    action: FixAction,
+}
+
+#[derive(Debug, Clone)]
+enum FixAction {
+    /// `denyx_host`-style audit-dir + .gitignore preparation.
+    /// Mechanically equivalent to what `denyx host-config` does.
+    PrepareAuditDir,
+    /// Re-run `denyx host-config --policy <P> --host <list>
+    /// --existing replace`, regenerating sandbox + lockdown +
+    /// MCP entry from the live policy.
+    RefreshHostConfig {
+        hosts: Vec<String>,
+        policy_path: PathBuf,
+    },
+}
+
+/// Compute the set of mechanical fixes the doctor can safely apply.
+/// Skips anything that requires a security / policy decision.
+fn plan_fixes(
+    diagnosis: &project_diagnosis::ProjectDiagnosis,
+    issues: &[ConsistencyIssue],
+) -> Vec<AutoFix> {
+    let mut out = Vec::new();
+
+    // ── audit dir + gitignore ─────────────────────────────────────
+    let audit_drift = matches!(diagnosis.audit_dir, AuditDirCheck::Absent);
+    let gi_drift = matches!(diagnosis.gitignore, GitignoreCheck::NotExcluded);
+    if audit_drift || gi_drift {
+        let mut reasons = Vec::new();
+        if audit_drift {
+            reasons.push("`.denyx/` audit dir is missing".to_string());
+        }
+        if matches!(diagnosis.gitignore, GitignoreCheck::NotExcluded) {
+            reasons.push("`.gitignore` does not exclude `.denyx/`".to_string());
+        }
+        let mut targets = Vec::new();
+        if audit_drift {
+            targets.push(diagnosis.root.join(".denyx"));
+        }
+        if gi_drift {
+            targets.push(diagnosis.root.join(".gitignore"));
+        }
+        out.push(AutoFix {
+            label: "Prepare audit dir and `.gitignore` exclusion".to_string(),
+            targets,
+            reasons,
+            action: FixAction::PrepareAuditDir,
+        });
+    }
+
+    // ── sandbox / lockdown drift ──────────────────────────────────
+    use denyx_host::project_diagnosis::HostName;
+    let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut reasons: Vec<String> = Vec::new();
+    let mut targets: Vec<PathBuf> = Vec::new();
+
+    for issue in issues {
+        match issue {
+            ConsistencyIssue::SandboxAllowedDomainsStale { missing_hosts } => {
+                hosts.insert("claude".to_string());
+                reasons.push(format!(
+                    "{} host(s) missing from sandbox.allowedDomains: {}",
+                    missing_hosts.len(),
+                    summarise_list(missing_hosts, 5)
+                ));
+            }
+            ConsistencyIssue::SandboxAllowWriteStale { missing_paths } => {
+                hosts.insert("claude".to_string());
+                reasons.push(format!(
+                    "{} path(s) missing from sandbox.allowWrite: {}",
+                    missing_paths.len(),
+                    summarise_list(missing_paths, 5)
+                ));
+            }
+            _ => {}
+        }
+    }
+    for hc in &diagnosis.host_configs {
+        let host_cli = match hc.host {
+            HostName::Claude => "claude",
+            HostName::Opencode => "opencode",
+            HostName::Cursor => "cursor",
+            HostName::Copilot => "copilot",
+            HostName::Continue => "continue",
+        };
+        match &hc.lockdown_state {
+            LockdownState::Absent => {
+                hosts.insert(host_cli.to_string());
+                reasons.push(format!("{} lockdown is absent", hc.host.label()));
+                targets.push(hc.path.clone());
+            }
+            LockdownState::Partial { missing } => {
+                hosts.insert(host_cli.to_string());
+                reasons.push(format!(
+                    "{} lockdown is partial ({} missing: {})",
+                    hc.host.label(),
+                    missing.len(),
+                    summarise_list(missing, 5)
+                ));
+                targets.push(hc.path.clone());
+            }
+            _ => {}
+        }
+    }
+    if !hosts.is_empty() {
+        // Refresh requires a valid policy file path.
+        if let PolicyCheck::Valid { path, .. } = &diagnosis.policy {
+            let host_list: Vec<String> = hosts.into_iter().collect();
+            // For sandbox drift on Claude, the refresh writes
+            // .claude/settings.json; add it to targets.
+            if host_list.iter().any(|h| h == "claude") {
+                let claude_settings = diagnosis.root.join(".claude").join("settings.json");
+                if !targets.contains(&claude_settings) {
+                    targets.push(claude_settings);
+                }
+            }
+            out.push(AutoFix {
+                label: format!(
+                    "Re-emit host config(s) [{}] from policy",
+                    host_list.join(", ")
+                ),
+                targets,
+                reasons,
+                action: FixAction::RefreshHostConfig {
+                    hosts: host_list,
+                    policy_path: path.clone(),
+                },
+            });
+        }
+        // If policy isn't valid, the operator has to fix that first;
+        // we already surface that as a [FAIL] in the regular report.
+    }
+
+    out
+}
+
+/// Return references to issues that auto-fix can NOT touch (policy
+/// decisions, invalid policy, etc.). Used to make the operator
+/// aware they'll still need to handle these manually.
+fn non_fixable_issues(issues: &[ConsistencyIssue]) -> Vec<&ConsistencyIssue> {
+    issues
+        .iter()
+        .filter(|i| {
+            !matches!(
+                i,
+                ConsistencyIssue::SandboxAllowedDomainsStale { .. }
+                    | ConsistencyIssue::SandboxAllowWriteStale { .. }
+            )
+        })
+        .collect()
+}
+
+fn summarise_list(items: &[String], head: usize) -> String {
+    let preview: Vec<String> = items.iter().take(head).cloned().collect();
+    if items.len() > head {
+        format!("{}, …(+{} more)", preview.join(", "), items.len() - head)
+    } else {
+        preview.join(", ")
+    }
+}
+
+fn render_fix_plan(fixes: &[AutoFix], non_fixable: &[&ConsistencyIssue]) -> String {
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str(&format!(
+        "Auto-fixable changes ({} action{}):\n",
+        fixes.len(),
+        if fixes.len() == 1 { "" } else { "s" }
+    ));
+    for (i, f) in fixes.iter().enumerate() {
+        out.push_str(&format!("  {}. {}\n", i + 1, f.label));
+        for t in &f.targets {
+            out.push_str(&format!("       target: {}\n", t.display()));
+        }
+        for r in &f.reasons {
+            out.push_str(&format!("       reason: {r}\n"));
+        }
+    }
+
+    if !non_fixable.is_empty() {
+        out.push('\n');
+        out.push_str(&format!(
+            "Issues that require operator decision (NOT auto-fixed, {}):\n",
+            non_fixable.len()
+        ));
+        for issue in non_fixable {
+            out.push_str(&format!("  - {}\n", issue.summary()));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// Read a y/N from stdin. Refuses to apply non-interactively
+/// (returns false with a stderr explanation). Operators in CI who
+/// genuinely need automated fix-application can call
+/// `denyx host-config --existing replace --host …` directly.
+fn confirm(prompt: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "denyx doctor --fix: stdin is not a TTY. Refusing to apply fixes \
+             non-interactively to avoid surprising file mutations. \
+             Re-run from an interactive terminal, or apply the equivalent \
+             commands manually (see the report above)."
+        );
+        return false;
+    }
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let mut response = String::new();
+    if std::io::stdin().read_line(&mut response).is_err() {
+        return false;
+    }
+    let r = response.trim().to_ascii_lowercase();
+    r == "y" || r == "yes"
+}
+
+fn apply_fix(fix: &AutoFix, project_root: &Path) -> Result<String, String> {
+    match &fix.action {
+        FixAction::PrepareAuditDir => {
+            let (dir_created, gi_updated) = crate::host_config::prepare_audit_dir(project_root)
+                .map_err(|e| format!("prepare_audit_dir: {e}"))?;
+            let mut parts = Vec::new();
+            if dir_created {
+                parts.push("created `.denyx/`".to_string());
+            }
+            if gi_updated {
+                parts.push("updated `.gitignore`".to_string());
+            }
+            if parts.is_empty() {
+                Ok("nothing to do (already in place)".to_string())
+            } else {
+                Ok(parts.join(", "))
+            }
+        }
+        FixAction::RefreshHostConfig { hosts, policy_path } => {
+            // Shell out to ourselves: same binary, host-config
+            // subcommand. Honest and explicit — operator sees in
+            // logs exactly which command was run.
+            let denyx_bin =
+                std::env::current_exe().map_err(|e| format!("locate current exe: {e}"))?;
+            let host_list = hosts.join(",");
+            let out = std::process::Command::new(&denyx_bin)
+                .args([
+                    "host-config",
+                    "--policy",
+                    policy_path
+                        .to_str()
+                        .ok_or("policy path is not valid UTF-8")?,
+                    "--host",
+                    &host_list,
+                    "--existing",
+                    "replace",
+                    "--output-dir",
+                    project_root
+                        .to_str()
+                        .ok_or("project root is not valid UTF-8")?,
+                ])
+                .output()
+                .map_err(|e| format!("spawn `denyx host-config`: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "denyx host-config exit {:?}: {}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            Ok(format!(
+                "regenerated host config(s) for [{host_list}] from policy {}",
+                policy_path.display()
+            ))
+        }
+    }
 }
 
 /// Render a unified report. Returns the string and the exit code
@@ -375,5 +746,207 @@ mod tests {
             out.contains("[OK]     Claude Code lockdown")
                 || out.contains("[OK]   ") && out.contains("Claude Code lockdown")
         );
+    }
+
+    // ─────────────────── --fix planning tests ───────────────────
+
+    fn empty_with_root(root: PathBuf) -> ProjectDiagnosis {
+        ProjectDiagnosis {
+            root,
+            policy: PolicyCheck::Missing,
+            host_configs: vec![],
+            audit_dir: AuditDirCheck::Absent,
+            gitignore: GitignoreCheck::Missing,
+            claude_sandbox: None,
+        }
+    }
+
+    #[test]
+    fn plan_fixes_returns_empty_when_no_drift() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::Excluded;
+        let issues: Vec<ConsistencyIssue> = vec![];
+        assert!(plan_fixes(&d, &issues).is_empty());
+    }
+
+    #[test]
+    fn plan_fixes_adds_audit_dir_fix_when_dir_absent() {
+        let d = empty_with_root(PathBuf::from("/proj"));
+        let fixes = plan_fixes(&d, &[]);
+        assert_eq!(fixes.len(), 1);
+        assert!(matches!(fixes[0].action, FixAction::PrepareAuditDir));
+        assert!(fixes[0].targets.iter().any(|p| p.ends_with(".denyx")));
+    }
+
+    #[test]
+    fn plan_fixes_adds_audit_dir_fix_when_gitignore_does_not_exclude() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::NotExcluded;
+        let fixes = plan_fixes(&d, &[]);
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].action {
+            FixAction::PrepareAuditDir => {}
+            other => panic!("expected PrepareAuditDir, got {other:?}"),
+        }
+        // Reason should mention .gitignore.
+        assert!(fixes[0].reasons.iter().any(|r| r.contains(".gitignore")));
+    }
+
+    #[test]
+    fn plan_fixes_adds_host_config_refresh_for_sandbox_drift() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::Excluded;
+        d.policy = PolicyCheck::Valid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            name: None,
+            capability_count: 1,
+        };
+        let issues = vec![ConsistencyIssue::SandboxAllowedDomainsStale {
+            missing_hosts: vec!["api.openai.com".into()],
+        }];
+        let fixes = plan_fixes(&d, &issues);
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].action {
+            FixAction::RefreshHostConfig { hosts, policy_path } => {
+                assert_eq!(hosts, &vec!["claude".to_string()]);
+                assert_eq!(policy_path, &PathBuf::from("/proj/denyx.toml"));
+            }
+            other => panic!("expected RefreshHostConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_fixes_skips_refresh_when_policy_invalid() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::Excluded;
+        d.policy = PolicyCheck::Invalid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            reason: "self-writable".into(),
+        };
+        let issues = vec![ConsistencyIssue::SandboxAllowedDomainsStale {
+            missing_hosts: vec!["x.com".into()],
+        }];
+        // Refresh would re-read denyx.toml, but it's invalid — can't fix.
+        let fixes = plan_fixes(&d, &issues);
+        assert!(
+            fixes.is_empty(),
+            "should not propose refresh when policy is invalid: {fixes:?}"
+        );
+    }
+
+    #[test]
+    fn plan_fixes_collects_lockdown_drift_per_host() {
+        let mut d = empty_with_root(PathBuf::from("/proj"));
+        d.audit_dir = AuditDirCheck::Present {
+            path: PathBuf::from("/proj/.denyx"),
+        };
+        d.gitignore = GitignoreCheck::Excluded;
+        d.policy = PolicyCheck::Valid {
+            path: PathBuf::from("/proj/denyx.toml"),
+            name: None,
+            capability_count: 1,
+        };
+        d.host_configs.push(HostConfigEntry {
+            path: PathBuf::from("/proj/.mcp.json"),
+            host: HostName::Claude,
+            denyx_servers: vec![],
+            lockdown_state: LockdownState::Absent,
+        });
+        d.host_configs.push(HostConfigEntry {
+            path: PathBuf::from("/proj/opencode.json"),
+            host: HostName::Opencode,
+            denyx_servers: vec![],
+            lockdown_state: LockdownState::Partial {
+                missing: vec!["bash".into(), "read".into()],
+            },
+        });
+        let fixes = plan_fixes(&d, &[]);
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].action {
+            FixAction::RefreshHostConfig { hosts, .. } => {
+                assert!(hosts.contains(&"claude".to_string()));
+                assert!(hosts.contains(&"opencode".to_string()));
+                assert_eq!(hosts.len(), 2);
+            }
+            other => panic!("expected RefreshHostConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_fixable_issues_filters_out_sandbox_drift() {
+        let issues = vec![
+            ConsistencyIssue::SandboxAllowedDomainsStale {
+                missing_hosts: vec!["a".into()],
+            },
+            ConsistencyIssue::ToolUrlNotInNetworkAllow {
+                tool_name: "X".into(),
+                host: "y".into(),
+                method: "GET".into(),
+            },
+            ConsistencyIssue::SandboxAllowWriteStale {
+                missing_paths: vec!["/p".into()],
+            },
+            ConsistencyIssue::ConflictingPolicyPaths {
+                paths: vec![("a".into(), "b".into())],
+            },
+        ];
+        let nf = non_fixable_issues(&issues);
+        // Only the two non-sandbox issues remain.
+        assert_eq!(nf.len(), 2);
+        for issue in nf {
+            assert!(!matches!(
+                issue,
+                ConsistencyIssue::SandboxAllowedDomainsStale { .. }
+                    | ConsistencyIssue::SandboxAllowWriteStale { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn render_fix_plan_lists_actions_targets_and_non_fixable_issues() {
+        let fixes = vec![AutoFix {
+            label: "Test fix".into(),
+            targets: vec![PathBuf::from("/proj/.denyx")],
+            reasons: vec!["audit dir missing".into()],
+            action: FixAction::PrepareAuditDir,
+        }];
+        let issue = ConsistencyIssue::ToolUrlNotInNetworkAllow {
+            tool_name: "API".into(),
+            host: "evil.com".into(),
+            method: "GET".into(),
+        };
+        let nf: Vec<&ConsistencyIssue> = vec![&issue];
+        let s = render_fix_plan(&fixes, &nf);
+        assert!(s.contains("Auto-fixable changes (1 action)"));
+        assert!(s.contains("1. Test fix"));
+        assert!(s.contains("target: /proj/.denyx"));
+        assert!(s.contains("reason: audit dir missing"));
+        assert!(s.contains("Issues that require operator decision"));
+        assert!(s.contains("evil.com"));
+    }
+
+    #[test]
+    fn summarise_list_truncates_with_ellipsis() {
+        let items: Vec<String> = (1..=10).map(|i| format!("item{i}")).collect();
+        let s = summarise_list(&items, 3);
+        assert!(s.starts_with("item1, item2, item3, …(+7 more)"));
+    }
+
+    #[test]
+    fn summarise_list_does_not_truncate_when_under_head() {
+        let items = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(summarise_list(&items, 5), "a, b");
     }
 }

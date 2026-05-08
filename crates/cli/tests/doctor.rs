@@ -126,6 +126,55 @@ fn doctor_detects_conflicting_policy_paths_across_host_configs() {
 }
 
 #[test]
+fn doctor_fix_refuses_when_stdin_is_not_a_tty() {
+    // --fix with piped stdin should refuse to apply, list the plan,
+    // and exit with the diagnosis-level code (not run any fixes).
+    let tmp = unique_tempdir("denyx_fix_no_tty");
+    std::fs::write(tmp.join("denyx.toml"), r#"inherits = "secure-defaults""#).unwrap();
+    // No .denyx/ → triggers the audit-dir auto-fix candidate.
+    let out = Command::new(BIN)
+        .args(["doctor", "--project-path", tmp.to_str().unwrap(), "--fix"])
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .expect("spawn denyx doctor --fix");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Auto-fixable changes"),
+        "should print the plan. stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("stdin is not a TTY") || stdout.contains("stdin is not a TTY"),
+        "should refuse non-interactively. stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Skipped."),
+        "should print Skipped. stdout:\n{stdout}"
+    );
+    // No fix applied — .denyx/ should still NOT exist.
+    assert!(!tmp.join(".denyx").exists());
+}
+
+#[test]
+fn doctor_fix_with_no_drift_says_nothing_to_apply() {
+    let tmp = unique_tempdir("denyx_fix_clean");
+    std::fs::write(tmp.join("denyx.toml"), r#"inherits = "secure-defaults""#).unwrap();
+    std::fs::create_dir_all(tmp.join(".denyx")).unwrap();
+    std::fs::write(tmp.join(".gitignore"), ".denyx/\n").unwrap();
+    let out = Command::new(BIN)
+        .args(["doctor", "--project-path", tmp.to_str().unwrap(), "--fix"])
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--fix: no auto-fixable issues"),
+        "stdout:\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn doctor_clean_setup_exits_zero_with_ready_message() {
     let tmp = unique_tempdir("denyx_clean");
     // Minimal valid setup: policy, host-config wiring denyx-mcp,
