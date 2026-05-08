@@ -242,20 +242,35 @@ fn check_model_present(
     role: &str,
     server: &ServerKind,
 ) -> CheckOutcome {
-    if ids.iter().any(|id| id == wanted) {
+    // Ollama's CLI accepts both `nomic-embed-text` and
+    // `nomic-embed-text:latest` and resolves the bare form to the
+    // `:latest` tag automatically. Mirror that here so the doctor
+    // doesn't false-positive on a model that's actually usable.
+    let matches = |id: &str| -> bool {
+        id == wanted
+            || id == format!("{wanted}:latest")
+            || (wanted.ends_with(":latest") && id == wanted.trim_end_matches(":latest"))
+    };
+    if ids.iter().any(|id| matches(id)) {
         return CheckOutcome::Ok(format!("{role} model `{wanted}` is available"));
     }
+    // Use the right CLI flag name in the fix instructions:
+    // `--model` for chat, `--embed-model` for embed (NOT
+    // `--embed--model` — older code had a double dash typo).
+    let flag_name = if role == "chat" {
+        "model"
+    } else {
+        "embed-model"
+    };
     let fix = match server {
         ServerKind::Ollama { .. } => format!(
             "Pull it with: `ollama pull {wanted}`. Or pick one from the list above \
-             and pass it via --{flag}-model.",
-            flag = if role == "chat" { "" } else { "embed-" }
+             and pass it via --{flag_name}."
         ),
         ServerKind::OpenAiCompat => format!(
             "Most local servers serve a fixed set of models loaded at launch. \
              Either restart the server with this model loaded, or pick one from \
-             the list above and pass it via --{flag}-model.",
-            flag = if role == "chat" { "" } else { "embed-" }
+             the list above and pass it via --{flag_name}."
         ),
         ServerKind::Unreachable => "(server unreachable)".to_string(),
     };
@@ -1052,6 +1067,55 @@ mod tests {
             &ServerKind::Ollama { version: None },
         );
         assert!(matches!(r, CheckOutcome::Ok(_)));
+    }
+
+    #[test]
+    fn check_model_present_handles_ollama_latest_tag_implicitly() {
+        // Ollama serves `nomic-embed-text:latest` but `ollama pull
+        // nomic-embed-text` (and our --embed-model flag) treat the
+        // bare name as canonical. Doctor should accept either form.
+        let ids = vec!["nomic-embed-text:latest".to_string()];
+        let r = check_model_present(
+            &ids,
+            "nomic-embed-text",
+            "embed",
+            &ServerKind::Ollama { version: None },
+        );
+        assert!(
+            matches!(r, CheckOutcome::Ok(_)),
+            "bare name should match :latest tag; got {r:?}"
+        );
+
+        // And the reverse — wanting :latest matches a bare-named id.
+        let ids2 = vec!["nomic-embed-text".to_string()];
+        let r2 = check_model_present(
+            &ids2,
+            "nomic-embed-text:latest",
+            "embed",
+            &ServerKind::Ollama { version: None },
+        );
+        assert!(matches!(r2, CheckOutcome::Ok(_)));
+    }
+
+    #[test]
+    fn check_model_present_fix_uses_correct_embed_flag_name() {
+        let ids: Vec<String> = vec!["other".into()];
+        let r = check_model_present(
+            &ids,
+            "nomic-embed-text",
+            "embed",
+            &ServerKind::Ollama { version: None },
+        );
+        match r {
+            CheckOutcome::Fail { fix, .. } => {
+                assert!(
+                    fix.contains("--embed-model"),
+                    "should use --embed-model (no double dash). fix: {fix}"
+                );
+                assert!(!fix.contains("--embed--model"));
+            }
+            _ => panic!("expected Fail"),
+        }
     }
 
     #[test]
