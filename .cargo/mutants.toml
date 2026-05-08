@@ -112,6 +112,36 @@ exclude_re = [
     # already-clobbered line. Output is byte-identical.
     "taint\\.rs:489:.*replace < with <= in redact_lines",
 
+    # `strip_strings_and_comments` escape-bounds check at line 103:
+    # `if bytes[i] == b'\\' && i + 1 < bytes.len() { i += 2 } else
+    # { i += 1 }`. The bounds check is a guard against `i += 2`
+    # walking off the end of the buffer when bytes[i]='\\' is the
+    # LAST byte. Three mutations at this position are observably
+    # equivalent:
+    #
+    #   - 103:47 `+ → -`: `i - 1 < len`. For all i >= 1 (we're
+    #     past the opener), `i - 1` is in-range and `i - 1 < len`
+    #     is always true.
+    #   - 103:47 `+ → *`: `i * 1 < len` = `i < len`, also always
+    #     true inside this loop (the outer while gates on i < len).
+    #   - 103:51 `< → <=`: `i + 1 <= len`, true when i + 1 == len.
+    #
+    # In all three cases the mutant takes the escape branch (i += 2)
+    # WHERE THE ORIGINAL took the else branch (i += 1) — but ONLY
+    # at the very last byte of the buffer, where the WHILE loop is
+    # about to exit anyway. Specifically the divergence is:
+    #
+    #   bytes[i] == '\\', i == len - 1
+    #   → original: i = len. Mutant: i = len + 1 (or larger).
+    #
+    # Both i values make the post-loop check `i < len && bytes[i]
+    # == q` false (the first conjunct fails), so neither path
+    # consumes a closer byte. Both then `out.push(b' ')`. The outer
+    # while at the top gates on `i < len` — both i values fail that
+    # condition. Output is byte-identical.
+    "verifier\\.rs:103:.*replace \\+ with [-*] in strip_strings_and_comments",
+    "verifier\\.rs:103:.*replace < with <= in strip_strings_and_comments",
+
     # *::as_str helpers (SandboxMode::as_str, FsAction::as_str,
     # HttpVerb::as_str) only feed into error-message rendering. The
     # mutator generates `""` and `"xyzzy"` variants that survive
