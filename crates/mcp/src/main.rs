@@ -74,6 +74,8 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// the elicitation in auto mode) and fail closed.
 const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
 
+mod doctor;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "denyx-mcp",
@@ -81,6 +83,14 @@ const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
     about = "MCP server exposing the Denyx policy-gated runtime over stdio"
 )]
 struct Cli {
+    /// Optional subcommand. When omitted, the binary runs in
+    /// MCP-server mode using the flat flags below — preserving
+    /// every existing `.mcp.json` invocation that doesn't pass a
+    /// subcommand. Use `denyx-mcp doctor` for a read-only
+    /// project-side preflight diagnostic.
+    #[command(subcommand)]
+    command: Option<Subcmd>,
+
     /// Path to the policy TOML file. If omitted (and `--policy-url`
     /// also omitted), falls back to the built-in `secure-defaults`
     /// baseline (denies every effecting capability) and prints a
@@ -166,6 +176,15 @@ struct Cli {
     confirm_mode: ConfirmModeArg,
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum Subcmd {
+    /// Read-only project preflight: inspects `denyx.toml`,
+    /// host-config files, audit-dir setup, `.gitignore` exclusion,
+    /// and the host's built-in-tool lockdown. Prints fix
+    /// instructions for anything that's off; never auto-fixes.
+    Doctor(doctor::DoctorArgs),
+}
+
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 enum ConfirmModeArg {
@@ -176,6 +195,22 @@ enum ConfirmModeArg {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Dispatch on subcommand BEFORE the rest of serve-mode setup.
+    // Doctor is a quick read-only check; it doesn't load the policy
+    // or open any sockets.
+    let parsed = Cli::parse();
+    if let Some(Subcmd::Doctor(args)) = parsed.command {
+        let code = doctor::run(args);
+        std::process::exit(match code {
+            c if c == std::process::ExitCode::from(0) => 0,
+            c if c == std::process::ExitCode::from(1) => 1,
+            _ => 2,
+        });
+    }
+    serve_main(parsed)
+}
+
+fn serve_main(cli_in: Cli) -> anyhow::Result<()> {
     // Cascade-load Denyx control-plane config (the DENYX_AUTH_TOKEN,
     // DENYX_POLICY_URL, DENYX_AUDIT_URL env vars) from dedicated
     // dotenv files. Order: process env > per-user file > system file.
@@ -184,7 +219,7 @@ fn main() -> anyhow::Result<()> {
     // agent by `secure-defaults`. See `load_denyx_config_cascade`.
     load_denyx_config_cascade();
 
-    let mut cli = Cli::parse();
+    let mut cli = cli_in;
     cli.auth_token = std::env::var("DENYX_AUTH_TOKEN").ok();
     cli.policy_url = std::env::var("DENYX_POLICY_URL").ok().or(cli.policy_url);
     cli.audit_url = std::env::var("DENYX_AUDIT_URL").ok().or(cli.audit_url);
