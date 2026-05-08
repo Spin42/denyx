@@ -237,6 +237,11 @@ unrelated keys are preserved, deny lists are unioned (no
 duplicates), the sandbox stanza is deep-merged. Pass
 `--existing replace` to overwrite instead of merge.
 
+If the project is gated by a centralised policy/audit server
+rather than a local TOML file, **also see Step 4b below** —
+add `--policy-url` / `--audit-url` to bake the team endpoints
+into the generated MCP entry.
+
 Pick the right invocation based on the platform you detected in
 Step 0 and the binary location resolved in Step 0.3:
 
@@ -290,6 +295,41 @@ the operation through Denyx (preferred — keeps the policy under
 git review), or re-enable a specific built-in in
 `.claude/settings.json` / `opencode.json` (faster but breaks the
 gate for that operation)."
+
+== Step 4b: Team mode (skip if standalone) ==
+
+Ask the user once: "Is this project gated by a centralised Denyx
+policy/audit server, or is the policy a local file in the repo?"
+If **local file**, skip this step. If **centralised**, the team
+operator already has:
+  - a policy URL (e.g. `https://denyx.internal.example.com/policy`)
+  - optionally an audit URL (same host, `/audit` path)
+  - a per-developer auth token
+
+Re-run host-config with the URL flags:
+
+    <denyx> host-config \
+        --policy ./denyx.toml \
+        --policy-url <https://...policy> \
+        --audit-url <https://...audit> \
+        --host <claude|opencode|both> \
+        --platform <native|lima|wsl> \
+        [--lima-vm denyx | --wsl-distro <distro>] \
+        --sandbox auto \
+        --existing replace
+
+The local `--policy ./denyx.toml` is still required — host-config
+reads it to derive the OS-sandbox `allowedDomains` / `allowWrite`
+stanza. At runtime, `denyx-mcp` fetches the URL policy and ignores
+the local file. The local file should mirror the URL policy
+closely enough that the sandbox stanza isn't a tighter gate than
+the URL policy. Re-run host-config after each policy change to
+refresh the sandbox layer.
+
+The auth token is **not** baked into the config. Tell the user to
+distribute `DENYX_AUTH_TOKEN` via direnv / 1Password CLI / their
+secrets tool — never via shell rc files committed to git. See
+docs/11-denyx-for-teams.md for the team adoption walkthrough.
 
 A note on `--sandbox`:
   - `auto` (default): emit the sandbox stanza with

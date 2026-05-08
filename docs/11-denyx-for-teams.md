@@ -412,16 +412,40 @@ is an HTTP POST handler that writes events to a database
 (Postgres, SQLite, ClickHouse — whatever the team already runs).
 Twenty lines of code in any web framework.
 
-Distribute one environment variable to every developer:
+There are two equivalent ways to wire developers' machines.
+
+**Option A (recommended): bake the URL into the project's MCP
+config via `denyx host-config --audit-url`**, so the audit
+endpoint is part of the committed `.mcp.json` / `opencode.json`
+and contributors don't have to remember to set anything:
+
+```sh
+denyx host-config \
+    --policy ./denyx.toml \
+    --host both \
+    --audit-url https://denyx-audit.internal.example.com/v1/audit \
+    --existing replace
+```
+
+Then distribute only the auth token via direnv / 1Password Shell
+plugin / your secret-distribution tool of choice:
+
+```sh
+export DENYX_AUTH_TOKEN=<per-developer-token>
+```
+
+**Option B: use environment variables for everything.** If the
+audit URL changes per-developer or per-deployment and you don't
+want it in git, leave the host-config in local-audit mode and
+override at runtime:
 
 ```sh
 export DENYX_AUDIT_URL=https://denyx-audit.internal.example.com/v1/audit
 export DENYX_AUTH_TOKEN=<per-developer-token>
 ```
 
-(In practice, set these in `.envrc` / direnv / 1Password Shell
-plugin / your secret-distribution tool of choice — not in
-`.bashrc` checked into git.)
+(The env var wins over the flag, so this works on top of any
+host-config output.)
 
 Now every gated capability call from every developer's agent
 lands in the team's database. You can run queries like:
@@ -440,7 +464,30 @@ Once audit aggregation is working, move the policy file to the
 server. The same handler can also serve `GET /policy` returning
 the canonical policy for the project / team / organisation.
 
-Switch developers from local TOML to:
+Same two-option pattern as Stage 2.
+
+**Option A (recommended): bake the URL into the project config**
+so the team endpoint is part of git history and contributors
+inherit it on clone:
+
+```sh
+denyx host-config \
+    --policy ./denyx.toml \
+    --host both \
+    --policy-url https://denyx-audit.internal.example.com/v1/policy \
+    --audit-url https://denyx-audit.internal.example.com/v1/audit \
+    --existing replace
+```
+
+Note the `--policy ./denyx.toml` flag is still required even
+though the runtime fetches the URL — host-config reads the local
+file once to derive the OS-sandbox `allowedDomains` / `allowWrite`
+stanza in `.claude/settings.json`. Keep the local TOML in sync
+with the server policy (or generate it from the server) and
+re-run host-config when the policy changes a host or write path.
+
+**Option B: env-var override** for setups where the URL must vary
+per developer / per machine:
 
 ```sh
 export DENYX_POLICY_URL=https://denyx-audit.internal.example.com/v1/policy
