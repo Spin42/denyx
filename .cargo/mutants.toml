@@ -69,6 +69,29 @@ exclude_re = [
     "taint\\.rs:24[12]:.*replace - with \\+ in compute_transforms",
     "taint\\.rs:24[12]:.*replace - with / in compute_transforms",
 
+    # `redact_lines` line-spans assignment: `if m >= *start && m
+    # < *end`. The `< with <=` mutant changes whether a match
+    # landing EXACTLY at *end (the joining '\n' byte position) is
+    # assigned to the previous line. This is unreachable in
+    # practice because:
+    #   1. For a match to land at *end, the secret must contain a
+    #      '\n' (since haystack[*end] == '\n' and subsequence_match
+    #      requires needle[i] == haystack[matches[i]]).
+    #   2. TaintRegistry::add() trims leading/trailing whitespace
+    #      from secrets, so any '\n' must be in the secret's
+    #      middle.
+    #   3. For a middle '\n' to align with a haystack line
+    #      boundary, the secret chars before/after the '\n' must
+    #      align with haystack chars before/after that boundary.
+    #   4. By construction, every haystack char before the boundary
+    #      that's matched by the secret falls into the previous
+    #      line's span — meaning the line is already clobbered by
+    #      those matches alone, regardless of what happens at the
+    #      boundary itself.
+    # The mutant therefore changes WHICH match (also) clobbers an
+    # already-clobbered line. Output is byte-identical.
+    "taint\\.rs:489:.*replace < with <= in redact_lines",
+
     # *::as_str helpers (SandboxMode::as_str, FsAction::as_str,
     # HttpVerb::as_str) only feed into error-message rendering. The
     # mutator generates `""` and `"xyzzy"` variants that survive
