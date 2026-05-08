@@ -408,6 +408,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "denyx-local-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
 name = "denyx-mcp"
 version = "0.1.0"
 dependencies = [

@@ -5,6 +5,7 @@ members = [
     "crates/host",
     "crates/cli",
     "crates/mcp",
+    "crates/local-mcp",
 ]
 # Fuzz targets are a libFuzzer + nightly setup with their own
 # Cargo.toml. They share the workspace dependency graph but are not

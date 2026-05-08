@@ -1,0 +1,28 @@
+[package]
+name = "denyx-local-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Denyx local-executor MCP server: routes a cloud orchestrator's step description to a local Ollama model that emits Starlark, then runs the program through denyx-mcp under policy."
+readme = "README.md"
+keywords = ["security", "ai-agent", "mcp", "ollama", "local-executor"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "denyx-local-mcp"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ureq.workspace = true
