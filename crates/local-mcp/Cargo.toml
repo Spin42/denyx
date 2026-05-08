@@ -20,6 +20,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+denyx-host.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 serde.workspace = true

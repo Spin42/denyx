@@ -567,6 +567,7 @@ fn end_to_end_precompute_warms_embedding_cache() {
 // ─────────────────────── Doctor subcommand ───────────────────────
 
 fn run_doctor(endpoint: &str, model: &str, embed_model: &str) -> std::process::Output {
+    // Same as run_doctor_with_project but without project-side checks.
     Command::new(BIN)
         .args([
             "doctor",
@@ -576,17 +577,37 @@ fn run_doctor(endpoint: &str, model: &str, embed_model: &str) -> std::process::O
             model,
             "--embed-model",
             embed_model,
+            "--no-project",
         ])
         .output()
         .expect("spawn denyx-local-mcp doctor")
 }
 
+fn run_doctor_with_project(endpoint: &str, project: &std::path::Path) -> std::process::Output {
+    Command::new(BIN)
+        .args([
+            "doctor",
+            "--endpoint",
+            endpoint,
+            "--model",
+            "qwen2.5-coder:7b",
+            "--embed-model",
+            "nomic-embed-text",
+            "--project-path",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn denyx-local-mcp doctor (with project)")
+}
+
 /// Scan mode: no `--endpoint`. The binary reads the
 /// `DENYX_LOCAL_MCP_DOCTOR_SCAN` env var to override the default
 /// endpoint list — the tests use that to point at the mock.
+/// All scan-mode integration tests pass `--no-project` to skip the
+/// cwd-scoped project-side checks (those have their own tests).
 fn run_doctor_scan(scan_endpoints: &str) -> std::process::Output {
     Command::new(BIN)
-        .args(["doctor"])
+        .args(["doctor", "--no-project"])
         .env("DENYX_LOCAL_MCP_DOCTOR_SCAN", scan_endpoints)
         .output()
         .expect("spawn denyx-local-mcp doctor (scan mode)")
@@ -700,6 +721,85 @@ fn doctor_scan_mode_with_no_servers_running_prints_install_hints() {
     assert!(stdout.contains("ollama serve"));
     assert!(stdout.contains("llama-server"));
     assert!(stdout.contains("LM Studio"));
+}
+
+#[test]
+fn doctor_with_project_path_warns_when_only_denyx_mcp_is_wired() {
+    // Build a tempdir that has a `.mcp.json` wiring denyx-mcp
+    // (the standalone gate, NOT the local-executor bridge).
+    // Doctor should still succeed at the LLM level but WARN that
+    // the local-executor bridge is being bypassed.
+    let mock = MockOllama::new(vec![]);
+    let tmp = unique_tempdir("doctor_project_warn");
+    std::fs::write(
+        tmp.join(".mcp.json"),
+        r#"{"mcpServers":{"denyx":{"command":"denyx-mcp","args":["--policy","./denyx.toml"]}}}"#,
+    )
+    .unwrap();
+    let out = run_doctor_with_project(&mock.url(), &tmp);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("project:"),
+        "should print project root header. stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[WARN] Claude Code"),
+        "should warn about Claude wiring. stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("denyx-mcp is wired but denyx-local-mcp is NOT"),
+        "stdout:\n{stdout}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "warning should produce exit code 1 (not failure). stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn doctor_with_project_path_passes_when_denyx_local_mcp_is_wired() {
+    let mock = MockOllama::new(vec![]);
+    let tmp = unique_tempdir("doctor_project_ok");
+    std::fs::write(
+        tmp.join(".mcp.json"),
+        r#"{"mcpServers":{"local-executor":{"command":"denyx-local-mcp","args":["serve","--policy","./denyx.toml"]}}}"#,
+    )
+    .unwrap();
+    // Add an active Claude Code lockdown so the lockdown check is OK.
+    std::fs::create_dir_all(tmp.join(".claude")).unwrap();
+    std::fs::write(
+        tmp.join(".claude").join("settings.json"),
+        r#"{"permissions":{"deny":["Bash","Edit","Write","Read","Glob","Grep","WebFetch","WebSearch"]}}"#,
+    )
+    .unwrap();
+    let out = run_doctor_with_project(&mock.url(), &tmp);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[OK]   Claude Code"),
+        "expected OK for Claude wiring. stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("denyx-local-mcp wired"));
+    assert!(stdout.contains("[OK]"));
+}
+
+#[test]
+fn doctor_with_project_path_reports_missing_policy_as_info_not_failure() {
+    let mock = MockOllama::new(vec![]);
+    let tmp = unique_tempdir("doctor_project_no_policy");
+    // No denyx.toml. No host-config either.
+    let out = run_doctor_with_project(&mock.url(), &tmp);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[INFO] denyx.toml: absent"),
+        "expected INFO for missing policy. stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("secure-defaults baseline"),
+        "should explain the safe-by-design fallback. stdout:\n{stdout}"
+    );
+    // INFO must NOT bump exit code to 2.
+    assert_ne!(out.status.code(), Some(2));
 }
 
 #[test]

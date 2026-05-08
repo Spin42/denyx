@@ -144,6 +144,20 @@ struct DoctorCli {
     /// Only used in targeted mode.
     #[arg(long, default_value = "nomic-embed-text")]
     embed_model: String,
+
+    /// Project root to inspect for `denyx.toml`, host-config files,
+    /// and audit-dir setup. Defaults to the current working
+    /// directory; pass a different path if you're running doctor
+    /// from somewhere other than the project root. Pass `--no-project`
+    /// to skip the project-side checks entirely.
+    #[arg(long)]
+    project_path: Option<PathBuf>,
+
+    /// Skip the project-side checks (policy file, host configs,
+    /// audit dir, .gitignore). Useful when running `doctor` purely
+    /// to verify a remote LLM endpoint.
+    #[arg(long)]
+    no_project: bool,
 }
 
 fn main() -> ExitCode {
@@ -156,27 +170,43 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Cmd::Doctor(args) => match args.endpoint {
-            None => {
-                // Scan mode: probe known ports, suggest a setup.
-                let scan = doctor::scan();
-                let (out, code) = doctor::render_scan(&scan);
-                print!("{out}");
-                ExitCode::from(code as u8)
+        Cmd::Doctor(args) => {
+            // Resolve project path: explicit --project-path > cwd
+            // (unless --no-project disables it).
+            let project_path = if args.no_project {
+                None
+            } else {
+                args.project_path
+                    .clone()
+                    .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+                    .or_else(doctor::default_project_path)
+            };
+            match args.endpoint {
+                None => {
+                    // Scan mode: probe known ports, suggest a setup.
+                    let scan = doctor::scan();
+                    let project = project_path
+                        .as_deref()
+                        .map(denyx_host::project_diagnosis::diagnose);
+                    let (out, code) = doctor::render_scan_with_project(&scan, project.as_ref());
+                    print!("{out}");
+                    ExitCode::from(code as u8)
+                }
+                Some(ep) => {
+                    // Targeted mode: verify a specific endpoint + models.
+                    let report = doctor::run(&DoctorArgs {
+                        endpoint: ep,
+                        api_key: args.api_key,
+                        chat_model: args.model,
+                        embed_model: args.embed_model,
+                        project_path,
+                    });
+                    let (out, code) = doctor::render(&report);
+                    print!("{out}");
+                    ExitCode::from(code as u8)
+                }
             }
-            Some(ep) => {
-                // Targeted mode: verify a specific endpoint + models.
-                let report = doctor::run(&DoctorArgs {
-                    endpoint: ep,
-                    api_key: args.api_key,
-                    chat_model: args.model,
-                    embed_model: args.embed_model,
-                });
-                let (out, code) = doctor::render(&report);
-                print!("{out}");
-                ExitCode::from(code as u8)
-            }
-        },
+        }
     }
 }
 

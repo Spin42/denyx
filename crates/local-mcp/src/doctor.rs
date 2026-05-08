@@ -18,10 +18,15 @@
 //! design — its job is "tell the operator what's wrong and how to
 //! fix it," not "fix it for them."
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+use denyx_host::project_diagnosis::{
+    self, AuditDirCheck, DenyxFlavor, GitignoreCheck, LockdownState, PolicyCheck, ProjectDiagnosis,
+};
 
 use crate::openai_compat::OpenAiCompatEmbed;
 use crate::rag::EmbedProvider;
@@ -73,6 +78,9 @@ pub struct Report {
     pub embed_call_check: CheckOutcome,
     /// Only populated on Ollama (where `/api/show` exposes num_ctx).
     pub context_check: Option<CheckOutcome>,
+    /// Only populated when the operator passed `--project-path`
+    /// (or relied on the cwd default).
+    pub project: Option<ProjectDiagnosis>,
 }
 
 /// Inputs to [`run`]. Mirrors the CLI flags.
@@ -82,6 +90,10 @@ pub struct DoctorArgs {
     pub api_key: Option<String>,
     pub chat_model: String,
     pub embed_model: String,
+    /// The project root to inspect for host-configs + policy. None
+    /// means "skip the project-side checks" (the LLM-side checks
+    /// still run).
+    pub project_path: Option<std::path::PathBuf>,
 }
 
 /// Fingerprint the server, then run every check that applies to it.
@@ -138,6 +150,11 @@ pub fn run(args: &DoctorArgs) -> Report {
         _ => None,
     };
 
+    let project = args
+        .project_path
+        .as_deref()
+        .map(project_diagnosis::diagnose);
+
     Report {
         endpoint: args.endpoint.clone(),
         server,
@@ -147,6 +164,7 @@ pub fn run(args: &DoctorArgs) -> Report {
         embed_model_check,
         embed_call_check,
         context_check,
+        project,
     }
 }
 
@@ -378,7 +396,11 @@ pub fn render(report: &Report) -> (String, i32) {
 
     out.push_str("denyx-local-mcp doctor\n");
     out.push_str(&format!("  endpoint: {}\n", report.endpoint));
-    out.push_str(&format!("  server:   {}\n\n", report.server.label()));
+    out.push_str(&format!("  server:   {}\n", report.server.label()));
+    if let Some(p) = &report.project {
+        out.push_str(&format!("  project:  {}\n", p.root.display()));
+    }
+    out.push('\n');
 
     write_check(&mut out, "chat model", &report.chat_model_check, &mut worst);
     write_check(
@@ -390,6 +412,10 @@ pub fn render(report: &Report) -> (String, i32) {
     write_check(&mut out, "embed call", &report.embed_call_check, &mut worst);
     if let Some(c) = &report.context_check {
         write_check(&mut out, "ollama num_ctx", c, &mut worst);
+    }
+
+    if let Some(p) = &report.project {
+        render_project_section_for_local_mcp(&mut out, p, &mut worst);
     }
 
     out.push('\n');
@@ -428,6 +454,237 @@ fn write_check(out: &mut String, label: &str, c: &CheckOutcome, worst: &mut i32)
         }
     }
 }
+
+// Small typed write helpers used by the project-section renderer.
+// Each one bumps `worst` to the appropriate severity.
+fn write_ok(out: &mut String, label: &str, msg: &str) {
+    out.push_str(&format!("  [OK]   {label}: {msg}\n"));
+}
+fn write_info(out: &mut String, label: &str, msg: &str, fix: &str, _worst: &mut i32) {
+    // INFO is "neutral observation, not failure" — doesn't bump worst.
+    out.push_str(&format!("  [INFO] {label}: {msg}\n"));
+    if !fix.is_empty() {
+        for line in fix.lines() {
+            out.push_str(&format!("         {line}\n"));
+        }
+    }
+}
+fn write_warn(out: &mut String, label: &str, msg: &str, fix: &str, worst: &mut i32) {
+    out.push_str(&format!("  [WARN] {label}: {msg}\n"));
+    for line in fix.lines() {
+        out.push_str(&format!("         {line}\n"));
+    }
+    if *worst < 1 {
+        *worst = 1;
+    }
+}
+fn write_fail(out: &mut String, label: &str, msg: &str, fix: &str, worst: &mut i32) {
+    out.push_str(&format!("  [FAIL] {label}: {msg}\n"));
+    for line in fix.lines() {
+        out.push_str(&format!("         {line}\n"));
+    }
+    *worst = 2;
+}
+
+/// Render the project-diagnosis section from the **local-executor's
+/// perspective**: warns when only `denyx-mcp` (the standalone gate)
+/// is wired in any host-config, since that means the operator's
+/// project is bypassing this binary entirely.
+pub fn render_project_section_for_local_mcp(
+    out: &mut String,
+    p: &ProjectDiagnosis,
+    worst: &mut i32,
+) {
+    // Policy.
+    match &p.policy {
+        PolicyCheck::Valid {
+            name,
+            capability_count,
+            ..
+        } => {
+            let label = name.as_deref().unwrap_or("(unnamed)");
+            write_ok(
+                out,
+                "denyx.toml",
+                &format!("present, valid — '{label}' ({capability_count} capabilities)"),
+            );
+        }
+        PolicyCheck::Missing => {
+            write_info(
+                out,
+                "denyx.toml",
+                "absent — runtime falls back to secure-defaults baseline (deny all)",
+                "Generate one with `denyx init --lang <python|node|rust|ruby|go>` if you want to grant capabilities.",
+                worst,
+            );
+        }
+        PolicyCheck::Invalid { reason, .. } => {
+            write_fail(
+                out,
+                "denyx.toml",
+                &format!("present but invalid: {reason}"),
+                "Run `denyx policy validate ./denyx.toml` for the full diagnostic.",
+                worst,
+            );
+        }
+    }
+
+    // Host configs: the local-executor's main concern is whether
+    // denyx-local-mcp is wired anywhere.
+    if p.host_configs.is_empty() {
+        write_info(
+            out,
+            "host config",
+            "no .mcp.json / opencode.json / .cursor/mcp.json / .vscode/settings.json / .continue/config.json in this project",
+            "Run `denyx host-config --policy ./denyx.toml --host claude` (or the setup prompt) to wire the local executor as the project's MCP server.",
+            worst,
+        );
+    } else {
+        for hc in &p.host_configs {
+            let label = format!("{} ({})", hc.host.label(), hc.path.display());
+            let local_servers: Vec<&_> = hc
+                .denyx_servers
+                .iter()
+                .filter(|s| s.flavor == DenyxFlavor::DenyxLocalMcp)
+                .collect();
+            let mcp_servers: Vec<&_> = hc
+                .denyx_servers
+                .iter()
+                .filter(|s| s.flavor == DenyxFlavor::DenyxMcp)
+                .collect();
+            if !local_servers.is_empty() {
+                let names: Vec<&str> = local_servers.iter().map(|s| s.name.as_str()).collect();
+                write_ok(
+                    out,
+                    &label,
+                    &format!("denyx-local-mcp wired (entries: {})", names.join(", ")),
+                );
+            } else if !mcp_servers.is_empty() {
+                let names: Vec<&str> = mcp_servers.iter().map(|s| s.name.as_str()).collect();
+                write_warn(
+                    out,
+                    &label,
+                    &format!(
+                        "denyx-mcp is wired but denyx-local-mcp is NOT (entries: {})",
+                        names.join(", ")
+                    ),
+                    "Your project is configured for the standalone-gate shape. \
+                     The local-executor bridge is being bypassed — every gated \
+                     call goes straight to the cloud orchestrator. To switch, \
+                     edit the host-config so the command is `denyx-local-mcp` \
+                     (with `serve` and the same --policy / --mcp-bin args). \
+                     See docs/12-local-executor.md.",
+                    worst,
+                );
+            } else if !hc.denyx_servers.is_empty() {
+                let names: Vec<&str> = hc.denyx_servers.iter().map(|s| s.name.as_str()).collect();
+                write_info(
+                    out,
+                    &label,
+                    &format!(
+                        "MCP entries present but no Denyx binary recognised (names: {})",
+                        names.join(", ")
+                    ),
+                    "If one of these IS supposed to be Denyx, check the command path.",
+                    worst,
+                );
+            } else {
+                write_info(
+                    out,
+                    &label,
+                    "no MCP server entries in this file",
+                    "Run `denyx host-config` to add the local-executor wiring.",
+                    worst,
+                );
+            }
+            // Lockdown state.
+            match &hc.lockdown_state {
+                LockdownState::Active => {
+                    write_ok(out, &format!("  └─ {} lockdown", hc.host.label()), "active");
+                }
+                LockdownState::Partial { missing } => write_warn(
+                    out,
+                    &format!("  └─ {} lockdown", hc.host.label()),
+                    &format!("partial — missing deny entries for: {}", missing.join(", ")),
+                    "Re-run `denyx host-config --existing replace --host <X>` to refresh the deny list.",
+                    worst,
+                ),
+                LockdownState::Absent => write_warn(
+                    out,
+                    &format!("  └─ {} lockdown", hc.host.label()),
+                    "no deny list configured",
+                    "Run `denyx host-config --policy ./denyx.toml --host <X>` to add it.",
+                    worst,
+                ),
+                LockdownState::NotApplicable => {
+                    // Cursor / Copilot — UI-only deny. Just inform.
+                    write_info(
+                        out,
+                        &format!("  └─ {} lockdown", hc.host.label()),
+                        "no project-local deny mechanism on this host (UI-only)",
+                        "",
+                        worst,
+                    );
+                }
+            }
+        }
+    }
+
+    // Audit dir + gitignore. The local-executor's child denyx-mcp
+    // writes the audit log, so these still matter.
+    match &p.audit_dir {
+        AuditDirCheck::Present { .. } => write_ok(out, ".denyx/", "audit dir present"),
+        AuditDirCheck::Absent => write_info(
+            out,
+            ".denyx/",
+            "audit dir not yet created (created on first run if --audit-log writes there)",
+            "",
+            worst,
+        ),
+        AuditDirCheck::NotADirectory { path } => write_fail(
+            out,
+            ".denyx/",
+            &format!(
+                "{} exists but is a regular file, not a directory",
+                path.display()
+            ),
+            "Remove the file and recreate as a directory: `rm .denyx && mkdir .denyx`.",
+            worst,
+        ),
+    }
+    match &p.gitignore {
+        GitignoreCheck::Excluded => write_ok(out, ".gitignore", "audit dir excluded"),
+        GitignoreCheck::NotExcluded => write_warn(
+            out,
+            ".gitignore",
+            ".denyx/ is not in .gitignore — audit logs may get committed",
+            "Add `.denyx/` to your project's .gitignore.",
+            worst,
+        ),
+        GitignoreCheck::Missing => write_info(
+            out,
+            ".gitignore",
+            "no .gitignore in this project",
+            "If this project uses git, add a .gitignore with `.denyx/` to keep audit logs out of commits.",
+            worst,
+        ),
+    }
+}
+
+/// Convenience helper: project path "the cwd of the doctor invocation,
+/// canonicalized." Returns `None` if the cwd can't be determined
+/// (which would be very unusual).
+pub fn default_project_path() -> Option<std::path::PathBuf> {
+    std::env::current_dir().ok().and_then(|p| {
+        // Try canonical first; fall back to as-is on platforms
+        // where canonicalize fails for some reason.
+        std::fs::canonicalize(&p).ok().or(Some(p))
+    })
+}
+
+// Suppress dead-code warning until both binaries use these helpers.
+#[allow(dead_code)]
+fn _force_used(_p: &Path) {}
 
 // ─────────────────────── HTTP helpers ───────────────────────
 
@@ -614,6 +871,25 @@ pub fn suggest_embed_model(models: &[String]) -> Option<String> {
 /// string and the exit code (0 if at least one server with both a
 /// suggested chat and embed model was found; 1 otherwise — there's
 /// always something to do).
+pub fn render_scan_with_project(
+    scan: &ScanResult,
+    project: Option<&ProjectDiagnosis>,
+) -> (String, i32) {
+    let (mut out, mut code) = render_scan(scan);
+    if let Some(p) = project {
+        // Insert the project section just before the "Suggested setup"
+        // / "Ready-to-paste" / "No local LLM server detected" trailer.
+        // Simplest: append project section after current output and
+        // re-evaluate exit code.
+        let mut worst = code;
+        out.push('\n');
+        out.push_str(&format!("Project ({}):\n", p.root.display()));
+        render_project_section_for_local_mcp(&mut out, p, &mut worst);
+        code = worst.max(code);
+    }
+    (out, code)
+}
+
 pub fn render_scan(scan: &ScanResult) -> (String, i32) {
     let mut out = String::new();
     out.push_str("denyx-local-mcp doctor — scanning common local-LLM endpoints\n\n");
@@ -829,6 +1105,7 @@ mod tests {
             embed_model_check: CheckOutcome::Ok("present".into()),
             embed_call_check: CheckOutcome::Ok("16-dim".into()),
             context_check: Some(CheckOutcome::Ok("num_ctx = 8192".into())),
+            project: None,
         };
         let (out, code) = render(&r);
         assert_eq!(code, 2);
@@ -853,6 +1130,7 @@ mod tests {
                 msg: "num_ctx = 2048".into(),
                 fix: "build a Modelfile".into(),
             }),
+            project: None,
         };
         let (out, code) = render(&r);
         assert_eq!(code, 1);
@@ -1023,6 +1301,7 @@ mod tests {
             embed_model_check: CheckOutcome::Ok("b".into()),
             embed_call_check: CheckOutcome::Ok("c".into()),
             context_check: None,
+            project: None,
         };
         let (out, code) = render(&r);
         assert_eq!(code, 0);

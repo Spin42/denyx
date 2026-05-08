@@ -413,6 +413,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "denyx-host",
  "serde",
  "serde_json",
  "toml",
