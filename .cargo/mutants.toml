@@ -69,6 +69,26 @@ exclude_re = [
     "taint\\.rs:24[12]:.*replace - with \\+ in compute_transforms",
     "taint\\.rs:24[12]:.*replace - with / in compute_transforms",
 
+    # `looks_like_path_arg` chained `||` (lines 1574-1576): the
+    # path-prefix detection chain is
+    #   arg.starts_with('/')
+    #     || arg.starts_with("./")
+    #     || arg.starts_with("../")
+    #     || arg.starts_with("~/")
+    #     || arg == "~"
+    # Mutating any `||` between two `starts_with` calls to `&&`
+    # short-circuits that chain to false (a string can't start with
+    # two different prefixes simultaneously). The function then
+    # falls through to `if arg.contains('/') { return true; }`,
+    # which catches the same paths (anything with `/` returns true
+    # there). The only case that's NOT caught by the contains('/')
+    # fallthrough is `arg == "~"` — and that case is killed by
+    # `looks_like_path_arg_treats_three_elements_with_path` in
+    # gate_decisions.rs (which targets the `||` between "~/" and
+    # "~"). The other three `||` mutations are observably
+    # equivalent.
+    "lib\\.rs:157[456]:.*replace \\|\\| with && in looks_like_path_arg",
+
     # `redact_lines` line-spans assignment: `if m >= *start && m
     # < *end`. The `< with <=` mutant changes whether a match
     # landing EXACTLY at *end (the joining '\n' byte position) is
