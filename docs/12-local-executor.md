@@ -25,22 +25,24 @@ them.
                   │  delegate_to_local("read manifest, extract version")
                   ▼
    ┌──────────────────────────────────┐
-   │   local_mcp.py                   │   MCP server you launch.
-   │   (examples/local_executor/)     │   bridges orchestrator ↔ local model.
+   │   denyx-local-mcp                │   MCP server you launch (Rust).
+   │   (production: cargo install)    │   bridges orchestrator ↔ local model.
+   │   or examples/local_mcp.py       │   (Python reference also available.)
    └──────────────────────────────────┘
                   │
-                  │  prompts qwen with system_prompt + step + RAG-retrieved examples
+                  │  prompts the local model with system_prompt + step + RAG examples
                   ▼
    ┌──────────────────────────────────┐
-   │   qwen2.5-coder:7b (Ollama)      │   emits a Starlark program.
-   │   on http://localhost:11434      │
+   │   Local model server             │   emits a Starlark program.
+   │   (Ollama, llama.cpp, LM Studio, │
+   │    vLLM, LocalAI, …)             │
    └──────────────────────────────────┘
                   │
                   │  Starlark source
                   ▼
    ┌──────────────────────────────────┐
-   │   denyx-mcp                      │   subprocess of local_mcp.py.
-   │   (subprocess of local_mcp.py)   │   enforces the project policy.
+   │   denyx-mcp                      │   subprocess of denyx-local-mcp.
+   │   (the policy gate)              │   enforces the project policy.
    └──────────────────────────────────┘
                   │
                   │  permitted side effects
@@ -65,15 +67,16 @@ Three things to note:
   read, network call, subprocess — runs through it under one policy.
   One audit log captures the whole run.
 
-## What's in `examples/local_executor/`
+## Where the code lives
 
-| File                  | Role                                                                  |
-|-----------------------|-----------------------------------------------------------------------|
-| `run.py`              | Phase 1 harness: single-step tasks, local 7B alone, **no orchestrator**. |
-| `run_multistep.py`    | Phase 1.5: 36 multi-step tasks, local 7B alone, **no orchestrator**. |
-| `run_orchestrated.py` | Phase 2: same 36-task suite, with Sonnet/Opus on top via `claude -p`. |
-| `local_mcp.py`        | The bridge MCP server: delegate_to_local → qwen → denyx-mcp.         |
-| `rag.py`              | Embedding-based retrieval (nomic-embed-text + 19 worked examples).   |
+| Path                                       | Role                                                                  |
+|--------------------------------------------|-----------------------------------------------------------------------|
+| `crates/local-mcp/` (`denyx-local-mcp`)    | **Production binary.** Rust, Ollama + OpenAI-compat providers, single-binary install via `cargo install denyx-local-mcp`. |
+| `examples/local_executor/local_mcp.py`     | **Reference implementation.** Python; what the eval harnesses below drive. Easier to fork for retrieval / prompt experiments. |
+| `examples/local_executor/rag.py`           | Embedding-based retrieval library used by the Python reference (also ported to Rust inside `crates/local-mcp/src/rag.rs`). |
+| `examples/local_executor/run.py`           | Phase 1 harness: single-step tasks, local 7B alone, **no orchestrator**. |
+| `examples/local_executor/run_multistep.py` | Phase 1.5: 36 multi-step tasks, local 7B alone, **no orchestrator**. |
+| `examples/local_executor/run_orchestrated.py` | Phase 2: same 36-task suite, with Sonnet/Opus on top via `claude -p`. |
 
 ## What's measured
 
@@ -212,33 +215,77 @@ model has no path to side effects except through the bridge.
 If you've already wired `denyx-mcp` directly per
 [08-quickstart.md](08-quickstart.md), here's the diff:
 
-|                       | Direct (`denyx-mcp`)                  | Local-executor (`local_mcp.py`)                 |
+|                       | Direct (`denyx-mcp`)                  | Local-executor (`denyx-local-mcp`)              |
 |-----------------------|---------------------------------------|-------------------------------------------------|
-| MCP `command`         | `denyx-mcp`                           | `python3`                                       |
-| MCP `args`            | `--policy ./denyx.toml ...`           | `<path>/local_mcp.py --policy ./denyx.toml ...` |
+| MCP `command`         | `denyx-mcp`                           | `denyx-local-mcp`                               |
+| MCP `args`            | `--policy ./denyx.toml ...`           | `--policy ./denyx.toml --mcp-bin <denyx-mcp>`   |
 | Tools the model sees  | Full `denyx_*` family                 | `delegate_to_local` only                        |
-| Who writes Starlark   | The cloud model                       | The local 7B (qwen2.5-coder:7b)                 |
+| Who writes Starlark   | The cloud model                       | The local 7B (qwen2.5-coder:7b by default)      |
 | Cloud-side context    | Every `fs.read` body, HTTP response, env value | Only the bridge's per-step result string |
-| Per-call latency      | Pipe round-trip (~ms)                 | + qwen inference (1–4 s typical)                |
+| Per-call latency      | Pipe round-trip (~ms)                 | + local inference (1–4 s typical)               |
 | Cost shape            | Cloud API tokens for every effect     | Cloud API for delegation only; local inference is free |
 
 Step 1 (policy) and Step 4 (built-in lockdown) are identical to the
-standard flow. Step 2 (MCP config) and Step 3 (Ollama) are what
+standard flow. Step 2 (MCP config) and Step 3 (local model) are what
 differ.
+
+> **Production binary vs. example bridge.** The recommended path is
+> the Rust binary `denyx-local-mcp` (this crate). The Python
+> implementation in `examples/local_executor/local_mcp.py` stays as
+> the reference / research artifact — it's what the eval harnesses
+> (`run_multistep.py`, `run_pentest.py`, `run_exfil.py`) drive, and
+> it's easier to fork for retrieval / prompt experiments. Both
+> implementations expose the same `delegate_to_local` tool and the
+> same on-the-wire shape, so swapping is a one-line MCP config
+> change.
 
 ### Step 0 — Prerequisites
 
-| Component                   | Why                                                                                       | Install                                                  |
-|-----------------------------|-------------------------------------------------------------------------------------------|----------------------------------------------------------|
-| Denyx **source checkout**   | `local_mcp.py` is a Python script; `cargo install` does not bundle it.                    | `git clone https://github.com/Spin42/denyx`              |
-| `denyx-mcp` binary          | The bridge spawns it as a subprocess.                                                     | `cargo install denyx-cli denyx-mcp` (or source build)    |
-| Ollama + `qwen2.5-coder:7b` | The local executor model. ~5 GB.                                                          | `ollama pull qwen2.5-coder:7b`                           |
-| Ollama + `nomic-embed-text` | RAG retrieval. Without it the model writes worse Starlark. ~270 MB.                       | `ollama pull nomic-embed-text`                           |
-| Python 3.11+                | `local_mcp.py` uses stdlib `tomllib`.                                                     | OS package manager                                       |
-| Claude Code 2.x or opencode | The cloud orchestrator.                                                                   | See [09-claude-code.md](09-claude-code.md) / [10-opencode.md](10-opencode.md) |
+| Component                       | Why                                                                                       | Install                                                  |
+|---------------------------------|-------------------------------------------------------------------------------------------|----------------------------------------------------------|
+| `denyx-local-mcp` binary        | The MCP server the cloud orchestrator talks to. Rust, single binary, no Python required.  | `cargo install denyx-local-mcp` (or source build)        |
+| `denyx-mcp` binary              | `denyx-local-mcp` spawns it as a subprocess (the policy gate).                            | `cargo install denyx-cli denyx-mcp` (or source build)    |
+| A local model server            | Hosts the executor model. **Default: Ollama**, but any OpenAI-compatible server works (llama.cpp, LM Studio, vLLM, LocalAI, Text Generation WebUI). | Provider-specific — see "Provider selection" below. |
+| Executor model (~5 GB)          | The model that emits Starlark. Default: `qwen2.5-coder:7b`. Any 7B-class instruct/coder model works; quality scales with capability.                | `ollama pull qwen2.5-coder:7b` (Ollama) or equivalent.   |
+| Embedding model (~270 MB)       | RAG retrieval over the example library. Without it the executor writes worse Starlark.    | `ollama pull nomic-embed-text` (Ollama) or equivalent.   |
+| Claude Code 2.x or opencode     | The cloud orchestrator.                                                                   | See [09-claude-code.md](09-claude-code.md) / [10-opencode.md](10-opencode.md) |
 
 `bubblewrap` is not required for this flow unless your `denyx.toml`
 opts into the Linux kernel sandbox.
+
+#### Provider selection
+
+`denyx-local-mcp` speaks two API shapes:
+
+| `--provider`    | Endpoints used                  | Works with                                                |
+|-----------------|---------------------------------|-----------------------------------------------------------|
+| `ollama` (default) | `/api/chat` + `/api/embeddings` | Ollama (`http://localhost:11434`)                        |
+| `openai-compat` | `/chat/completions` + `/embeddings` | llama.cpp's server, LM Studio, vLLM, LocalAI, Text Generation WebUI's OpenAI extension, Ollama's compat layer (`/v1`), and any other server speaking the OpenAI v1 API |
+
+Pass `--endpoint <URL>` to point at the right host. For OpenAI-compat
+servers that need auth, also pass `--api-key <token>` (or set
+`DENYX_LOCAL_API_KEY`). Examples:
+
+```sh
+# llama.cpp server on default port
+denyx-local-mcp --provider openai-compat --endpoint http://localhost:8080/v1 \
+                --policy ./denyx.toml --mcp-bin denyx-mcp
+
+# LM Studio
+denyx-local-mcp --provider openai-compat --endpoint http://localhost:1234/v1 \
+                --model "qwen2.5-coder-7b-instruct" \
+                --embed-model "nomic-embed-text-v1.5" \
+                --policy ./denyx.toml --mcp-bin denyx-mcp
+
+# vLLM
+denyx-local-mcp --provider openai-compat --endpoint http://localhost:8000/v1 \
+                --policy ./denyx.toml --mcp-bin denyx-mcp
+```
+
+A custom provider (anything else exposing chat + embeddings over
+HTTP) is one trait impl away — `denyx-local-mcp` is library-first
+under the hood, so depending on the crate and writing a struct that
+implements `ChatProvider` + `EmbedProvider` is enough.
 
 ### Step 1 — Write your `denyx.toml`
 
@@ -263,20 +310,19 @@ flow:
   [URL choice and search-style tasks](#url-choice-and-search-style-tasks)
   below.
 
-### Step 2 — Wire `local_mcp.py` into Claude Code or opencode
+### Step 2 — Wire `denyx-local-mcp` into Claude Code or opencode
 
-> **Why `python3` and not `denyx-mcp` as the `command`?** In this
-> architecture, the MCP server the host talks to is the **Python
-> bridge** (`local_mcp.py`), not `denyx-mcp` directly. The bridge is
-> what exposes the `delegate_to_local` tool to the cloud orchestrator
-> and what runs the local-7B → denyx-mcp pipeline behind it.
-> `denyx-mcp` is still in the picture — `local_mcp.py` spawns it as
-> a subprocess for every gated call (see the architecture diagram at
-> the top of this doc) — but it isn't the process Claude Code or
-> opencode launches. `python3 local_mcp.py` is the MCP server in
-> this flow.
+> **Why `denyx-local-mcp` and not `denyx-mcp` as the `command`?** In
+> this architecture, the MCP server the host talks to is the
+> **bridge** (`denyx-local-mcp`), not `denyx-mcp` directly. The
+> bridge is what exposes the `delegate_to_local` tool to the cloud
+> orchestrator and what runs the local-model → denyx-mcp pipeline
+> behind it. `denyx-mcp` is still in the picture — `denyx-local-mcp`
+> spawns it as a subprocess for every gated call (see the
+> architecture diagram at the top of this doc) — but it isn't the
+> process Claude Code or opencode launches.
 
-The MCP config now points at the Python bridge instead of `denyx-mcp`
+The MCP config points at `denyx-local-mcp` instead of `denyx-mcp`
 directly.
 
 **Claude Code** — write `./.mcp.json` in your project root:
@@ -285,10 +331,10 @@ directly.
 {
   "mcpServers": {
     "local-executor": {
-      "command": "python3",
+      "command": "denyx-local-mcp",
       "args": [
-        "/abs/path/to/denyx/examples/local_executor/local_mcp.py",
         "--policy", "./denyx.toml",
+        "--mcp-bin", "denyx-mcp",
         "--audit-log", "./.denyx/audit.jsonl"
       ]
     }
@@ -309,9 +355,9 @@ directly.
     "local-executor": {
       "type": "local",
       "command": [
-        "python3",
-        "/abs/path/to/denyx/examples/local_executor/local_mcp.py",
+        "denyx-local-mcp",
         "--policy", "./denyx.toml",
+        "--mcp-bin", "denyx-mcp",
         "--audit-log", "./.denyx/audit.jsonl"
       ],
       "enabled": true
