@@ -51,14 +51,22 @@ pub enum ConsistencyIssue {
     /// paths. Likely a mistake — the gate enforces different policies
     /// depending on which host is launched.
     ConflictingPolicyPaths { paths: Vec<(String, String)> },
-    /// A non-glob path in `read_allow` / `write_allow` / `delete_allow`
-    /// doesn't exist on disk. INFO-level — might be created later;
-    /// flagged so unexpected typos surface.
-    PolicyPathDoesNotExist { section: &'static str, path: String },
-    /// A `[subprocess].allow_commands` entry that's a bare command
-    /// (not an absolute path) isn't on `$PATH`. INFO-level — could
-    /// be a typo or a missing binary.
-    SubprocessCommandNotOnPath { command: String },
+    /// One or more non-glob paths in `read_allow` / `write_allow` /
+    /// `delete_allow` don't exist on disk. INFO-level — most starter
+    /// policies advertise toolchain files (`pyproject.toml`,
+    /// `setup.py`, …) the project might not actually have. Aggregated
+    /// into one issue so the doctor doesn't print 20 lines for one
+    /// concept.
+    PolicyPathsDoNotExist {
+        entries: Vec<(&'static str, String)>,
+    },
+    /// One or more `[subprocess].allow_commands` entries (bare command
+    /// names, not absolute paths) aren't on the doctor's `$PATH`.
+    /// INFO-level: the gate may run in a different environment than
+    /// the doctor (Lima VM on macOS, WSL2 distro on Windows,
+    /// container in CI), so "missing here" doesn't always mean
+    /// "missing at runtime." Aggregated into one issue.
+    SubprocessCommandsNotOnPath { commands: Vec<String> },
 }
 
 /// Severity classification for the doctor's [OK]/[INFO]/[WARN]/[FAIL]
@@ -88,10 +96,11 @@ impl ConsistencyIssue {
             // Two configs disagreeing on the policy file path → likely
             // a mistake but possibly per-host intent. Warning.
             Self::ConflictingPolicyPaths { .. } => Severity::Warning,
-            // Heads-up only — the path / command might be created
-            // later or be intentionally optional.
-            Self::PolicyPathDoesNotExist { .. } => Severity::Info,
-            Self::SubprocessCommandNotOnPath { .. } => Severity::Info,
+            // Heads-up only — the paths / commands might be created
+            // later, intentionally optional, or live in the gate's
+            // runtime env (which the doctor doesn't see).
+            Self::PolicyPathsDoNotExist { .. } => Severity::Info,
+            Self::SubprocessCommandsNotOnPath { .. } => Severity::Info,
         }
     }
 
@@ -127,11 +136,31 @@ impl ConsistencyIssue {
                     .join("; ");
                 format!("multiple host-configs reference different --policy paths: {listed}")
             }
-            Self::PolicyPathDoesNotExist { section, path } => {
-                format!("{section} path '{path}' does not exist on disk")
+            Self::PolicyPathsDoNotExist { entries } => {
+                let n = entries.len();
+                let preview: Vec<String> = entries
+                    .iter()
+                    .take(8)
+                    .map(|(section, p)| format!("{p} ({section})"))
+                    .collect();
+                let suffix = if entries.len() > 8 {
+                    format!(", … (+{} more)", entries.len() - 8)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{n} declared path{} not present on disk: {}{suffix}",
+                    if n == 1 { "" } else { "s" },
+                    preview.join(", ")
+                )
             }
-            Self::SubprocessCommandNotOnPath { command } => {
-                format!("subprocess.allow_commands has '{command}' but it's not on $PATH")
+            Self::SubprocessCommandsNotOnPath { commands } => {
+                let n = commands.len();
+                format!(
+                    "{n} subprocess.allow_commands {} not on the doctor's PATH: {}",
+                    if n == 1 { "entry" } else { "entries" },
+                    commands.join(", ")
+                )
             }
         }
     }
@@ -152,11 +181,10 @@ impl ConsistencyIssue {
                 "Change `--confirm-mode auto-allow` to `--confirm-mode auto` (the default) so approval-gated capabilities elicit per-call. `auto-allow` is intended for tests and demos only.".to_string(),
             Self::ConflictingPolicyPaths { .. } =>
                 "Pick one canonical denyx.toml location and re-run `denyx host-config --existing replace` for every host that should use it. Per-host policy paths are rarely the right design.".to_string(),
-            Self::PolicyPathDoesNotExist { .. } =>
-                "Either create the path before running, or remove it from the allow list if it was a typo.".to_string(),
-            Self::SubprocessCommandNotOnPath { command } => format!(
-                "Either install '{command}' or remove it from [subprocess].allow_commands. If it lives at a non-standard location, use the absolute path instead."
-            ),
+            Self::PolicyPathsDoNotExist { .. } =>
+                "These paths might be created later (build artifacts, downloads), intentionally optional (starter-policy templates list every conceivable toolchain file), or typos. Heads-up only — the policy is still valid and the runtime won't fail because of these.".to_string(),
+            Self::SubprocessCommandsNotOnPath { .. } =>
+                "Heads-up: the doctor's PATH is the env that ran `denyx doctor`. The gate (denyx-mcp) may run in a different env — a Lima VM on macOS, a WSL2 distro on Windows, a container in CI — where these commands could be present. Verify the gate's runtime PATH if any of these matter; remove from [subprocess].allow_commands if you don't actually need them.".to_string(),
         }
     }
 }
@@ -343,11 +371,11 @@ fn check_policy_paths_exist(
     file: &denyx_policy::PolicyFile,
     project_root: &std::path::Path,
 ) -> Vec<ConsistencyIssue> {
-    let mut out = Vec::new();
+    let mut entries: Vec<(&'static str, String)> = Vec::new();
     for (section, list) in [
-        ("[filesystem].read_allow", &file.filesystem.read_allow),
-        ("[filesystem].write_allow", &file.filesystem.write_allow),
-        ("[filesystem].delete_allow", &file.filesystem.delete_allow),
+        ("read_allow", &file.filesystem.read_allow),
+        ("write_allow", &file.filesystem.write_allow),
+        ("delete_allow", &file.filesystem.delete_allow),
     ] {
         for raw in list {
             // Skip globs and home-relative paths (we don't expand `~`).
@@ -363,18 +391,19 @@ fn check_policy_paths_exist(
             let stripped = raw.trim_start_matches("./");
             let abs = project_root.join(stripped);
             if !abs.exists() {
-                out.push(ConsistencyIssue::PolicyPathDoesNotExist {
-                    section,
-                    path: raw.clone(),
-                });
+                entries.push((section, raw.clone()));
             }
         }
     }
-    out
+    if entries.is_empty() {
+        Vec::new()
+    } else {
+        vec![ConsistencyIssue::PolicyPathsDoNotExist { entries }]
+    }
 }
 
 fn check_subprocess_commands_on_path(file: &denyx_policy::PolicyFile) -> Vec<ConsistencyIssue> {
-    let mut out = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let path_dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path_var).collect();
     for cmd in &file.subprocess.allow_commands {
@@ -387,12 +416,14 @@ fn check_subprocess_commands_on_path(file: &denyx_policy::PolicyFile) -> Vec<Con
             candidate.exists() || candidate.with_extension("exe").exists()
         });
         if !found {
-            out.push(ConsistencyIssue::SubprocessCommandNotOnPath {
-                command: cmd.clone(),
-            });
+            commands.push(cmd.clone());
         }
     }
-    out
+    if commands.is_empty() {
+        Vec::new()
+    } else {
+        vec![ConsistencyIssue::SubprocessCommandsNotOnPath { commands }]
+    }
 }
 
 #[cfg(test)]

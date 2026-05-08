@@ -80,8 +80,10 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
                     "requires_approval vs --confirm-mode"
                 }
                 ConsistencyIssue::ConflictingPolicyPaths { .. } => "conflicting policy paths",
-                ConsistencyIssue::PolicyPathDoesNotExist { .. } => "declared path missing",
-                ConsistencyIssue::SubprocessCommandNotOnPath { .. } => "command not on PATH",
+                ConsistencyIssue::PolicyPathsDoNotExist { .. } => "declared paths missing",
+                ConsistencyIssue::SubprocessCommandsNotOnPath { .. } => {
+                    "commands not on doctor's PATH"
+                }
             };
             match sev {
                 Severity::Critical => {
@@ -345,13 +347,12 @@ mod tests {
 
     #[test]
     fn render_info_only_does_not_bump_exit_code() {
-        let issues = vec![ConsistencyIssue::PolicyPathDoesNotExist {
-            section: "[filesystem].read_allow",
-            path: "./missing.txt".into(),
+        let issues = vec![ConsistencyIssue::PolicyPathsDoNotExist {
+            entries: vec![("read_allow", "./missing.txt".into())],
         }];
         let (out, code) = render(&empty(), &issues);
         assert_eq!(code, 0);
-        assert!(out.contains("[INFO] declared path missing"));
+        assert!(out.contains("[INFO] declared paths missing"));
         assert!(out.contains("Ready"));
     }
 
