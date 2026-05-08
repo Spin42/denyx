@@ -475,6 +475,62 @@ Common failure shapes:
 | First `delegate_to_local` takes 30+ seconds | Normal cold-start (qwen loading into VRAM). Subsequent calls are seconds. |
 | `cannot find local_mcp.py` at startup | Path isn't absolute or your Denyx checkout has moved. |
 
+## Diagnosing your setup with `doctor`
+
+Both `denyx-mcp` and `denyx-local-mcp` ship a `doctor` subcommand —
+read-only preflight that inspects what's wired and prints
+copy-pasteable next-steps for anything that's off. Use them after
+running `denyx host-config` or before relying on the gate for
+non-trivial work.
+
+**`denyx-local-mcp doctor`** focuses on the LLM-side stack with the
+project state as a secondary check:
+
+```sh
+# Default: scan all standard local-LLM ports + inspect cwd.
+denyx-local-mcp doctor
+
+# Targeted: verify a specific endpoint + model + project layout.
+denyx-local-mcp doctor --endpoint http://localhost:11434/v1 \
+                       --model qwen2.5-coder:7b \
+                       --embed-model nomic-embed-text \
+                       --project-path /path/to/myproject
+
+# LLM-only: skip the project-side checks.
+denyx-local-mcp doctor --endpoint http://localhost:11434/v1 --no-project
+```
+
+Output covers: server fingerprint (Ollama version detected? generic
+OpenAI-compat?); chat + embed models present in `/v1/models`; round-
+trip embed call; on Ollama, `num_ctx` from `/api/show` (warns when
+< 8192); the project's `denyx.toml` validity; whether the
+host-config wires `denyx-local-mcp` (good) or only `denyx-mcp`
+(WARN — local-executor is being bypassed); per-host lockdown state;
+audit-dir and `.gitignore` setup.
+
+**`denyx-mcp doctor`** focuses on the gate's project-side state:
+
+```sh
+denyx-mcp doctor                    # cwd
+denyx-mcp doctor --project-path /…  # explicit
+```
+
+Reports the same project-state info from the standalone-gate's
+perspective — wiring `denyx-local-mcp` is treated as INFO ("the
+local-executor shape; gate is engaged at the bridge's back end")
+rather than a warning. Missing `denyx.toml` is INFO with the safe-
+by-design fallback explained.
+
+When to use which:
+
+| Question | Run |
+|---|---|
+| Is my local LLM stack working? | `denyx-local-mcp doctor` |
+| Did I wire the local-executor bridge into my project? | `denyx-local-mcp doctor` (warns when standalone shape is wired instead) |
+| Is my project gated by Denyx at all? | `denyx-mcp doctor` |
+| Is the host's built-in deny list complete? | either |
+| Is `denyx.toml` valid? | either |
+
 ## Reproducing the eval numbers
 
 The headline numbers — qwen alone **36/36**, Sonnet-orchestrated

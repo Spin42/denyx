@@ -227,6 +227,31 @@ Useful entry points, in roughly the order you'll need them:
   [docs/server-protocol.md](docs/server-protocol.md) (two endpoints,
   bearer auth, conformance test vectors).
 
+## Diagnosing your setup
+
+Both Denyx binaries ship a `doctor` subcommand for read-only project
+preflight. Run it after wiring a project, before relying on the gate
+for non-trivial work, or when something looks off.
+
+```sh
+# Inspect the current project from denyx-mcp's perspective:
+# policy file, host-config wiring, audit-dir, .gitignore, lockdown.
+denyx-mcp doctor                     # cwd
+denyx-mcp doctor --project-path /…   # explicit
+
+# From denyx-local-mcp's perspective, additionally:
+# scan for running local LLM servers, verify chat + embed model
+# availability, on Ollama check `num_ctx` for the truncation pitfall.
+denyx-local-mcp doctor                                       # scan + project (cwd)
+denyx-local-mcp doctor --endpoint http://localhost:11434/v1  # targeted
+denyx-local-mcp doctor --no-project                          # LLM-only
+```
+
+Both never auto-fix; they print copy-pasteable instructions for
+anything that's off. Exit codes: `0` ok, `1` warnings, `2` failures.
+Missing `denyx.toml` is reported as INFO with "runtime falls back to
+secure-defaults baseline (safe by design)" — not a failure.
+
 ## Documentation
 
 The deep dive lives in [`docs/`](docs/) — start with the
