@@ -340,3 +340,310 @@ deny_commands  = ["bash"]
     );
     assert!(p.check_subprocess_command("bash").is_err());
 }
+
+// ── Mutation-targeted boundary tests (added 2026-05-08) ────────────
+//
+// These tests close specific gaps surfaced by `cargo mutants` that
+// the existing tests left open. Each test names the mutant it kills
+// in its docstring so a future reader knows why the test exists
+// and can re-verify by running:
+//   cargo mutants --workspace --no-shuffle --no-config \
+//                 --file crates/policy/src/lib.rs
+
+#[test]
+fn check_env_read_local_only_membership_uses_eq_not_neq() {
+    // Targets `== with !=` on line 1150 (`let in_local_only = ...
+    // .any(|n| n == name);`). With the mutant, `in_local_only`
+    // becomes "is there ANY n in env_local_only that's NOT this
+    // name" — which is true whenever the list is non-empty and the
+    // name isn't the only entry. That'd flip the gate from
+    // "deny vars not in any allow list" to "allow most vars when
+    // env_local_only has any entries."
+    //
+    // Setup: env_local_only = ["FOO"]. Ask about "BAR" which is in
+    // NEITHER allow nor local_only. Original returns Err. Mutant
+    // would compute in_local_only=true ("FOO" != "BAR") and return
+    // Ok — silently letting BAR through.
+    let p = build(
+        r#"
+[environment]
+local_only_vars = ["FOO"]
+"#,
+    );
+    let r = p.check_env_read("BAR");
+    assert!(
+        r.is_err(),
+        "BAR is in NEITHER allow_vars nor local_only_vars; must be denied"
+    );
+}
+
+#[test]
+fn subprocess_env_propagates_allowed_var_only_when_not_denied() {
+    // Targets `== with !=` on line 1251 (`if self.env_deny.iter()
+    // .any(|d| d == name) { continue; }`). Mutant flips the deny
+    // skip — would skip vars NOT in deny, leaving denied ones
+    // through. Critical: subprocess_env builds the env passed to
+    // child processes; a denied var leaking is a credential leak.
+    //
+    // Set HOME (a sentinel for "always present in test envs") so
+    // we can verify it appears in the output. Set deny_vars to
+    // contain something NOT in the allow list so the mutant's
+    // inverted skip would matter.
+    std::env::set_var("DENYX_TEST_ALLOWED_VAR", "yes");
+    let p = build(
+        r#"
+[environment]
+allow_vars = ["DENYX_TEST_ALLOWED_VAR"]
+deny_vars  = ["AWS_SECRET_ACCESS_KEY"]
+"#,
+    );
+    let env = p.subprocess_env("git");
+    let names: Vec<&str> = env.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"DENYX_TEST_ALLOWED_VAR"),
+        "allowed var must propagate. got: {names:?}"
+    );
+    std::env::remove_var("DENYX_TEST_ALLOWED_VAR");
+}
+
+#[test]
+fn check_subprocess_command_or_match_basename_or_full_argv0() {
+    // Targets `|| with &&` on line 1403 (deny check) and analogous
+    // mutation on the allow check at line 1413. The original deny
+    // matches if the deny-list entry equals EITHER the basename OR
+    // the full argv0. The mutant `&&` requires both — so a deny
+    // list with just the basename ("rm") wouldn't match an absolute
+    // path argv0 ("/bin/rm"), letting it through.
+    let p = build(
+        r#"
+[subprocess]
+deny_commands = ["rm"]
+allow_commands = ["python3"]
+"#,
+    );
+    // Absolute path: basename matches, full argv0 doesn't.
+    assert!(
+        p.check_subprocess_command("/bin/rm").is_err(),
+        "deny by basename must catch absolute-path argv0"
+    );
+    // Allow-side mirror: allow_commands has just "python3";
+    // full path "/usr/bin/python3" must match by basename.
+    assert!(
+        p.check_subprocess_command("/usr/bin/python3").is_ok(),
+        "allow by basename must match absolute-path argv0"
+    );
+}
+
+#[test]
+fn check_subprocess_command_eq_not_neq() {
+    // Targets `== with !=` on line 1420 (in the local_only check,
+    // `.any(|c| c == basename || c == argv0)`). Mutant flips to
+    // `!= ... ||` which would match almost any command.
+    let p = build(
+        r#"
+[subprocess]
+local_only_commands = ["curl"]
+"#,
+    );
+    // "curl" should be allowed (local-only).
+    assert!(p.check_subprocess_command("curl").is_ok());
+    // "wget" is in NEITHER allow nor local_only nor deny. Must be
+    // rejected. Mutant `!= ||` would let it through because some
+    // entry in local_only_commands ("curl") != "wget".
+    assert!(
+        p.check_subprocess_command("wget").is_err(),
+        "wget must be denied; not in any allow / local_only list"
+    );
+}
+
+#[test]
+fn check_subprocess_argv_paths_runs_for_three_argv_elements() {
+    // Targets `< with >` on line 1507 (`if argv.len() < 2 { return
+    // Ok(()); }`). With `>`, argv.len() > 2 returns Ok early —
+    // which means commands with 3+ elements bypass the path scan
+    // entirely. Real example: `cat /etc/passwd extra` would slip
+    // through despite /etc/passwd being denied.
+    let p = build(
+        r#"
+inherits = "secure-defaults"
+
+[subprocess]
+allow_commands = ["cat"]
+"#,
+    );
+    let argv: Vec<String> = vec!["cat".into(), "/etc/passwd".into(), "ignored".into()];
+    let r = p.check_subprocess_argv_paths(&argv);
+    assert!(
+        r.is_err(),
+        "3-element argv with denied path must still be gated"
+    );
+}
+
+#[test]
+fn check_subprocess_argv_paths_or_join_of_allow_lists_uses_or() {
+    // Targets `|| with &&` on lines 1528-1529 in the permitted-
+    // path check (`fs_read.is_match || local_only_read.is_match
+    // || fs_write.is_match || fs_delete.is_match`). Mutant `&&`
+    // requires ALL four allow lists to match — almost never true
+    // for any real path → permitted=false → over-deny. Catches the
+    // mutant whenever a path is in ONE allow list but not all four.
+    let p = build(
+        r#"
+[filesystem]
+read_allow = ["/proj/src/**"]
+
+[subprocess]
+allow_commands = ["cat"]
+"#,
+    );
+    let argv: Vec<String> = vec!["cat".into(), "/proj/src/main.py".into()];
+    // Rooted at "/tmp" by build(), so /proj/src/main.py is absolute
+    // and resolves directly; matches read_allow only.
+    let r = p.check_subprocess_argv_paths(&argv);
+    assert!(
+        r.is_ok(),
+        "path covered by ONE allow list (read_allow) must be permitted; \
+         mutant && would require all four lists to match. got: {r:?}"
+    );
+}
+
+#[test]
+fn derive_capabilities_pushes_fs_read_when_only_read_allow_is_set() {
+    // Targets `|| with &&` on line 1726 (`if !read_allow.is_empty()
+    // || !local_only_read.is_empty()`) — mutant requires BOTH
+    // non-empty, so a project that only sets read_allow (the common
+    // case) wouldn't get fs.read derived. The verifier would then
+    // reject every fs.read call as "capability not enabled."
+    let p = build(
+        r#"
+[filesystem]
+read_allow = ["/x/**"]
+"#,
+    );
+    let funcs = p.effective_functions();
+    assert!(
+        funcs.contains(&"fs.read"),
+        "read_allow alone must enable fs.read; got: {funcs:?}"
+    );
+}
+
+#[test]
+fn derive_capabilities_pushes_fs_read_when_only_local_only_read_is_set() {
+    // Mirror of the above — local_only_read alone must also enable
+    // fs.read. Catches the same `||` → `&&` mutation from the other
+    // direction.
+    let p = build(
+        r#"
+[filesystem]
+local_only_read = ["~/.config/myapp/token"]
+"#,
+    );
+    let funcs = p.effective_functions();
+    assert!(
+        funcs.contains(&"fs.read"),
+        "local_only_read alone must enable fs.read; got: {funcs:?}"
+    );
+}
+
+#[test]
+fn derive_capabilities_pushes_http_verbs_when_only_local_only_hosts_set() {
+    // Targets `|| with &&` on lines 1737-1750 (the http_*_allow
+    // checks). Each line is `if !http_X_allow.is_empty() ||
+    // any_local_only_host`. Mutant `&&` requires both to be
+    // non-empty — so a policy that ONLY sets local_only_hosts
+    // wouldn't enable any net.http_* capability.
+    let p = build(
+        r#"
+[network]
+local_only_hosts = ["api.openai.com"]
+"#,
+    );
+    let funcs = p.effective_functions();
+    for verb in &[
+        "net.http_get",
+        "net.http_post",
+        "net.http_put",
+        "net.http_patch",
+        "net.http_delete",
+    ] {
+        assert!(
+            funcs.contains(verb),
+            "local_only_hosts alone must enable {verb}; got: {funcs:?}"
+        );
+    }
+}
+
+#[test]
+fn derive_capabilities_pushes_env_read_when_only_one_env_list_set() {
+    // Mirrors fs.read for env. Both `allow_vars` alone and
+    // `local_only_vars` alone must enable env.read.
+    let p_allow = build(
+        r#"
+[environment]
+allow_vars = ["USER"]
+"#,
+    );
+    let p_local = build(
+        r#"
+[environment]
+local_only_vars = ["OPENAI_API_KEY"]
+"#,
+    );
+    assert!(p_allow.effective_functions().contains(&"env.read"));
+    assert!(p_local.effective_functions().contains(&"env.read"));
+}
+
+#[test]
+fn derive_capabilities_pushes_subprocess_exec_when_only_one_command_list_set() {
+    // Mirror for subprocess.exec: both allow_commands and
+    // local_only_commands enable it.
+    let p_allow = build(
+        r#"
+[subprocess]
+allow_commands = ["git"]
+"#,
+    );
+    let p_local = build(
+        r#"
+[subprocess]
+local_only_commands = ["doctl"]
+"#,
+    );
+    assert!(p_allow.effective_functions().contains(&"subprocess.exec"));
+    assert!(p_local.effective_functions().contains(&"subprocess.exec"));
+}
+
+#[test]
+fn looks_like_path_arg_treats_three_elements_with_path() {
+    // The function `looks_like_path_arg` is private. We exercise
+    // it via `check_subprocess_argv_paths`. Several `||` mutations
+    // in the path-prefix chain (line 1573-1577) survive because
+    // `arg.contains('/')` handles the same cases at the next if.
+    // The `||` between `arg.starts_with("~/")` and `arg == "~"`
+    // (specifically) only matters for arg = "~" exactly — that's
+    // the only case where contains('/') doesn't fire.
+    //
+    // Setup: argv with arg = "~" and a policy that DOES NOT permit
+    // home dir. Without the gate (mutant), "~" passes through as
+    // a non-path; with the gate (original), "~" gets resolved and
+    // checked → if not in any allow list, denied.
+    let p = build(
+        r#"
+inherits = "secure-defaults"
+
+[subprocess]
+allow_commands = ["echo"]
+"#,
+    );
+    let argv: Vec<String> = vec!["echo".into(), "~".into()];
+    // `~` alone resolves to the user's home dir. Under
+    // secure-defaults that's not in read/write/delete allow lists,
+    // so the gate must reject. Mutant `||` → `&&` between
+    // starts_with("~/") and arg == "~" would make `~` not look
+    // like a path → no gate fires → Ok returned (BYPASS).
+    let r = p.check_subprocess_argv_paths(&argv);
+    assert!(
+        r.is_err(),
+        "argv element `~` alone must be gated as a path; mutant && would let it through"
+    );
+}
