@@ -405,6 +405,7 @@ dependencies = [
  "starlark",
  "thiserror 2.0.18",
  "ureq",
+ "url",
 ]
 
 [[package]]

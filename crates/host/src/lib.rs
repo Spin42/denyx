@@ -29,6 +29,7 @@ use thiserror::Error;
 
 pub mod audit;
 pub mod confirm;
+pub mod policy_host_consistency;
 pub mod project_diagnosis;
 pub mod taint;
 pub mod verifier;
