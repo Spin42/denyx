@@ -84,6 +84,10 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
                 ConsistencyIssue::SubprocessCommandsNotOnPath { .. } => {
                     "commands not on doctor's PATH"
                 }
+                ConsistencyIssue::SandboxAllowedDomainsStale { .. } => {
+                    "sandbox allowedDomains stale"
+                }
+                ConsistencyIssue::SandboxAllowWriteStale { .. } => "sandbox allowWrite stale",
             };
             match sev {
                 Severity::Critical => {
@@ -305,6 +309,7 @@ mod tests {
             host_configs: vec![],
             audit_dir: AuditDirCheck::Absent,
             gitignore: GitignoreCheck::Missing,
+            claude_sandbox: None,
         }
     }
 

@@ -37,6 +37,28 @@ pub struct ProjectDiagnosis {
     pub audit_dir: AuditDirCheck,
     /// State of `<root>/.gitignore` w.r.t. the audit dir.
     pub gitignore: GitignoreCheck,
+    /// Snapshot of Claude Code's OS-sandbox stanza in
+    /// `<root>/.claude/settings.json`, if a sandbox is configured.
+    /// Used by the consistency checker to detect drift between the
+    /// sandbox stanza (frozen at host-config time) and the live
+    /// `denyx.toml` (which the operator may have edited since).
+    /// Always `None` for projects that don't use Claude Code or
+    /// haven't run `host-config --sandbox auto`.
+    pub claude_sandbox: Option<SandboxSnapshot>,
+}
+
+/// Frozen snapshot of `.claude/settings.json`'s `sandbox` stanza.
+/// We only capture the fields the consistency checker compares
+/// against the policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxSnapshot {
+    /// `sandbox.enabled`. Doctor flags `false` as "stanza present
+    /// but the OS sandbox is off."
+    pub enabled: bool,
+    /// `sandbox.network.allowedDomains`.
+    pub allowed_domains: Vec<String>,
+    /// `sandbox.filesystem.allowWrite`.
+    pub allow_write: Vec<String>,
 }
 
 /// Whether the project's policy file is present + valid.
@@ -177,8 +199,42 @@ pub fn diagnose(project_root: &Path) -> ProjectDiagnosis {
         host_configs: collect_host_configs(&root),
         audit_dir: check_audit_dir(&root),
         gitignore: check_gitignore(&root),
+        claude_sandbox: read_claude_sandbox(&root),
         root,
     }
+}
+
+/// Pull the `sandbox` stanza out of `.claude/settings.json` if
+/// present. Returns `None` when the file is missing, malformed, or
+/// has no `sandbox` key (the common case for projects that ran
+/// `host-config --sandbox off`).
+fn read_claude_sandbox(root: &Path) -> Option<SandboxSnapshot> {
+    let v = read_json(&root.join(".claude").join("settings.json"))?;
+    let sb = v.get("sandbox")?;
+    let enabled = sb.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allowed_domains = sb
+        .pointer("/network/allowedDomains")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let allow_write = sb
+        .pointer("/filesystem/allowWrite")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(SandboxSnapshot {
+        enabled,
+        allowed_domains,
+        allow_write,
+    })
 }
 
 // ───────────────────────────── policy ─────────────────────────────

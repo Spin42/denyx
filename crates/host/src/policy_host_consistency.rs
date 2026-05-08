@@ -67,6 +67,18 @@ pub enum ConsistencyIssue {
     /// container in CI), so "missing here" doesn't always mean
     /// "missing at runtime." Aggregated into one issue.
     SubprocessCommandsNotOnPath { commands: Vec<String> },
+    /// Hosts in the policy's `http_*_allow` lists that are missing
+    /// from `.claude/settings.json`'s `sandbox.network.allowedDomains`.
+    /// The OS sandbox would block calls to these hosts before the
+    /// Denyx policy gate even sees them — visible to the operator
+    /// only as a confusing kernel-level error. Caused by editing
+    /// `denyx.toml` without re-running `denyx host-config`.
+    SandboxAllowedDomainsStale { missing_hosts: Vec<String> },
+    /// Absolute / home-relative paths in the policy's `write_allow`
+    /// that are missing from `.claude/settings.json`'s
+    /// `sandbox.filesystem.allowWrite`. Same drift as
+    /// `SandboxAllowedDomainsStale` but for filesystem writes.
+    SandboxAllowWriteStale { missing_paths: Vec<String> },
 }
 
 /// Severity classification for the doctor's [OK]/[INFO]/[WARN]/[FAIL]
@@ -101,6 +113,13 @@ impl ConsistencyIssue {
             // runtime env (which the doctor doesn't see).
             Self::PolicyPathsDoNotExist { .. } => Severity::Info,
             Self::SubprocessCommandsNotOnPath { .. } => Severity::Info,
+            // Sandbox drift means the OS layer can block calls the
+            // policy permits — operator-visible kernel errors with
+            // no Denyx breadcrumb. Warning, not Critical: the gate
+            // still works, it just might surface confusing failures
+            // until host-config is re-run.
+            Self::SandboxAllowedDomainsStale { .. } => Severity::Warning,
+            Self::SandboxAllowWriteStale { .. } => Severity::Warning,
         }
     }
 
@@ -162,6 +181,24 @@ impl ConsistencyIssue {
                     commands.join(", ")
                 )
             }
+            Self::SandboxAllowedDomainsStale { missing_hosts } => {
+                let n = missing_hosts.len();
+                format!(
+                    "{n} host{} allowed by [network].http_*_allow but absent from \
+                     .claude/settings.json sandbox.network.allowedDomains: {}",
+                    if n == 1 { "" } else { "s" },
+                    missing_hosts.join(", ")
+                )
+            }
+            Self::SandboxAllowWriteStale { missing_paths } => {
+                let n = missing_paths.len();
+                format!(
+                    "{n} write path{} allowed by [filesystem].write_allow but absent \
+                     from .claude/settings.json sandbox.filesystem.allowWrite: {}",
+                    if n == 1 { "" } else { "s" },
+                    missing_paths.join(", ")
+                )
+            }
         }
     }
 
@@ -185,6 +222,8 @@ impl ConsistencyIssue {
                 "These paths might be created later (build artifacts, downloads), intentionally optional (starter-policy templates list every conceivable toolchain file), or typos. Heads-up only — the policy is still valid and the runtime won't fail because of these.".to_string(),
             Self::SubprocessCommandsNotOnPath { .. } =>
                 "Heads-up: the doctor's PATH is the env that ran `denyx doctor`. The gate (denyx-mcp) may run in a different env — a Lima VM on macOS, a WSL2 distro on Windows, a container in CI — where these commands could be present. Verify the gate's runtime PATH if any of these matter; remove from [subprocess].allow_commands if you don't actually need them.".to_string(),
+            Self::SandboxAllowedDomainsStale { .. } | Self::SandboxAllowWriteStale { .. } =>
+                "Re-run `denyx host-config --existing replace --host claude` to refresh the sandbox stanza from the live policy. The sandbox stanza is a frozen snapshot taken at host-config time; edits to denyx.toml don't propagate automatically. Without the refresh, calls Denyx permits will be blocked at the OS layer (bubblewrap on Linux/WSL2, Seatbelt on macOS) with errors that don't mention Denyx.".to_string(),
         }
     }
 }
@@ -204,6 +243,7 @@ pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<Consi
         out.extend(check_requires_approval_vs_confirm_mode(file, diagnosis));
         out.extend(check_policy_paths_exist(file, &diagnosis.root));
         out.extend(check_subprocess_commands_on_path(file));
+        out.extend(check_sandbox_drift(file, diagnosis));
     }
     out
 }
@@ -402,6 +442,77 @@ fn check_policy_paths_exist(
     }
 }
 
+/// Compare the policy's allow lists against `.claude/settings.json`'s
+/// `sandbox` stanza. If the sandbox is missing entries the policy
+/// allows, the OS sandbox would block those calls before Denyx's
+/// gate ever sees them — visible to the operator only as a confusing
+/// kernel-level error. Caused by editing `denyx.toml` without
+/// re-running `denyx host-config`.
+///
+/// Only runs when `.claude/settings.json` actually has a sandbox
+/// stanza. Projects without Claude Code, or that ran
+/// `host-config --sandbox off`, get no issues from this check.
+fn check_sandbox_drift(
+    file: &denyx_policy::PolicyFile,
+    diagnosis: &ProjectDiagnosis,
+) -> Vec<ConsistencyIssue> {
+    let sandbox = match &diagnosis.claude_sandbox {
+        Some(s) if s.enabled => s,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+
+    // ── allowedDomains drift ──────────────────────────────────────
+    // Policy hosts that should be in the sandbox's allowed list.
+    let policy_hosts: BTreeSet<&str> = file
+        .network
+        .http_get_allow
+        .iter()
+        .chain(&file.network.http_post_allow)
+        .chain(&file.network.http_put_allow)
+        .chain(&file.network.http_patch_allow)
+        .chain(&file.network.http_delete_allow)
+        .chain(&file.network.local_only_hosts)
+        .map(|s| s.as_str())
+        .collect();
+    let sandbox_hosts: BTreeSet<&str> =
+        sandbox.allowed_domains.iter().map(|s| s.as_str()).collect();
+    let missing_hosts: Vec<String> = policy_hosts
+        .difference(&sandbox_hosts)
+        .map(|s| (*s).to_string())
+        .collect();
+    if !missing_hosts.is_empty() {
+        out.push(ConsistencyIssue::SandboxAllowedDomainsStale { missing_hosts });
+    }
+
+    // ── allowWrite drift ──────────────────────────────────────────
+    // Mirror what host_config.rs::sandbox_stanza emits: only
+    // absolute / home-relative paths, with trailing /** or /* stripped.
+    // Project-relative paths are covered by Claude's "cwd writable"
+    // default — not in the snapshot, not a drift candidate here.
+    let mut policy_writes: BTreeSet<String> = BTreeSet::new();
+    for raw in &file.filesystem.write_allow {
+        if !(raw.starts_with('/') || raw.starts_with("~/")) {
+            continue;
+        }
+        let cleaned = raw.trim_end_matches("/**").trim_end_matches("/*");
+        if !cleaned.is_empty() {
+            policy_writes.insert(cleaned.to_string());
+        }
+    }
+    let sandbox_writes: BTreeSet<&str> = sandbox.allow_write.iter().map(|s| s.as_str()).collect();
+    let missing_paths: Vec<String> = policy_writes
+        .iter()
+        .filter(|p| !sandbox_writes.contains(p.as_str()))
+        .cloned()
+        .collect();
+    if !missing_paths.is_empty() {
+        out.push(ConsistencyIssue::SandboxAllowWriteStale { missing_paths });
+    }
+
+    out
+}
+
 fn check_subprocess_commands_on_path(file: &denyx_policy::PolicyFile) -> Vec<ConsistencyIssue> {
     let mut commands: Vec<String> = Vec::new();
     let path_var = std::env::var_os("PATH").unwrap_or_default();
@@ -441,6 +552,7 @@ mod tests {
             host_configs: vec![],
             audit_dir: AuditDirCheck::Absent,
             gitignore: GitignoreCheck::Missing,
+            claude_sandbox: None,
         }
     }
 
@@ -699,6 +811,150 @@ requires_approval = ["fs.delete"]
     fn check_returns_empty_when_no_policy_and_one_host_config() {
         let diag = empty_diagnosis();
         assert!(check(None, &diag).is_empty());
+    }
+
+    fn diag_with_sandbox(allowed_domains: Vec<&str>, allow_write: Vec<&str>) -> ProjectDiagnosis {
+        let mut d = empty_diagnosis();
+        d.claude_sandbox = Some(crate::project_diagnosis::SandboxSnapshot {
+            enabled: true,
+            allowed_domains: allowed_domains.into_iter().map(String::from).collect(),
+            allow_write: allow_write.into_iter().map(String::from).collect(),
+        });
+        d
+    }
+
+    #[test]
+    fn check_sandbox_drift_clean_when_sandbox_matches_policy() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[network]
+http_get_allow = ["api.github.com"]
+
+[filesystem]
+write_allow = ["/var/tmp/myproj/**", "src/**"]
+"#,
+        );
+        // Sandbox snapshot mirrors what host-config would emit:
+        // api.github.com in allowedDomains, /var/tmp/myproj in
+        // allowWrite (project-relative src/** is skipped).
+        let d = diag_with_sandbox(vec!["api.github.com"], vec!["/var/tmp/myproj"]);
+        assert!(check_sandbox_drift(p.file_snapshot(), &d).is_empty());
+    }
+
+    #[test]
+    fn check_sandbox_drift_flags_missing_allowed_domain() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[network]
+http_get_allow = ["api.github.com", "api.openai.com"]
+"#,
+        );
+        // Sandbox is stale: only has the original github host.
+        let d = diag_with_sandbox(vec!["api.github.com"], vec![]);
+        let issues = check_sandbox_drift(p.file_snapshot(), &d);
+        assert_eq!(issues.len(), 1);
+        match &issues[0] {
+            ConsistencyIssue::SandboxAllowedDomainsStale { missing_hosts } => {
+                assert_eq!(missing_hosts, &vec!["api.openai.com".to_string()]);
+            }
+            other => panic!("expected SandboxAllowedDomainsStale, got {other:?}"),
+        }
+        assert_eq!(issues[0].severity(), Severity::Warning);
+        assert!(issues[0]
+            .fix()
+            .contains("denyx host-config --existing replace"));
+    }
+
+    #[test]
+    fn check_sandbox_drift_flags_missing_allow_write_path() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[filesystem]
+write_allow = ["/var/log/myapp/**", "/opt/cache/**"]
+"#,
+        );
+        let d = diag_with_sandbox(vec![], vec!["/var/log/myapp"]); // /opt/cache missing
+        let issues = check_sandbox_drift(p.file_snapshot(), &d);
+        assert_eq!(issues.len(), 1);
+        match &issues[0] {
+            ConsistencyIssue::SandboxAllowWriteStale { missing_paths } => {
+                assert_eq!(missing_paths, &vec!["/opt/cache".to_string()]);
+            }
+            other => panic!("expected SandboxAllowWriteStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_sandbox_drift_skips_project_relative_writes() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[filesystem]
+write_allow = ["src/**", "tests/**"]
+"#,
+        );
+        // No absolute writes → nothing to check against the sandbox.
+        let d = diag_with_sandbox(vec![], vec![]);
+        assert!(check_sandbox_drift(p.file_snapshot(), &d).is_empty());
+    }
+
+    #[test]
+    fn check_sandbox_drift_returns_empty_when_no_sandbox_in_settings() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[network]
+http_get_allow = ["api.github.com"]
+"#,
+        );
+        // claude_sandbox is None — projects without Claude Code or
+        // those that ran host-config --sandbox off.
+        let d = empty_diagnosis();
+        assert!(check_sandbox_drift(p.file_snapshot(), &d).is_empty());
+    }
+
+    #[test]
+    fn check_sandbox_drift_returns_empty_when_sandbox_is_disabled() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[network]
+http_get_allow = ["api.github.com"]
+"#,
+        );
+        let mut d = empty_diagnosis();
+        d.claude_sandbox = Some(crate::project_diagnosis::SandboxSnapshot {
+            enabled: false,
+            allowed_domains: vec![],
+            allow_write: vec![],
+        });
+        assert!(check_sandbox_drift(p.file_snapshot(), &d).is_empty());
+    }
+
+    #[test]
+    fn check_sandbox_drift_strips_glob_suffix_when_comparing() {
+        // host-config trims /** and /* from policy paths before
+        // putting them in the sandbox stanza. The drift check must
+        // do the same trimming to compare like-with-like.
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+
+[filesystem]
+write_allow = ["/var/log/myapp/**"]
+"#,
+        );
+        let d = diag_with_sandbox(vec![], vec!["/var/log/myapp"]); // post-trim form
+        assert!(check_sandbox_drift(p.file_snapshot(), &d).is_empty());
     }
 
     #[test]

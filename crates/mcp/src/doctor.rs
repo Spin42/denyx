@@ -297,6 +297,7 @@ mod tests {
             host_configs: vec![],
             audit_dir: AuditDirCheck::Absent,
             gitignore: GitignoreCheck::Missing,
+            claude_sandbox: None,
         }
     }
 
