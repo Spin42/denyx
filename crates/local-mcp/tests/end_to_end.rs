@@ -4,8 +4,10 @@
 //!   - a real `denyx-mcp` child (resolved from the workspace target/
 //!     dir; built on demand if missing — same trick as
 //!     `crates/cli/tests/setup_flow.rs`),
-//!   - an in-process mock HTTP server playing Ollama (`/api/chat`,
-//!     `/api/embeddings`).
+//!   - an in-process mock HTTP server playing the OpenAI v1 API
+//!     (`/chat/completions`, `/embeddings`) — the same shape every
+//!     supported local server exposes (Ollama via `/v1`, llama.cpp,
+//!     LM Studio, vLLM, LocalAI, etc.).
 //!
 //! Exercises the full pipeline: orchestrator → `delegate_to_local`
 //! → mock chat returns a Starlark program → child denyx-mcp runs it
@@ -170,7 +172,40 @@ fn handle_client(mut stream: TcpStream, state: Arc<MockState>) -> std::io::Resul
     };
 
     let request_line = header_str.lines().next().unwrap_or("");
-    if request_line.contains(" /api/chat ") {
+    // Doctor-side endpoints (Ollama-native + OpenAI-compat /models).
+    if request_line.starts_with("GET /api/version") {
+        let resp_body = serde_json::to_string(&json!({
+            "version": "0.5.7-mock"
+        }))
+        .unwrap();
+        write_json_response(&mut stream, 200, &resp_body)?;
+        return Ok(());
+    }
+    if request_line.starts_with("POST /api/show") {
+        // Echo back a fixed parameters blob with num_ctx=8192 so the
+        // doctor's Ollama context check passes by default.
+        let resp_body = serde_json::to_string(&json!({
+            "parameters": "num_ctx 8192\nstop \"<|im_start|>\"\n",
+        }))
+        .unwrap();
+        write_json_response(&mut stream, 200, &resp_body)?;
+        return Ok(());
+    }
+    if request_line.starts_with("GET /models") || request_line.starts_with("GET /v1/models") {
+        // OpenAI-shape models list; advertise the ones the test
+        // configures via --model and --embed-model.
+        let resp_body = serde_json::to_string(&json!({
+            "object": "list",
+            "data": [
+                { "id": "qwen2.5-coder:7b", "object": "model" },
+                { "id": "nomic-embed-text", "object": "model" }
+            ]
+        }))
+        .unwrap();
+        write_json_response(&mut stream, 200, &resp_body)?;
+        return Ok(());
+    }
+    if request_line.contains("/chat/completions") {
         state.chat_calls.fetch_add(1, Ordering::SeqCst);
         let mut q = state.chat_queue.lock().unwrap();
         let canned = if q.is_empty() {
@@ -178,18 +213,34 @@ fn handle_client(mut stream: TcpStream, state: Arc<MockState>) -> std::io::Resul
         } else {
             q.remove(0)
         };
+        // OpenAI shape: `{choices: [{message: {content, role}}]}`
         let resp_body = serde_json::to_string(&json!({
-            "message": { "content": canned }
+            "id": "test-1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": canned },
+                "finish_reason": "stop"
+            }]
         }))
         .unwrap();
         write_json_response(&mut stream, 200, &resp_body)?;
-    } else if request_line.contains(" /api/embeddings ") {
+    } else if request_line.contains("/embeddings") {
         state.embed_calls.fetch_add(1, Ordering::SeqCst);
         // Deterministic pseudo-embedding from the request body length.
         let dim = 16;
         let seed = body.len() as f32;
         let v: Vec<f32> = (0..dim).map(|i| (seed + i as f32) * 0.01).collect();
-        let resp_body = serde_json::to_string(&json!({ "embedding": v })).unwrap();
+        // OpenAI shape: `{data: [{embedding: [...]}]}`.
+        let resp_body = serde_json::to_string(&json!({
+            "object": "list",
+            "data": [{
+                "object": "embedding",
+                "index": 0,
+                "embedding": v
+            }]
+        }))
+        .unwrap();
         write_json_response(&mut stream, 200, &resp_body)?;
     } else {
         write_json_response(&mut stream, 404, "{}")?;
@@ -298,6 +349,7 @@ fn end_to_end_delegate_to_local_runs_program_and_returns_output() {
     let mock = MockOllama::new(vec!["print('hello from local')"]);
 
     let args = vec![
+        "serve".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--mcp-bin".into(),
@@ -363,6 +415,7 @@ fn end_to_end_retries_on_parse_error_then_succeeds() {
     ]);
 
     let args = vec![
+        "serve".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--mcp-bin".into(),
@@ -414,6 +467,7 @@ fn end_to_end_policy_violation_does_not_retry() {
     let mock = MockOllama::new(vec!["print(fs.read('/etc/passwd'))"]);
 
     let args = vec![
+        "serve".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--mcp-bin".into(),
@@ -457,6 +511,7 @@ fn end_to_end_fails_fast_when_mcp_bin_missing() {
     let bogus = tmp.join("not-here-denyx-mcp");
     let mock = MockOllama::new(vec![]);
     let args = vec![
+        "serve".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--mcp-bin".into(),
@@ -485,6 +540,7 @@ fn end_to_end_precompute_warms_embedding_cache() {
     let mock = MockOllama::new(vec!["print('ok')"]);
 
     let args = vec![
+        "serve".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--mcp-bin".into(),
@@ -506,4 +562,83 @@ fn end_to_end_precompute_warms_embedding_cache() {
         "expected at least {lib_size} embed calls after precompute; got {calls_after_init}"
     );
     s.close();
+}
+
+// ─────────────────────── Doctor subcommand ───────────────────────
+
+fn run_doctor(endpoint: &str, model: &str, embed_model: &str) -> std::process::Output {
+    Command::new(BIN)
+        .args([
+            "doctor",
+            "--endpoint",
+            endpoint,
+            "--model",
+            model,
+            "--embed-model",
+            embed_model,
+        ])
+        .output()
+        .expect("spawn denyx-local-mcp doctor")
+}
+
+#[test]
+fn doctor_passes_when_models_present_and_num_ctx_ok() {
+    let mock = MockOllama::new(vec![]);
+    // Mock identifies as Ollama (via /api/version), serves the
+    // configured chat + embed models in /models, and returns
+    // num_ctx=8192 from /api/show.
+    let out = run_doctor(&mock.url(), "qwen2.5-coder:7b", "nomic-embed-text");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "doctor exit {:?}, stdout:\n{stdout}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Ollama"));
+    assert!(stdout.contains("[OK]   chat model"));
+    assert!(stdout.contains("[OK]   embed model"));
+    assert!(stdout.contains("[OK]   embed call"));
+    assert!(stdout.contains("[OK]   ollama num_ctx"));
+    assert!(stdout.contains("Ready to use"));
+}
+
+#[test]
+fn doctor_fails_with_pull_instructions_when_chat_model_missing() {
+    let mock = MockOllama::new(vec![]);
+    // Ask for a model the mock doesn't advertise.
+    let out = run_doctor(&mock.url(), "missing-model:1b", "nomic-embed-text");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing-chat-model should produce exit code 2 (Fail). stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("[FAIL] chat model"));
+    assert!(
+        stdout.contains("ollama pull missing-model:1b"),
+        "expected pull instruction; stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("NOT ready"));
+}
+
+#[test]
+fn doctor_fails_when_endpoint_unreachable() {
+    // Bind a port and immediately close it to get a definitively
+    // unreachable address. Use 127.0.0.1:1 (port 1 is reserved and
+    // typically rejected). 0 picks a free port; we then drop the
+    // listener so connecting fails.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let bogus = format!("http://{addr}");
+    let out = run_doctor(&bogus, "qwen2.5-coder:7b", "nomic-embed-text");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "unreachable endpoint should exit 2. stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("(unreachable)") || stdout.contains("[FAIL]"));
+    assert!(stdout.contains("NOT ready"));
 }

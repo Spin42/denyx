@@ -20,9 +20,16 @@
 //!
 //! ## Design notes
 //!
-//! Every external dependency (Ollama HTTP, the denyx-mcp subprocess)
-//! is mediated by a trait so unit tests can inject deterministic
-//! stubs. The HTTP-backed implementations live in [`ollama`].
+//! Every external dependency (the local model HTTP API, the
+//! denyx-mcp subprocess) is mediated by a trait so unit tests can
+//! inject deterministic stubs. The built-in HTTP implementation in
+//! [`openai_compat`] speaks the OpenAI v1 API
+//! (`/chat/completions` + `/embeddings`), which every relevant local
+//! model server in 2026 supports natively (Ollama since v0.1.32,
+//! llama.cpp's server, LM Studio, vLLM, LocalAI, Text Generation
+//! WebUI, MLX-LM, TabbyAPI, mistral.rs, …). Backends that don't
+//! speak it implement [`provider::ChatProvider`] +
+//! [`rag::EmbedProvider`] directly — see the README.
 //!
 //! ## What's NOT in this crate
 //!
@@ -33,7 +40,7 @@
 //! the version users `cargo install`.
 
 pub mod denyx_client;
-pub mod ollama;
+pub mod doctor;
 pub mod openai_compat;
 pub mod pipeline;
 pub mod prompt;

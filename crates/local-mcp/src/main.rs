@@ -1,60 +1,74 @@
 //! `denyx-local-mcp` binary entrypoint.
 //!
-//! Wires the CLI flags into the library's modules and spins up the
-//! JSON-RPC server loop on stdio. The actual logic lives in the
-//! library; this file is glue.
+//! Two subcommands:
 //!
-//! Provider selection:
-//!   --provider ollama         → native Ollama API at --endpoint
-//!   --provider openai-compat  → OpenAI-compat API at --endpoint
-//!                                (llama.cpp / LM Studio / vLLM /
-//!                                 LocalAI / Text Gen WebUI / etc.)
+//! - `serve` — the MCP server. What Claude Code / opencode launches
+//!   per-project. Speaks newline-delimited JSON-RPC 2.0 on stdio,
+//!   exposes one tool: `delegate_to_local`.
+//! - `doctor` — read-only diagnostic preflight. Probes the
+//!   configured endpoint, fingerprints the server, verifies the
+//!   chat + embed models are available, and on Ollama reads
+//!   `num_ctx` to flag the common "default 2048 too small" pitfall.
+//!   Prints copy-pasteable next-steps; never auto-fixes.
 //!
-//! Default: `ollama` at http://localhost:11434.
+//! The chat + embeddings client speaks the **OpenAI v1 API**
+//! (`/chat/completions` + `/embeddings`) — every relevant local
+//! model server in 2026 supports this natively. Operators point
+//! `--endpoint` at:
+//!
+//!   - Ollama:        `http://localhost:11434/v1` (the default)
+//!   - llama.cpp:     `http://localhost:8080/v1`
+//!   - LM Studio:     `http://localhost:1234/v1`
+//!   - vLLM:          `http://localhost:8000/v1`
+//!   - LocalAI:       `http://localhost:8080/v1`
+//!   - Text Gen WebUI: `http://localhost:5000/v1`
+//!   - MLX-LM:        `http://localhost:8080/v1`
+//!
+//! Backends that don't speak this shape can implement the
+//! `ChatProvider` / `EmbedProvider` traits and link this crate as
+//! a library — see the crate README.
 
 use std::io::{stdin, stdout, BufReader};
 use std::path::PathBuf;
-use std::str::FromStr;
+use std::process::ExitCode;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use denyx_local_mcp::denyx_client::DenyxMcpClient;
-use denyx_local_mcp::ollama::{OllamaChat, OllamaEmbed};
+use denyx_local_mcp::doctor::{self, DoctorArgs};
 use denyx_local_mcp::openai_compat::{OpenAiCompatChat, OpenAiCompatEmbed};
 use denyx_local_mcp::pipeline::StepConfig;
 use denyx_local_mcp::prompt::{load_tools_routing, render_tools_routing};
-use denyx_local_mcp::provider::ChatProvider;
-use denyx_local_mcp::rag::{CachedEmbed, EmbedProvider};
+use denyx_local_mcp::rag::CachedEmbed;
 use denyx_local_mcp::server::{self, FileTraceSink, TraceSink};
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ProviderKind {
-    Ollama,
-    OpenAiCompat,
-}
-
-impl FromStr for ProviderKind {
-    type Err = String;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "ollama" => Ok(Self::Ollama),
-            "openai-compat" | "openai" | "compat" => Ok(Self::OpenAiCompat),
-            other => Err(format!(
-                "unknown provider {other:?}; expected one of: ollama, openai-compat"
-            )),
-        }
-    }
-}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "denyx-local-mcp",
     version,
-    about = "Local-executor MCP server: Ollama / OpenAI-compatible local model + Denyx policy gate."
+    about = "Local-executor MCP server: OpenAI-compatible local model + Denyx policy gate."
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Run the MCP server (newline-delimited JSON-RPC 2.0 on stdio).
+    /// This is what Claude Code / opencode launches per-project.
+    Serve(ServeArgs),
+    /// Run a read-only preflight check against the configured
+    /// endpoint. Probes the server, verifies models are available,
+    /// flags Ollama num_ctx pitfalls. Prints fix instructions on
+    /// failure; never modifies anything.
+    Doctor(DoctorCli),
+}
+
+#[derive(Parser, Debug)]
+struct ServeArgs {
     /// Path to the Denyx policy TOML file. Passed to the child
     /// denyx-mcp; also read here for the `[tools.X]` routing block
     /// surfaced to the local model.
@@ -69,29 +83,25 @@ struct Cli {
     #[arg(long, default_value = "target/release/denyx-mcp")]
     mcp_bin: PathBuf,
 
-    /// Local model identifier (provider-specific naming).
+    /// Local chat model identifier. Provider-specific naming
+    /// (e.g. `qwen2.5-coder:7b` on Ollama, `qwen2.5-coder-7b-instruct`
+    /// on LM Studio, full HF id on vLLM).
     #[arg(long, default_value = "qwen2.5-coder:7b")]
     model: String,
 
-    /// Embedding model identifier (provider-specific naming).
+    /// Embedding model identifier. Provider-specific naming.
     #[arg(long, default_value = "nomic-embed-text")]
     embed_model: String,
 
-    /// Which provider API to speak to.
-    #[arg(long, default_value = "ollama")]
-    provider: ProviderKind,
-
-    /// Provider endpoint. Defaults to Ollama's default
-    /// (`http://localhost:11434`). For OpenAI-compat servers, pass
-    /// the `/v1` base URL — examples:
-    /// `http://localhost:8080/v1` (llama.cpp, LocalAI),
-    /// `http://localhost:1234/v1` (LM Studio),
-    /// `http://localhost:8000/v1` (vLLM).
-    #[arg(long, default_value = "http://localhost:11434")]
+    /// OpenAI-compatible API base URL. Default points at Ollama's
+    /// compat layer; for other servers see the table in the
+    /// crate-level docs.
+    #[arg(long, default_value = "http://localhost:11434/v1")]
     endpoint: String,
 
-    /// Bearer token for OpenAI-compat servers that require auth.
-    /// Ignored by the Ollama provider.
+    /// Bearer token for servers that require auth (LocalAI's auth
+    /// plugin, hosted compat shims, etc.). Most local servers ignore
+    /// this.
     #[arg(long, env = "DENYX_LOCAL_API_KEY")]
     api_key: Option<String>,
 
@@ -111,9 +121,50 @@ struct Cli {
     no_precompute: bool,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+#[derive(Parser, Debug)]
+struct DoctorCli {
+    /// OpenAI-compatible API base URL to probe.
+    #[arg(long, default_value = "http://localhost:11434/v1")]
+    endpoint: String,
 
+    /// Bearer token, if the server requires auth.
+    #[arg(long, env = "DENYX_LOCAL_API_KEY")]
+    api_key: Option<String>,
+
+    /// Chat model id to verify is served.
+    #[arg(long, default_value = "qwen2.5-coder:7b")]
+    model: String,
+
+    /// Embed model id to verify is served + can produce a vector.
+    #[arg(long, default_value = "nomic-embed-text")]
+    embed_model: String,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        Cmd::Serve(args) => match serve(args) {
+            Ok(()) => ExitCode::from(0),
+            Err(e) => {
+                eprintln!("denyx-local-mcp: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Cmd::Doctor(args) => {
+            let report = doctor::run(&DoctorArgs {
+                endpoint: args.endpoint,
+                api_key: args.api_key,
+                chat_model: args.model,
+                embed_model: args.embed_model,
+            });
+            let (out, code) = doctor::render(&report);
+            print!("{out}");
+            ExitCode::from(code as u8)
+        }
+    }
+}
+
+fn serve(cli: ServeArgs) -> Result<()> {
     if !cli.mcp_bin.exists() {
         return Err(anyhow!(
             "denyx-mcp binary not found at {:?}. Pass --mcp-bin to point at the right location.",
@@ -121,30 +172,18 @@ fn main() -> Result<()> {
         ));
     }
 
-    // Build the chat provider.
-    let chat: Box<dyn ChatProvider> = match cli.provider {
-        ProviderKind::Ollama => Box::new(OllamaChat::new(cli.endpoint.clone())),
-        ProviderKind::OpenAiCompat => {
-            Box::new(OpenAiCompatChat::new(cli.endpoint.clone()).with_api_key(cli.api_key.clone()))
-        }
-    };
+    let chat = OpenAiCompatChat::new(cli.endpoint.clone()).with_api_key(cli.api_key.clone());
 
-    // Build the embed provider, wrapped in a cache.
-    let embed_inner: Box<dyn EmbedProvider> = match cli.provider {
-        ProviderKind::Ollama => Box::new(OllamaEmbed::new(cli.endpoint.clone(), &cli.embed_model)),
-        ProviderKind::OpenAiCompat => Box::new(
-            OpenAiCompatEmbed::new(cli.endpoint.clone(), &cli.embed_model)
-                .with_api_key(cli.api_key.clone()),
-        ),
-    };
+    let embed_inner = OpenAiCompatEmbed::new(cli.endpoint.clone(), &cli.embed_model)
+        .with_api_key(cli.api_key.clone());
     let embed = CachedEmbed::new(embed_inner);
 
-    // Pre-warm. Skipped on --no-precompute.
     if !cli.no_precompute {
         if let Err(e) = embed.precompute_library_embeddings() {
             eprintln!(
                 "[denyx-local-mcp] warning: precompute_library_embeddings failed: {e}. \
-                 Continuing; first call will pay the embedding cost."
+                 Continuing; first call will pay the embedding cost. \
+                 Run `denyx-local-mcp doctor` for a structured diagnosis."
             );
         }
     }
@@ -176,7 +215,7 @@ fn main() -> Result<()> {
     };
 
     server::run(
-        reader, &writer, &*chat, &embed, &denyx, &cfg, &counter, &*trace,
+        reader, &writer, &chat, &embed, &denyx, &cfg, &counter, &*trace,
     )?;
 
     drop(embed);
