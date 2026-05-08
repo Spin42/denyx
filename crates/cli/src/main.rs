@@ -16,6 +16,7 @@
 //!   5 — i/o or configuration error
 //!   6 — runtime cap exceeded (wall-time deadline / call-stack)
 
+mod doctor;
 mod host_config;
 mod init;
 
@@ -63,6 +64,12 @@ enum Command {
     /// Denyx policy: MCP server wiring + lockdown of built-in
     /// effecting tools + (opt-in) Claude Code OS sandbox stanza.
     HostConfig(HostConfigArgs),
+    /// Read-only project preflight: combines project_diagnosis (what
+    /// files exist, what's wired, lockdown state) with cross-cutting
+    /// consistency checks (policy ↔ host-config ↔ launch-flag ↔
+    /// project state). Single entry point for "is my Denyx setup
+    /// right?". Defaults to the cwd; pass `--project-path <PATH>`.
+    Doctor(doctor::DoctorArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -464,6 +471,10 @@ fn dispatch() -> Result<(), CliError> {
             AuditCommand::Verify(args) => audit_verify(args),
         },
         Command::HostConfig(args) => host_config_cmd(args),
+        Command::Doctor(args) => {
+            let code = doctor::run(args);
+            std::process::exit(code);
+        }
     }
 }
 
