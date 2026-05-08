@@ -647,3 +647,233 @@ allow_commands = ["echo"]
         "argv element `~` alone must be gated as a path; mutant && would let it through"
     );
 }
+
+// ── bwrap_argv mutants (12 survivors targeted) ────────────────────
+
+#[test]
+fn bwrap_argv_starts_with_bwrap_and_includes_isolation_flags() {
+    // Targets the three FnValue mutants on line 1299 that would
+    // replace the whole function body with vec![] / vec![""] /
+    // vec!["xyzzy"]. Any of those would lack the canonical first
+    // element "bwrap" and the standard isolation flags.
+    let p = build("");
+    let argv = p.bwrap_argv(&["echo".into(), "hi".into()], &[]);
+    assert_eq!(argv.first().map(|s| s.as_str()), Some("bwrap"));
+    for required in &[
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        "--unshare-uts",
+        "--unshare-ipc",
+        "--clearenv",
+    ] {
+        assert!(
+            argv.iter().any(|a| a == required),
+            "bwrap argv missing canonical isolation flag {required:?}; got {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn bwrap_argv_drops_netns_when_no_network_is_permitted() {
+    // Targets `delete !` on line 1358 (`if !any_net { ... }`) and
+    // each `delete !` on lines 1352-1357 (`!self.file.network
+    // .http_X_allow.is_empty()` and `!self.file.network
+    // .local_only_hosts.is_empty()`). With NO network listed, all
+    // is_empty() checks are true → originals' negations are false
+    // → any_net=false → --unshare-net is added.
+    //
+    // Mutant `delete !` on line 1358 (`if any_net { … }`) — adds
+    // --unshare-net only when any_net IS true (inverted intent),
+    // so with empty network argv would NOT have --unshare-net.
+    let p = build("");
+    let argv = p.bwrap_argv(&["echo".into(), "hi".into()], &[]);
+    assert!(
+        argv.iter().any(|a| a == "--unshare-net"),
+        "bwrap_argv with no network must drop the netns; got {argv:?}"
+    );
+}
+
+#[test]
+fn bwrap_argv_keeps_netns_when_only_one_http_verb_is_permitted() {
+    // Targets each `||` → `&&` mutation on lines 1352-1357 (the
+    // any_net = !X.is_empty() || !Y.is_empty() || ... chain). With
+    // a SINGLE network field set, original any_net=true → no
+    // --unshare-net. Mutant && requires ALL fields to be
+    // simultaneously non-empty → any_net=false → --unshare-net
+    // wrongly added → child process can't reach the host.
+    //
+    // Plus targets each `delete !` (line 1352-1357 individually).
+    // For example, mutant on line 1352 makes the first OR-term
+    // is_empty() (true when http_get_allow is EMPTY); but here
+    // http_get_allow IS non-empty, so original term is true and
+    // mutant term is false. With other terms also false (other
+    // lists are empty), original any_net=true; mutant any_net=false.
+    let p = build(
+        r#"
+[network]
+http_get_allow = ["api.github.com"]
+"#,
+    );
+    let argv = p.bwrap_argv(&["echo".into(), "hi".into()], &[]);
+    assert!(
+        !argv.iter().any(|a| a == "--unshare-net"),
+        "bwrap_argv with http_get_allow set must keep the netns \
+         (no --unshare-net); got {argv:?}"
+    );
+}
+
+#[test]
+fn bwrap_argv_keeps_netns_for_each_http_verb_independently() {
+    // Same shape as above but exercises every `||` term in the
+    // chain (one per http_*_allow + local_only_hosts). Each `||`
+    // → `&&` mutation is killed by exactly one of the policies
+    // below.
+    let policies = vec![
+        r#"[network]
+http_get_allow = ["x"]
+"#,
+        r#"[network]
+http_post_allow = ["x"]
+"#,
+        r#"[network]
+http_put_allow = ["x"]
+"#,
+        r#"[network]
+http_patch_allow = ["x"]
+"#,
+        r#"[network]
+http_delete_allow = ["x"]
+"#,
+        r#"[network]
+local_only_hosts = ["x"]
+"#,
+    ];
+    for toml in policies {
+        let p = build(toml);
+        let argv = p.bwrap_argv(&["echo".into(), "hi".into()], &[]);
+        assert!(
+            !argv.iter().any(|a| a == "--unshare-net"),
+            "any single network field non-empty must keep netns; \
+             policy={toml:?} argv={argv:?}"
+        );
+    }
+}
+
+// ── derive_capabilities `delete !` mutants (5 survivors) ──────────
+
+#[test]
+fn derive_capabilities_omits_fs_write_when_write_allow_is_empty() {
+    // Targets `delete !` on line 1729 (`if !fs.write_allow
+    // .is_empty()`). Original: pushes fs.write only if non-empty.
+    // Mutant `if fs.write_allow.is_empty()`: pushes fs.write when
+    // the list IS empty (inverted), letting the verifier accept
+    // fs.write calls without any write paths configured.
+    let p = build(
+        r#"
+[filesystem]
+read_allow = ["/x/**"]
+"#,
+    );
+    let funcs = p.effective_functions();
+    assert!(
+        !funcs.contains(&"fs.write"),
+        "fs.write must NOT be enabled when write_allow is empty; got: {funcs:?}"
+    );
+}
+
+#[test]
+fn derive_capabilities_omits_fs_delete_when_delete_allow_is_empty() {
+    // Targets `delete !` on line 1732 (fs.delete check).
+    let p = build("");
+    let funcs = p.effective_functions();
+    assert!(
+        !funcs.contains(&"fs.delete"),
+        "fs.delete must NOT be enabled when delete_allow is empty; got: {funcs:?}"
+    );
+}
+
+#[test]
+fn derive_capabilities_omits_unset_http_verbs() {
+    // Targets `delete !` on lines 1737, 1740, 1743, 1746, 1749
+    // (the http_*_allow checks). Each `!X.is_empty() ||
+    // any_local_only_host` becomes `X.is_empty() ||
+    // any_local_only_host` — pushes the verb when X is empty AND
+    // any_local_only_host is false (i.e., always when X is empty
+    // unless local_only_hosts has entries).
+    //
+    // Setup: completely empty network. Original: derives no http_*
+    // verbs. Mutant: derives whichever ones it mishandles. Test
+    // asserts NONE are present.
+    let p = build("");
+    let funcs = p.effective_functions();
+    for v in &[
+        "net.http_get",
+        "net.http_post",
+        "net.http_put",
+        "net.http_patch",
+        "net.http_delete",
+    ] {
+        assert!(
+            !funcs.contains(v),
+            "{v} must NOT be enabled with empty network; got: {funcs:?}"
+        );
+    }
+}
+
+#[test]
+fn derive_capabilities_omits_env_read_when_no_env_lists_set() {
+    // Targets `delete !` analogue on line 1753 (`if !env
+    // .allow_vars.is_empty() || !env.local_only_vars.is_empty()`).
+    let p = build("");
+    let funcs = p.effective_functions();
+    assert!(
+        !funcs.contains(&"env.read"),
+        "env.read must NOT be enabled with no env lists; got: {funcs:?}"
+    );
+}
+
+#[test]
+fn derive_capabilities_omits_subprocess_exec_when_no_command_lists_set() {
+    // Targets the corresponding `delete !` on line 1757 (subprocess
+    // check).
+    let p = build("");
+    let funcs = p.effective_functions();
+    assert!(
+        !funcs.contains(&"subprocess.exec"),
+        "subprocess.exec must NOT be enabled with no commands; got: {funcs:?}"
+    );
+}
+
+// ── looks_like_path_arg line-1567 mutant ──────────────────────────
+
+#[test]
+fn looks_like_path_arg_treats_empty_string_as_not_a_path() {
+    // Targets `||` → `&&` on line 1567 (`if arg.is_empty() || arg
+    // == "-" { return false; }`). Mutant requires BOTH conditions
+    // (impossible: empty string is not "-"), so the early return
+    // never fires. Empty string then falls through to
+    // `root.join("").exists()` which is true (root exists), and
+    // looks_like_path_arg returns true — gating the empty-string
+    // arg as a path.
+    //
+    // Test via check_subprocess_argv_paths: argv with an empty
+    // arg and a policy that doesn't permit the root. Original
+    // skips the empty arg (looks_like_path_arg=false → continue).
+    // Mutant treats it as a path → resolves to root → which is
+    // not in any allow list → Err.
+    let p = build(
+        r#"
+[subprocess]
+allow_commands = ["echo"]
+"#,
+    );
+    // Empty string for arg.
+    let argv: Vec<String> = vec!["echo".into(), "".into()];
+    let r = p.check_subprocess_argv_paths(&argv);
+    assert!(
+        r.is_ok(),
+        "empty-string argv elements must NOT be gated as paths; \
+         mutant `&&` on the empty/dash check would gate them. got: {r:?}"
+    );
+}
