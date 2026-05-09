@@ -30,9 +30,15 @@ examine_globs = [
 
 # Pad the auto-detected per-mutant test timeout. cargo-mutants
 # measures the unmutated test suite's run time and multiplies by
-# this. 5x is generous enough to absorb mutants that incidentally
-# run a few tests slower without producing false-positive timeouts.
-timeout_multiplier = 5.0
+# this. 2.5x is enough to absorb mutants that incidentally run a
+# few tests slower without producing false-positive timeouts, while
+# keeping the cost of any genuinely-infinite-loop mutant we haven't
+# pre-excluded under control. Was 5x; dropped after a sharded CI
+# run showed legitimate-looking timeouts dominated shard wallclock
+# (each one paid the full 5x ≈ 125s). 2.5x ≈ 60s is plenty: the
+# slowest legitimate mutant in the monitored files runs well under
+# 30s, baseline test is ~25s.
+timeout_multiplier = 2.5
 
 # Lower bound on the per-mutant timeout (seconds). Without this the
 # tool can pick a tiny base time on a warm machine and start
@@ -51,6 +57,39 @@ exclude_re = [
     # is the form `replace X with Y in <function>` — i.e. the
     # function name comes AFTER the operator change. Patterns below
     # match against this full string; substring order matters.
+
+    # ─── Loop-counter `+=` mutations ───────────────────────────────
+    #
+    # Every `+=` operator in the three monitored files is a `usize`
+    # loop counter walking forward through a buffer. Mutating the
+    # increment to `*=` keeps the counter at 0 (since the most-
+    # common entry value is 0 and 0 * n = 0); mutating to `-=`
+    # either oscillates with adjacent paths that increment by 2
+    # (the escape-handling branch in `strip_strings_and_comments`,
+    # for instance) or underflows in release-mode wraparound.
+    # Either way the function never terminates.
+    #
+    # cargo-mutants classifies these as TIMEOUT, which is a valid
+    # "tests didn't catch this" signal — but since the only way to
+    # catch them is *by* a timeout (no assertion can detect a hang
+    # while still being meaningful), they each cost the full
+    # `timeout_multiplier × baseline` of CI wallclock for zero new
+    # information. The function structure (`while i < bytes.len()`
+    # plus a forward-walking counter) is what guarantees
+    # termination; the type system and the loop guard together
+    # make these mutants uninteresting.
+    #
+    # If you add a non-counter `+=` (an accumulator, a stat
+    # tracker, a length tally) to any of these files later, you
+    # must NARROW these patterns to the specific counter functions
+    # so the new accumulator's `+=` is not silently ignored. Today
+    # all `+=` operators in scope are counters; verified with
+    # `grep -n '+=' crates/host/src/{verifier,taint}.rs` returning
+    # only loop-counter call sites.
+    "verifier\\.rs:.*replace \\+= with \\*= in (contains_word|strip_strings_and_comments)",
+    "verifier\\.rs:.*replace \\+= with -= in (contains_word|strip_strings_and_comments)",
+    "taint\\.rs:.*replace \\+= with \\*= in b64_encode",
+    "taint\\.rs:.*replace \\+= with -= in b64_encode",
 
     # b64_encode combines bytes via bitwise OR after shifting them
     # to non-overlapping positions (0-7, 8-15, 16-23). For non-
