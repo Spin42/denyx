@@ -246,6 +246,31 @@ fn serve(cli: ServeArgs) -> Result<()> {
     let denyx = DenyxMcpClient::spawn(&cli.mcp_bin, &cli.policy, cli.audit_log.as_deref())
         .context("spawn child denyx-mcp")?;
 
+    // Cross-cutting consistency check: load the same policy file the
+    // child denyx-mcp loads, run it through the project diagnosis,
+    // and put the bridge into BLOCKED mode if any Critical issues
+    // are found. The visibility shape mirrors denyx-mcp's: instead
+    // of advertising `delegate_to_local`, the bridge advertises only
+    // `denyx_blocked` so the model is told about the inconsistency
+    // before it can route any work to the local executor. See
+    // `denyx_host::startup_block`.
+    let blocked = match denyx_host::Policy::load(&cli.policy) {
+        Ok(policy) => {
+            let project_root =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let diagnosis = denyx_host::project_diagnosis::diagnose(&project_root);
+            denyx_host::startup_block::compute(&policy, &diagnosis)
+        }
+        // Policy file unloadable here is not fatal — the child
+        // denyx-mcp will report it via its own startup banner /
+        // tool-call errors. Skip the consistency check; the child
+        // is the source of truth for policy validity.
+        Err(_) => None,
+    };
+    if let Some(ref state) = blocked {
+        eprint!("{}", state.stderr_banner);
+    }
+
     let routing_block = render_tools_routing(&load_tools_routing(&cli.policy));
     if !routing_block.is_empty() {
         let tool_count = routing_block.matches("\n- ").count();
@@ -270,7 +295,15 @@ fn serve(cli: ServeArgs) -> Result<()> {
     };
 
     server::run(
-        reader, &writer, &chat, &embed, &denyx, &cfg, &counter, &*trace,
+        reader,
+        &writer,
+        &chat,
+        &embed,
+        &denyx,
+        &cfg,
+        &counter,
+        &*trace,
+        blocked.as_ref(),
     )?;
 
     drop(embed);

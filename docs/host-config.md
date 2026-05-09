@@ -281,6 +281,16 @@ just on. Don't add `denyx.toml`, `./.claude/settings.json`,
 or you'll either trip the runtime guard or hand the agent a way to
 disable the gate.
 
+There's also a **runtime check on every MCP server startup** that
+catches the inverse failure: a policy update without a matching
+`host-config` re-run. If `denyx-mcp` finds Critical-severity
+inconsistency between the loaded policy and the project's
+host-config files, it refuses to advertise its capability tools and
+instead surfaces a single `denyx_blocked` tool whose description
+tells the agent to alert the user. Run `denyx doctor --fix` and
+restart the host to recover. Full mechanism at
+[doctor.md — Startup blocking](doctor.md#startup-blocking--the-mcp-servers-refuse-to-serve-when-inconsistent).
+
 ## Diagnosing the result
 
 After running `host-config`, run [`denyx doctor`](doctor.md) to

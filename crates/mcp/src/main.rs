@@ -315,14 +315,51 @@ every tool call will fail until you launch with --policy <project.toml> or \
         }),
     };
 
-    let runner = Runner::new(policy)
-        .with_audit(audit)
-        .with_confirm_hook(confirm_hook);
+    // Cross-cutting consistency check on the freshly-loaded policy
+    // against the project's host configs. Critical-severity issues
+    // put the server into BLOCKED mode: it stays alive (so the host
+    // doesn't see a crashed process) but advertises only the
+    // `denyx_blocked` tool whose description tells the agent to
+    // surface the situation to the user. See `blocked.rs`.
+    //
+    // First-run guard lives inside `denyx_host::startup_block::compute`: when no
+    // host-config files are present, there's nothing to be
+    // inconsistent with, so the check is skipped. That keeps the
+    // very first `denyx-mcp` startup before `denyx host-config` has
+    // been run from locking itself out.
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let diagnosis = denyx_host::project_diagnosis::diagnose(&project_root);
+    let blocked_state = denyx_host::startup_block::compute(&policy, &diagnosis);
+    if let Some(ref state) = blocked_state {
+        eprint!("{}", state.stderr_banner);
+    }
+
+    // Build the runner only when not blocked. In blocked mode we
+    // never dispatch a real tool call, so there's no point owning
+    // a `Runner` we can't use.
+    let runner = if blocked_state.is_none() {
+        Some(
+            Runner::new(policy)
+                .with_audit(audit)
+                .with_confirm_hook(confirm_hook),
+        )
+    } else {
+        // Audit + confirm machinery isn't reachable in blocked mode;
+        // explicitly drop them so any background threads or open
+        // sinks shut down cleanly.
+        drop(audit);
+        drop(confirm_hook);
+        None
+    };
 
     let mut counter: u64 = 0;
     while let Ok(value) = req_rx.recv() {
         let resp = match serde_json::from_value::<Request>(value) {
-            Ok(req) => handle(&runner, &mut counter, &elicit_supported, req),
+            Ok(req) => match (&blocked_state, runner.as_ref()) {
+                (Some(state), _) => handle_blocked(state, req),
+                (None, Some(r)) => handle(r, &mut counter, &elicit_supported, req),
+                (None, None) => unreachable!("runner is Some when not blocked"),
+            },
             Err(e) => Response::error(Value::Null, -32700, format!("parse error: {e}"), None),
         };
         let line = serde_json::to_string(&resp)?;
@@ -331,6 +368,48 @@ every tool call will fail until you launch with --policy <project.toml> or \
         out.flush()?;
     }
     Ok(())
+}
+
+/// Dispatch table for blocked-startup mode. `initialize`,
+/// `initialized`, and `ping` keep the JSON-RPC handshake working so
+/// the host considers the server alive. `tools/list` returns only
+/// `denyx_blocked`. `tools/call` for any tool name returns the same
+/// block payload — the model has no path to a real capability.
+fn handle_blocked(state: &denyx_host::startup_block::BlockedState, req: Request) -> Response {
+    let _ = req.jsonrpc;
+    let id = req.id.clone();
+    match req.method.as_str() {
+        "initialize" => {
+            // Echo the client's protocol version when present so the
+            // handshake completes; we don't negotiate elicitation in
+            // blocked mode (no per-call confirms can fire).
+            let proto = req
+                .params
+                .get("protocolVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or(PROTOCOL_VERSION)
+                .to_string();
+            Response::ok(
+                id,
+                json!({
+                    "protocolVersion": proto,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                }),
+            )
+        }
+        "initialized" | "notifications/initialized" => Response::ok(id, json!({})),
+        "tools/list" => Response::ok(id, json!({ "tools": denyx_host::startup_block::tool_definitions(state) })),
+        "tools/call" => Response::ok(id, denyx_host::startup_block::call_response_body(state)),
+        "ping" => Response::ok(id, json!({})),
+        "__parse_error__" => Response::error(
+            id,
+            -32700,
+            "parse error: incoming line was not valid JSON".into(),
+            None,
+        ),
+        other => Response::error(id, -32601, format!("method not found: {other}"), None),
+    }
 }
 
 /// Cascade-load the Denyx control-plane config. The cascade is:

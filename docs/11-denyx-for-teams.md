@@ -140,6 +140,30 @@ deliberately small (two HTTP endpoints) and you can stand it up in
 an afternoon, but it is real infrastructure with real
 operational cost.
 
+> **Policy updates require a local `denyx doctor --fix` + restart.**
+> When the server-side policy changes, `denyx-mcp` will fetch the
+> new version on next startup, but the developer's local
+> `.claude/settings.json` (deny list, sandbox stanza) and equivalents
+> for other hosts are derived from the policy at the last
+> `denyx host-config` run and may now be stale. The runtime catches
+> this on every startup: if Critical-severity inconsistency is
+> found, the MCP server refuses to advertise its capability tools
+> and surfaces a `denyx_blocked` tool that tells the agent to alert
+> the user. Recovery is one command:
+> ```sh
+> denyx doctor --fix     # apply mechanical re-derivations
+> # … restart the coding host so denyx-mcp reloads …
+> ```
+> Operator-judgment issues (allow-list additions, capability grants
+> that need approval) remain in the report and require manual
+> action. Full mechanism at
+> [doctor.md — Startup blocking](doctor.md#startup-blocking--the-mcp-servers-refuse-to-serve-when-inconsistent).
+> This is by design: the alternative — `denyx-mcp` silently
+> re-emitting `.claude/settings.json` from a server-fetched policy —
+> would let the central server change every developer's local
+> sandbox config without explicit operator consent. We picked
+> friction over magic.
+
 > **Routing note.** Just like the audit-identity case below, the
 > client passes the URL and the bearer token to the server and
 > nothing else. **The server decides which policy to return** by

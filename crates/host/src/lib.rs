@@ -16,8 +16,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 
-use denyx_policy::Policy;
-pub use denyx_policy::PolicyError;
+pub use denyx_policy::{Policy, PolicyError};
 use starlark::any::ProvidesStaticType;
 use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
@@ -31,6 +30,7 @@ pub mod audit;
 pub mod confirm;
 pub mod policy_host_consistency;
 pub mod project_diagnosis;
+pub mod startup_block;
 pub mod taint;
 pub mod verifier;
 

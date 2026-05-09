@@ -322,6 +322,76 @@ models / embed round-trip. Useful when:
   warn-vs-OK on the project-side checks distinguishes a wired
   bridge from a bypassed one.
 
+## Startup blocking — the MCP servers refuse to serve when inconsistent
+
+`denyx-mcp` and `denyx-local-mcp` run the same cross-cutting
+consistency check on **every startup**, against the freshly-loaded
+policy (whether from `--policy <file>` or `--policy-url <url>`). If
+any `Critical`-severity issues are found, the MCP server enters
+**blocked mode** instead of starting normally.
+
+This catches the team-mode failure pattern the centralised-policy
+shape introduces: a developer's machine fetches an updated policy
+from the server but the local host-config files (`.claude/settings.json`,
+`opencode.json`, …) are stale from the last `denyx host-config` run,
+and the gate would silently operate against an inconsistent surface.
+It also catches the local-edit equivalent: someone edits `denyx.toml`,
+forgets `denyx host-config`, restarts the host.
+
+### What blocked mode looks like
+
+The MCP server stays alive (the host doesn't see a crashed process),
+but:
+
+- **`tools/list` advertises only one tool: `denyx_blocked`**, whose
+  description tells the agent to surface the inconsistency to the
+  user verbatim before doing anything else. Hosts pass tool
+  descriptions to the model on every turn, so the model sees the
+  message immediately — no tool call required.
+- **`tools/call` for any tool name** (`denyx_run`, `denyx_fs_read`,
+  `denyx_blocked` itself, `delegate_to_local` on the bridge, …)
+  returns a structured payload with `isError: true`,
+  `denyx_error_kind: "blocked_startup"`, and the full list of
+  Critical issues + their fix instructions.
+- **Stderr mirrors the message** prefixed `denyx-mcp: ` per line, so
+  `claude --mcp-debug` and host log panels surface it.
+
+The model has **no path to a real capability** until the operator
+fixes the inconsistency and restarts the host.
+
+### Resolving a blocked startup
+
+```sh
+denyx doctor --fix
+# … apply the auto-fixes, fix any operator-judgment issues manually …
+# … then restart Claude Code / opencode / Cursor / etc.
+```
+
+The fix path is the same as for any other `denyx doctor` finding —
+the `--fix` flag handles mechanically re-derivable issues
+(re-emitting the sandbox stanza, refreshing the deny list, creating
+the audit dir) and prints manual instructions for everything else.
+
+### First-run guard
+
+If the project has **no host-config files at all** (`.mcp.json`,
+`opencode.json`, etc. all absent), the consistency check is skipped
+— there's nothing to be inconsistent with. This keeps the first
+`denyx-mcp` startup before `denyx host-config` has been run from
+locking itself out.
+
+### Visibility caveat by host
+
+| Host | Model sees the block | Why |
+|---|---|---|
+| Claude Code | ✅ strong | Built-in deny list + only Denyx tools available; `denyx_blocked` is the only tool that exists. |
+| opencode | ✅ strong | `permission` block whitelists `denyx*`; same effect. |
+| Continue | ✅ strong | `tools: []` empty allowlist; same effect. |
+| Cursor / Copilot / Cline | ⚠ partial | Built-in tools (Read/Edit/Bash) are still available, so the model could route around `denyx_blocked` and use those instead. The user still sees the message via the tool description if the model lists tools, but enforcement leaks. See [14-other-hosts.md](14-other-hosts.md) for the underlying lockdown gap. |
+
+If your threat model treats the block as load-bearing, use a host
+with strong lockdown.
+
 ## Decision matrix
 
 | Question | Run |

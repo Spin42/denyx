@@ -102,6 +102,13 @@ impl TraceSink for FileTraceSink {
 /// Returning Ok means the server shut down cleanly (EOF on stdin).
 /// Returning Err means write failures on `output` — the orchestrator
 /// likely went away.
+///
+/// `blocked` is the optional startup-block state computed by the
+/// caller from `denyx_host::startup_block::compute`. When `Some`,
+/// every request goes through the blocked-mode dispatch:
+/// `tools/list` advertises only `denyx_blocked`; `tools/call`
+/// returns the fix-instructions payload regardless of which tool
+/// name was invoked. The model never reaches `delegate_to_local`.
 #[allow(clippy::too_many_arguments)]
 pub fn run<I, O, C, E, R, T>(
     mut input: I,
@@ -112,6 +119,7 @@ pub fn run<I, O, C, E, R, T>(
     cfg: &StepConfig,
     counter: &Mutex<u64>,
     trace: &T,
+    blocked: Option<&denyx_host::startup_block::BlockedState>,
 ) -> Result<()>
 where
     I: BufRead,
@@ -150,8 +158,8 @@ where
         let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let resp = match method {
-            "initialize" => make_response(
+        let resp = match (blocked, method) {
+            (_, "initialize") => make_response(
                 id,
                 Some(json!({
                     "protocolVersion": PROTOCOL_VERSION,
@@ -160,11 +168,27 @@ where
                 })),
                 None,
             ),
-            "initialized" | "notifications/initialized" => make_response(id, Some(json!({})), None),
-            "tools/list" => make_response(id, Some(json!({"tools": tool_definitions()})), None),
-            "tools/call" => handle_tool_call(id, &params, chat, embed, denyx, cfg, counter, trace),
-            "ping" => make_response(id, Some(json!({})), None),
-            other => make_response(
+            (_, "initialized") | (_, "notifications/initialized") => {
+                make_response(id, Some(json!({})), None)
+            }
+            (Some(state), "tools/list") => make_response(
+                id,
+                Some(json!({"tools": denyx_host::startup_block::tool_definitions(state)})),
+                None,
+            ),
+            (Some(state), "tools/call") => make_response(
+                id,
+                Some(denyx_host::startup_block::call_response_body(state)),
+                None,
+            ),
+            (None, "tools/list") => {
+                make_response(id, Some(json!({"tools": tool_definitions()})), None)
+            }
+            (None, "tools/call") => {
+                handle_tool_call(id, &params, chat, embed, denyx, cfg, counter, trace)
+            }
+            (_, "ping") => make_response(id, Some(json!({})), None),
+            (_, other) => make_response(
                 id,
                 None,
                 Some(json!({
@@ -363,6 +387,15 @@ mod tests {
     }
 
     fn run_with_inputs(input: &str, chat: StubChat, denyx: StubDenyx) -> Vec<Value> {
+        run_with_inputs_blocked(input, chat, denyx, None)
+    }
+
+    fn run_with_inputs_blocked(
+        input: &str,
+        chat: StubChat,
+        denyx: StubDenyx,
+        blocked: Option<&denyx_host::startup_block::BlockedState>,
+    ) -> Vec<Value> {
         let reader = Cursor::new(input.as_bytes().to_vec());
         let writer: Vec<u8> = Vec::new();
         let writer = Mutex::new(writer);
@@ -371,7 +404,7 @@ mod tests {
         let cfg = StepConfig::default();
         let embed = StubEmbed;
         run(
-            reader, &writer, &chat, &embed, &denyx, &cfg, &counter, &trace,
+            reader, &writer, &chat, &embed, &denyx, &cfg, &counter, &trace, blocked,
         )
         .unwrap();
         let buf = writer.into_inner().unwrap();
@@ -388,6 +421,98 @@ mod tests {
         assert_eq!(resps.len(), 1);
         assert_eq!(resps[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(resps[0]["result"]["serverInfo"]["name"], SERVER_NAME);
+    }
+
+    /// Synthesise a `BlockedState` for tests that exercise the
+    /// blocked-mode dispatch in `run()`. The field shapes are what
+    /// the production renderer produces; we don't re-test rendering
+    /// here (that's covered in
+    /// `denyx_host::startup_block::tests::render_*`).
+    fn fixture_blocked_state() -> denyx_host::startup_block::BlockedState {
+        denyx_host::startup_block::BlockedState {
+            issues: vec![],
+            tool_description: "TEST_BLOCKED_DESC: run `denyx doctor --fix`".into(),
+            call_text: "TEST_BLOCKED_CALL: run `denyx doctor --fix`".into(),
+            stderr_banner: "TEST_BLOCKED_STDERR\n".into(),
+        }
+    }
+
+    #[test]
+    fn blocked_mode_tools_list_advertises_only_denyx_blocked() {
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+"#;
+        let state = fixture_blocked_state();
+        let resps = run_with_inputs_blocked(
+            input,
+            StubChat(Mutex::new(vec![])),
+            StubDenyx(Mutex::new(vec![])),
+            Some(&state),
+        );
+        let tools = resps[0]["result"]["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            1,
+            "blocked tools/list must return exactly one tool"
+        );
+        assert_eq!(
+            tools[0]["name"], "denyx_blocked",
+            "blocked tools/list must not advertise delegate_to_local"
+        );
+        assert_eq!(
+            tools[0]["description"], "TEST_BLOCKED_DESC: run `denyx doctor --fix`",
+            "blocked tools/list must use the BlockedState's rendered description"
+        );
+    }
+
+    #[test]
+    fn blocked_mode_tools_call_returns_blocked_payload_for_delegate_to_local() {
+        let input = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delegate_to_local","arguments":{"step":"say hi"}}}
+"#;
+        let state = fixture_blocked_state();
+        // Stub providers must NOT be consulted — the blocked-mode
+        // dispatch short-circuits before the pipeline runs. If they
+        // are consulted, the empty-queue stubs would return errors
+        // and we'd see those instead of the blocked payload.
+        let resps = run_with_inputs_blocked(
+            input,
+            StubChat(Mutex::new(vec![])),
+            StubDenyx(Mutex::new(vec![])),
+            Some(&state),
+        );
+        let result = &resps[0]["result"];
+        assert_eq!(
+            result["isError"], true,
+            "blocked tools/call must mark isError=true: {result}"
+        );
+        assert_eq!(
+            result["denyx_error_kind"].as_str(),
+            Some("blocked_startup"),
+            "error kind tag must be present so hosts can route on it"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("TEST_BLOCKED_CALL"),
+            "blocked tools/call must surface the BlockedState's call_text: {text}"
+        );
+    }
+
+    #[test]
+    fn blocked_mode_initialize_still_succeeds() {
+        // Handshake must complete even in blocked mode so the host
+        // doesn't see a crashed server.
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+"#;
+        let state = fixture_blocked_state();
+        let resps = run_with_inputs_blocked(
+            input,
+            StubChat(Mutex::new(vec![])),
+            StubDenyx(Mutex::new(vec![])),
+            Some(&state),
+        );
+        assert_eq!(
+            resps[0]["result"]["protocolVersion"], PROTOCOL_VERSION,
+            "initialize must succeed in blocked mode"
+        );
     }
 
     #[test]
