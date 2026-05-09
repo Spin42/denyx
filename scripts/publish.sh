@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# Publish all four Denyx crates to crates.io in dependency order.
+# Publish all five Denyx crates to crates.io in dependency order.
 #
 # Crates and their dep graph:
 #
-#   denyx-policy   (no internal deps)
-#   denyx-host     (depends on denyx-policy)
-#   denyx-cli      (depends on denyx-policy + denyx-host)
-#   denyx-mcp      (depends on denyx-policy + denyx-host)
+#   denyx-policy     (no internal deps)
+#   denyx-host       (depends on denyx-policy)
+#   denyx-cli        (depends on denyx-policy + denyx-host)
+#   denyx-mcp        (depends on denyx-policy + denyx-host)
+#   denyx-local-mcp  (depends on denyx-host)
 #
-# Cargo can't publish all four in one shot — workspace deps with
+# Cargo can't publish all five in one shot — workspace deps with
 # version specs require the upstream crate to already be visible
 # in the crates.io index before the downstream's `cargo publish`
 # starts. Between each step we wait for index propagation
@@ -67,6 +68,7 @@ CRATES=(
     denyx-host
     denyx-cli
     denyx-mcp
+    denyx-local-mcp
 )
 
 # How long to wait between publishes for the crates.io index to
