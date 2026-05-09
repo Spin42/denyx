@@ -23,13 +23,38 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
+# ─── Why this workflow is sharded ───────────────────────────────────
+# .cargo/mutants.toml currently scopes to ~450 mutants across the
+# three security-critical files. At ~50s per mutant, a single runner
+# would need ~3-6 hours wall-clock — well past the point where
+# GitHub-hosted ubuntu-latest runners reliably stay alive (we
+# observed reaping at the ~35min mark with `The runner has received
+# a shutdown signal`).
+#
+# Splitting into 4 parallel shards (≈110 mutants each, ≈25-30 min
+# wallclock per shard) keeps every runner's lifetime well inside the
+# reliable-completion window. The combine job aggregates the
+# per-shard reports into one summary so the badge / GITHUB_STEP_SUMMARY
+# remain a single coherent view of "how is the security core doing".
+# ────────────────────────────────────────────────────────────────────
+
 jobs:
   mutants:
-    name: cargo-mutants (security core)
+    name: cargo-mutants shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
-    # Mutation runs are slow; give them headroom but cap so a stuck
-    # job doesn't burn CI minutes for an entire day.
-    timeout-minutes: 180
+    # Per-shard timeout. ~110 mutants × ~50s with --jobs 2 leaves
+    # comfortable margin under 60 min. Set well above the expected
+    # finish time but well below the runner-reaping threshold so a
+    # genuinely stuck shard fails its own matrix instance without
+    # taking down the others.
+    timeout-minutes: 75
+    strategy:
+      # If one shard fails (e.g. a single hard-timeout mutant or a
+      # transient runner issue), the other three should still report
+      # their results so the combined view is still useful.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +70,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # All shards share the same dependency-build cache. Each
+          # mutant rebuilds the *changed crate* against pre-built
+          # deps, so a hot dep cache cuts per-mutant build time
+          # dramatically. Distinct cache keys per shard would force
+          # 4× the cache work for no benefit.
+          shared-key: mutants-deps
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2
@@ -57,13 +89,28 @@ jobs:
       - name: cargo test (baseline)
         run: cargo test --workspace --locked --no-fail-fast
 
-      - name: Run mutation tests
-        # `-j 4` parallelism; the runner has 4 cores and we want
-        # decent throughput without burying ourselves in cache
-        # contention. The config in .cargo/mutants.toml scopes to
-        # the three security-critical files.
+      - name: Run mutation tests (shard ${{ matrix.shard }}/4)
+        # `--jobs 2` (vs the previous `--jobs 4`): cargo-mutants
+        # spawns N parallel cargo invocations, each of which itself
+        # runs cargo with the runner's NCPUS jobserver. -j 4 on a
+        # 4-vCPU runner produced disk + memory contention; -j 2
+        # gives each parallel mutant breathing room and finishes
+        # faster overall on a constrained runner.
+        #
+        # `--shard ${{ matrix.shard }}/4` partitions the full
+        # mutant set deterministically — combined with
+        # `--no-shuffle` from .cargo/mutants.toml, shard k always
+        # contains the same mutants across runs.
+        #
+        # `|| echo "..."` swallows the non-zero exit code that
+        # cargo-mutants returns when *any* mutant survives. A
+        # surviving mutant is interesting-but-expected output, not
+        # a workflow failure. Combined with `continue-on-error:
+        # true` below, this keeps the badge green when the only
+        # "failure" is "tests didn't catch every mutation."
         run: |
-          cargo mutants --workspace --no-shuffle --jobs 4 \
+          cargo mutants --workspace --no-shuffle --jobs 2 \
+            --shard ${{ matrix.shard }}/4 \
             --output mutants-output \
             || echo "mutants-exit-code=$?" >> "$GITHUB_OUTPUT"
         id: mutants
@@ -73,38 +120,93 @@ jobs:
       # job's exit code is non-zero (which it will be whenever any
       # mutant survives — that's expected output, not a workflow
       # failure).
-      - name: Upload mutation report
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-output/
+          retention-days: 30
+
+  combine:
+    name: Aggregate shard reports
+    needs: mutants
+    # Run even if some shards failed — partial data is still useful.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download all shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: shards/
+
+      - name: Combine and summarise
+        run: |
+          # Aggregate the per-status text files across all shards.
+          # cargo-mutants writes one line per mutant in each of:
+          #   - missed.txt   — surviving mutants (test gap)
+          #   - timeout.txt  — mutants that hung (likely infinite loop)
+          #   - unviable.txt — mutants that failed to compile
+          #   - caught.txt   — mutants killed by tests
+          mkdir -p combined
+          for f in missed timeout unviable caught; do
+            : > "combined/${f}.txt"
+            for shard_dir in shards/mutants-shard-*; do
+              if [ -f "${shard_dir}/${f}.txt" ]; then
+                cat "${shard_dir}/${f}.txt" >> "combined/${f}.txt"
+              fi
+            done
+          done
+
+          {
+            echo "## Mutation testing summary (4-way sharded)"
+            echo ""
+
+            shards_present=$(find shards -maxdepth 1 -type d -name 'mutants-shard-*' | wc -l)
+            echo "Shards reporting: ${shards_present}/4"
+            echo ""
+
+            if [ -s combined/missed.txt ]; then
+              n=$(wc -l < combined/missed.txt)
+              echo "**${n} surviving mutant(s)** — tests did not catch these mutations."
+              echo ""
+              echo "<details><summary>Show surviving mutants</summary>"
+              echo ""
+              echo '```'
+              cat combined/missed.txt
+              echo '```'
+              echo "</details>"
+            else
+              if [ "${shards_present}" -eq 4 ]; then
+                echo "✅ No surviving mutants across all 4 shards."
+              else
+                echo "⚠ No surviving mutants in the **${shards_present}** shards that reported, but **$((4 - shards_present))** shard(s) did not produce a report. Re-run to confirm full coverage."
+              fi
+            fi
+
+            if [ -s combined/timeout.txt ]; then
+              t=$(wc -l < combined/timeout.txt)
+              echo ""
+              echo "${t} mutant(s) timed out (likely an infinite-loop mutation)."
+            fi
+            if [ -s combined/unviable.txt ]; then
+              u=$(wc -l < combined/unviable.txt)
+              echo ""
+              echo "${u} mutant(s) failed to compile (uninteresting; type-system or borrow-check rejected)."
+            fi
+            if [ -s combined/caught.txt ]; then
+              c=$(wc -l < combined/caught.txt)
+              echo ""
+              echo "${c} mutant(s) caught by tests."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mutants-report
-          path: mutants-output/
+          path: combined/
           retention-days: 30
-
-      - name: Summarise surviving mutants
-        if: always()
-        run: |
-          echo "## Mutation testing summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f mutants-output/missed.txt ] && [ -s mutants-output/missed.txt ]; then
-            n=$(wc -l < mutants-output/missed.txt)
-            echo "**$n surviving mutant(s)** — tests did not catch these mutations." >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "<details><summary>Show surviving mutants</summary>" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            cat mutants-output/missed.txt >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "✅ No surviving mutants." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f mutants-output/timeout.txt ] && [ -s mutants-output/timeout.txt ]; then
-            t=$(wc -l < mutants-output/timeout.txt)
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "$t mutant(s) timed out (likely an infinite-loop mutation)." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f mutants-output/unviable.txt ] && [ -s mutants-output/unviable.txt ]; then
-            u=$(wc -l < mutants-output/unviable.txt)
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "$u mutant(s) failed to compile (uninteresting; type-system or borrow-check rejected)." >> "$GITHUB_STEP_SUMMARY"
-          fi
