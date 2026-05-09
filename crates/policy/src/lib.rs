@@ -2071,7 +2071,9 @@ mod helpers_tests {
         // skips the home_dir branch.
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/test_home"); }
+        unsafe {
+            std::env::set_var("HOME", "/test_home");
+        }
         let root = PathBuf::from("/policy_root");
         let out = collect_concrete_prefixes(&root, &["~".to_string()]);
         match saved {
@@ -2127,7 +2129,9 @@ mod helpers_tests {
     fn home_dir_returns_some_when_home_set() {
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/test_home_42"); }
+        unsafe {
+            std::env::set_var("HOME", "/test_home_42");
+        }
         let r = home_dir();
         match saved {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
@@ -2142,7 +2146,9 @@ mod helpers_tests {
         // Some, not None.
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("HOME");
-        unsafe { std::env::remove_var("HOME"); }
+        unsafe {
+            std::env::remove_var("HOME");
+        }
         let r = home_dir();
         match saved {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
@@ -2249,7 +2255,9 @@ sandbox = "bwrap"
         // sandbox=bwrap but bwrap is not on PATH.
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("PATH");
-        unsafe { std::env::set_var("PATH", ""); }
+        unsafe {
+            std::env::set_var("PATH", "");
+        }
 
         let file = PolicyFile::from_toml_str(
             r#"

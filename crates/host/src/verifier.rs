@@ -277,10 +277,7 @@ mod strip_tests {
         //   docstring content.
         // Output: leading space (the docstring), then `\n` and the
         // real code untouched.
-        assert_eq!(
-            s("\"\"\"doc\"\"\"\nfs.read"),
-            " \nfs.read"
-        );
+        assert_eq!(s("\"\"\"doc\"\"\"\nfs.read"), " \nfs.read");
     }
 
     #[test]
@@ -291,10 +288,7 @@ mod strip_tests {
         // `"""`. Kills the 94:38 / 94:59 (&& → ||) mutants:
         // those would close on the inner single `"`, exposing
         // ` then more` (and re-processing it as code).
-        assert_eq!(
-            s("\"\"\"said \"hi\" then\"\"\""),
-            " "
-        );
+        assert_eq!(s("\"\"\"said \"hi\" then\"\"\""), " ");
     }
 
     #[test]

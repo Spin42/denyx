@@ -399,7 +399,10 @@ fn handle_blocked(state: &denyx_host::startup_block::BlockedState, req: Request)
             )
         }
         "initialized" | "notifications/initialized" => Response::ok(id, json!({})),
-        "tools/list" => Response::ok(id, json!({ "tools": denyx_host::startup_block::tool_definitions(state) })),
+        "tools/list" => Response::ok(
+            id,
+            json!({ "tools": denyx_host::startup_block::tool_definitions(state) }),
+        ),
         "tools/call" => Response::ok(id, denyx_host::startup_block::call_response_body(state)),
         "ping" => Response::ok(id, json!({})),
         "__parse_error__" => Response::error(
