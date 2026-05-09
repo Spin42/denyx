@@ -481,7 +481,9 @@ Both `denyx-mcp` and `denyx-local-mcp` ship a `doctor` subcommand —
 read-only preflight that inspects what's wired and prints
 copy-pasteable next-steps for anything that's off. Use them after
 running `denyx host-config` or before relying on the gate for
-non-trivial work.
+non-trivial work. The full flag reference (both binaries, scan vs
+targeted modes, exit codes, common findings) lives at
+[doctor.md](doctor.md); the local-executor-specific notes are below.
 
 **`denyx-local-mcp doctor`** focuses on the LLM-side stack with the
 project state as a secondary check:

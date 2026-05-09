@@ -42,7 +42,9 @@ case you want to understand each step or do it without the prompt.
 ### Configure with `denyx host-config`
 
 The recommended path is to let `denyx host-config` write every
-configuration file from your policy in one go:
+configuration file from your policy in one go. Full flag reference at
+[host-config.md](host-config.md); the Claude-Code-specific narrative
+is below.
 
 ```sh
 cd /path/to/your/project

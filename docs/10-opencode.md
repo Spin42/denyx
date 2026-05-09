@@ -36,7 +36,9 @@ case you want to understand each step or do it without the prompt.
 
 The recommended path is to let `denyx host-config` write
 `./opencode.json` (and optionally `.claude/settings.json` /
-`.mcp.json`) from your policy in one go:
+`.mcp.json`) from your policy in one go. Full flag reference at
+[host-config.md](host-config.md); the opencode-specific narrative
+is below.
 
 ```sh
 cd /path/to/your/project

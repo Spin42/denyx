@@ -50,6 +50,9 @@ The index below lists everything in both groups in one place.
 
 | Doc                                                          | Purpose |
 |--------------------------------------------------------------|---------|
+| [comparison](comparison.md)                                  | How Denyx differs from host built-ins, MCP gateways, LLM guardrail frameworks, IFC research, and audit-shape peers. Read this when evaluating Denyx vs alternatives. |
+| [host-config](host-config.md)                                | Full flag reference for `denyx host-config`. Per-host wiring matrix, sandbox modes, merge-vs-replace semantics, team-mode flags, lockdown-only mode. |
+| [doctor](doctor.md)                                          | Full flag reference for `denyx-mcp doctor` and `denyx-local-mcp doctor`. Scan vs targeted modes, exit codes, common findings table. |
 | [agent-policy-spec](agent-policy-spec.md)                    | Portable spec for the policy format, **v1.0.0**. Tool-agnostic — consumable by any agentic system. Use this if you're implementing the policy format in a non-Denyx runtime. |
 | [server-protocol](server-protocol.md)                        | The HTTP wire spec a policy/audit server must implement, **v1**. Two endpoints, bearer auth, status-code semantics, conformance test vectors. Read after `11-denyx-for-teams`. |
 | [claude-code-permission-tests](claude-code-permission-tests.md) | Empirical test recipe verifying that Claude Code's built-in tools respect the project-local deny list, and that v2 additions (`Agent`, `Task*`, `Cron*`, …) inherit permissions rather than create independent bypass paths. Re-run after Claude Code version bumps. |

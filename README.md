@@ -53,7 +53,8 @@ adds something the host's permissions can't:
 - **One TOML, every host.** `denyx host-config` translates a single
   `denyx.toml` into Claude Code's `settings.json` shape *and* opencode's
   `permission` block — the same source of truth for both, and any other
-  MCP-aware host you choose to wire in.
+  MCP-aware host you choose to wire in. Full flag reference at
+  [docs/host-config.md](docs/host-config.md).
 - **Centralised policy + tamper-evident audit.** Optional team mode fetches
   the active policy from a URL at startup and POSTs every capability call
   to an audit endpoint. Audit lines are SHA-256-chained, so a tampered or
@@ -250,7 +251,8 @@ denyx-local-mcp doctor --no-project                          # LLM-only
 Both never auto-fix; they print copy-pasteable instructions for
 anything that's off. Exit codes: `0` ok, `1` warnings, `2` failures.
 Missing `denyx.toml` is reported as INFO with "runtime falls back to
-secure-defaults baseline (safe by design)" — not a failure.
+secure-defaults baseline (safe by design)" — not a failure. Full flag
+reference at [docs/doctor.md](docs/doctor.md).
 
 ## Documentation
 
@@ -267,6 +269,8 @@ Most-clicked entries:
 | [08-quickstart](docs/08-quickstart.md) | 5-minute CLI walkthrough — generate, run, audit. The non-MCP version of the quickstart at the top of this README. |
 | [09-claude-code](docs/09-claude-code.md) / [10-opencode](docs/10-opencode.md) | Host-specific wiring details, including v1/v2 differences and the built-in-tool lockdown. |
 | [05-owasp-agentic-coverage](docs/05-owasp-agentic-coverage.md) | Empirical scoring against the OWASP Agentic Top 10 — 2 strong / 4 partial / 4 out-of-scope by design — with concrete tests behind every position. |
+| [comparison](docs/comparison.md) | How Denyx compares to host built-ins, MCP gateways, LLM guardrails, IFC research, and audit-shape peers. Read when evaluating Denyx vs alternatives. |
+| [host-config](docs/host-config.md) / [doctor](docs/doctor.md) | Reference pages for the two CLI commands you'll re-run most often: `denyx host-config` (cross-host wiring) and `denyx-mcp doctor` / `denyx-local-mcp doctor` (preflight). |
 
 ## Status & honest disclosures
 

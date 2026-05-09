@@ -116,3 +116,6 @@ capability gate, and output-boundary redaction. None depends on prompting.
   Starlark, capability typing, and the three lines of defense fit together.
 - [06-policy-file.md](06-policy-file.md) — how to write policies. The most
   important read after this one.
+- [comparison.md](comparison.md) — how Denyx compares to host built-ins,
+  MCP gateways, LLM guardrails, and IFC research. Read this when
+  evaluating Denyx against alternatives.
