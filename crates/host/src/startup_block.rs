@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn call_response_body_marks_isError_and_kind() {
+    fn call_response_body_marks_is_error_and_kind() {
         let issues = vec![ConsistencyIssue::ToolDeclaresUnsupportedCapability {
             tool_name: "fetch_repo".to_string(),
             capability: "fs.write".to_string(),
