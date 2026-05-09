@@ -283,17 +283,20 @@ disable the gate.
 
 ## Diagnosing the result
 
-After running `host-config`, run [`doctor`](doctor.md) to verify
-the wiring took:
+After running `host-config`, run [`denyx doctor`](doctor.md) to
+verify the wiring took:
 
 ```sh
-denyx-mcp doctor                # if you wired denyx-mcp
-denyx-local-mcp doctor          # if you wired the local-executor bridge
+denyx doctor          # canonical: project + cross-cutting consistency
+denyx doctor --fix    # apply mechanical fixes interactively
 ```
 
-Both inspect `denyx.toml`, the per-host config files, the audit-dir
-and `.gitignore` setup, and the lockdown state. They never auto-fix;
-they print copy-pasteable next-steps.
+`denyx doctor` is the canonical entry point — it adds cross-cutting
+checks the binary-specific variants can't see (policy ↔ host-config
+↔ launch-flag consistency, sandbox-stanza-derivation freshness). Use
+`denyx-mcp doctor` or `denyx-local-mcp doctor` only when the full
+`denyx` CLI isn't on `$PATH` (e.g. inside a Lima VM that only
+deploys the MCP binary). See [doctor.md](doctor.md).
 
 ## See also
 

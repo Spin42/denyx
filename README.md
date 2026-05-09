@@ -230,29 +230,35 @@ Useful entry points, in roughly the order you'll need them:
 
 ## Diagnosing your setup
 
-Both Denyx binaries ship a `doctor` subcommand for read-only project
-preflight. Run it after wiring a project, before relying on the gate
+`denyx doctor` is the single entry point for "is my Denyx setup
+right?". Run it after wiring a project, before relying on the gate
 for non-trivial work, or when something looks off.
 
 ```sh
-# Inspect the current project from denyx-mcp's perspective:
-# policy file, host-config wiring, audit-dir, .gitignore, lockdown.
-denyx-mcp doctor                     # cwd
-denyx-mcp doctor --project-path /…   # explicit
+# Canonical: project-side checks + cross-cutting consistency
+# (policy ↔ host-config ↔ launch-flag ↔ project state).
+denyx doctor                     # cwd
+denyx doctor --project-path /…   # explicit
+denyx doctor --fix               # interactive auto-fix (mkdir audit
+                                 # dir, append .gitignore, re-emit
+                                 # stale sandbox stanza / deny list)
 
-# From denyx-local-mcp's perspective, additionally:
-# scan for running local LLM servers, verify chat + embed model
-# availability, on Ollama check `num_ctx` for the truncation pitfall.
-denyx-local-mcp doctor                                       # scan + project (cwd)
+# Narrower variants for when only the MCP binary is on PATH (e.g.
+# inside a Lima VM or WSL2 distro):
+denyx-mcp doctor                                             # project-side only
+denyx-local-mcp doctor                                       # + local-LLM scan
 denyx-local-mcp doctor --endpoint http://localhost:11434/v1  # targeted
 denyx-local-mcp doctor --no-project                          # LLM-only
 ```
 
-Both never auto-fix; they print copy-pasteable instructions for
-anything that's off. Exit codes: `0` ok, `1` warnings, `2` failures.
-Missing `denyx.toml` is reported as INFO with "runtime falls back to
-secure-defaults baseline (safe by design)" — not a failure. Full flag
-reference at [docs/doctor.md](docs/doctor.md).
+`--fix` is interactive (asks `y/N`) and refuses when stdin isn't a
+TTY, so CI invocations are safe even with `--fix` accidentally passed.
+Decisions that require operator judgment (allow-list additions,
+capability grants) are never auto-fixed — they remain in the report.
+Exit codes: `0` ok, `1` warnings, `2` failures. Missing `denyx.toml`
+is reported as INFO with "runtime falls back to secure-defaults
+baseline (safe by design)" — not a failure. Full flag reference at
+[docs/doctor.md](docs/doctor.md).
 
 ## Documentation
 

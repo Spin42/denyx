@@ -2,26 +2,181 @@
 
 > ← [Back to docs README](README.md)
 
-Both `denyx-mcp` and `denyx-local-mcp` ship a `doctor` subcommand —
-read-only project preflight that inspects what's wired and prints
-copy-pasteable next-steps for anything off. **They never auto-fix.**
-Use them after running [`denyx host-config`](host-config.md), before
-relying on the gate for non-trivial work, or when something looks off.
+Three binaries ship a `doctor` subcommand. **`denyx doctor` is the
+canonical entry point** — single command for "is my Denyx setup
+right?", with a `--fix` flag for mechanical auto-fixes. The two
+binary-specific variants (`denyx-mcp doctor`, `denyx-local-mcp doctor`)
+are narrower and exist because those binaries are sometimes the only
+ones on `$PATH` — e.g. when Claude Code launches `denyx-mcp` from a
+Lima VM or WSL2 distro. None of the three ever modifies anything
+without explicit consent (`--fix` is interactive and refuses when
+stdin isn't a TTY).
+
+Use `denyx doctor` from a terminal. Use the binary-specific variants
+from CI, from inside a host-managed launch context, or when only
+that binary is installed.
 
 ## Which binary do I run?
 
-| You're using | Run |
+| You're running from | Run | Why |
+|---|---|---|
+| A terminal in the project root | **`denyx doctor`** | Canonical entry. Project-side checks **plus** cross-cutting consistency checks. `--fix` available. |
+| A host-managed launch context (Claude Code spawned `denyx-mcp` for you) where only `denyx-mcp` is on PATH | `denyx-mcp doctor` | Same project-side checks; no cross-cutting consistency, no `--fix`. |
+| The [local-executor flow](12-local-executor.md) where the small local LLM stack is the relevant unknown | `denyx-local-mcp doctor` | Project-side checks **plus** local-LLM-server probing (scan + targeted). No cross-cutting consistency, no `--fix`. |
+
+If you have all three binaries installed and you're at a terminal,
+**default to `denyx doctor`**. Switch to `denyx-local-mcp doctor`
+only when you specifically need the local-LLM stack probed.
+
+**Exit codes** (all three binaries): `0` = OK, `1` = warnings, `2` = failures.
+
+**Output language** (all three): `[OK]` / `[INFO]` / `[WARN]` / `[FAIL]`,
+followed by a verdict line and copy-pasteable fix instructions.
+
+## `denyx doctor` — canonical
+
+```
+Read-only project preflight: combines project_diagnosis (what files
+exist, what's wired, lockdown state) with cross-cutting consistency
+checks (policy ↔ host-config ↔ launch-flag ↔ project state). Single
+entry point for "is my Denyx setup right?". Defaults to the cwd; pass
+--project-path <PATH>.
+```
+
+### Flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--project-path <PATH>` | cwd | Project root to inspect. Pass a different path if running doctor from somewhere other than the project root. |
+| `--fix` | *off* | Apply mechanical fixes for issues that can be safely re-derived from the policy. **Interactive** — prints the fix plan and prompts for confirmation. **Refuses** when stdin isn't a TTY (CI-safe). See [auto-fix](#what---fix-actually-does). |
+
+### What `denyx doctor` checks
+
+Two layers, run in one pass:
+
+1. **Project diagnosis** — same surface the binary-specific doctors
+   inspect:
+   - `denyx.toml` presence and validity (missing → INFO; runtime falls
+     back to the safe-by-design `secure-defaults` baseline).
+   - Per-host config wiring (`.mcp.json`, `.claude/settings.json`,
+     `opencode.json`, `.cursor/mcp.json`, `.vscode/settings.json`,
+     `.continue/config.json`).
+   - Built-in-tool lockdown completeness on each detected host.
+   - `./.denyx/` audit dir exists, is writable, and is in `.gitignore`.
+   - Self-write protection — `denyx.toml` and host config files are
+     not in the policy's `write_allow`.
+
+2. **Cross-cutting consistency** — checks that span layers and
+   neither binary-specific doctor can see, because they require both
+   the policy and the host-config in one place:
+   - **Policy ↔ host-config** — the policy file the host is launched
+     with (`--policy <path>` in the MCP entry) is the same file the
+     project's checked-in `denyx.toml` is. Catches stale or wrong
+     `--policy` flags.
+   - **Policy ↔ launch flags** — `--audit-log` in the MCP entry
+     points to a path consistent with what the policy expects;
+     `--policy-url` (team mode) is paired with the right local
+     fallback.
+   - **Sandbox stanza ↔ policy** — `.claude/settings.json`'s
+     `allowedDomains` and `allowWrite` are derived from the current
+     policy (not stale from a previous `host-config` run).
+   - **Built-in deny ↔ host version** — Claude Code v2 additions
+     (`Agent`, `Task*`, `Cron*`, etc.) are present in the deny list
+     when v2 is the active version.
+
+### What `--fix` actually does
+
+`--fix` applies mechanical fixes for issues whose right answer is
+derivable from the policy alone. **It never makes policy decisions.**
+
+| Issue | Fix |
 |---|---|
-| Standard MCP setup (Claude Code / opencode / Cursor / Copilot / Continue / Cline routed through `denyx-mcp`) | `denyx-mcp doctor` |
-| The [local-executor flow](12-local-executor.md) (cloud orchestrator + small local 7B model under the gate) | `denyx-local-mcp doctor` |
-| You don't know which | `denyx-mcp doctor` first; it tells you if the project is wired for the local-executor shape instead |
+| `.denyx/` audit dir missing | `mkdir -p .denyx/` |
+| `.gitignore` missing `.denyx/` line | append `.denyx/` |
+| Stale sandbox stanza in `.claude/settings.json` | re-emit from the current policy via `host-config --existing replace` |
+| Missing or partial built-in deny list in `.claude/settings.json` / `opencode.json` | re-emit the deny list from the current policy |
 
-If you have both binaries installed, `denyx-local-mcp doctor` covers
-a strict superset of `denyx-mcp doctor`'s project-side checks plus
-the local-LLM stack inspection.
+Issues that require **operator judgment** are **never** auto-fixed:
 
-Both never modify anything; you can run them as often as you want.
-**Exit codes:** `0` = OK, `1` = warnings, `2` = failures.
+- Policy decisions: adding a host to `http_get_allow`, granting a new
+  capability, expanding `read_allow`.
+- Conflicting policy paths (the project has two policy files, or
+  `--policy` points somewhere unexpected).
+- Manual lockdown gaps (a Cursor session whose UI toggles haven't
+  been flipped — Denyx can't write that from CLI).
+
+Those remain in the post-fix report so you have to read and decide.
+
+`--fix` is **interactive**: it prints the fix plan and waits for
+`y/N`. If stdin isn't a TTY, it **refuses** and exits with the
+diagnosis code unchanged — so CI invocations of `denyx doctor` are
+read-only by default even with `--fix` accidentally passed.
+
+### Sample run
+
+```sh
+$ denyx doctor
+denyx doctor
+[OK]   denyx.toml present and valid
+[OK]   .denyx/ exists and is in .gitignore
+[OK]   .claude/settings.json — permissions.deny covers built-ins
+[OK]   .mcp.json wires denyx-mcp with --policy ./denyx.toml
+[OK]   policy ↔ host-config consistent (same denyx.toml referenced)
+[OK]   sandbox stanza derived from current policy
+[INFO] opencode.json not present (skipping opencode checks)
+[OK]   policy does not include denyx.toml in write_allow
+
+Setup is ready.
+exit 0
+```
+
+A degraded run with auto-fixable findings:
+
+```sh
+$ denyx doctor
+[OK]   denyx.toml present and valid
+[WARN] .denyx/ missing (audit log will be created on first call)
+[WARN] .gitignore missing `.denyx/` line
+[WARN] .claude/settings.json — sandbox stanza stale (allowedDomains
+       does not match policy [network].http_get_allow)
+[OK]   .mcp.json wires denyx-mcp
+[OK]   policy ↔ host-config consistent
+
+NOT ready. Apply the fixes above and re-run `denyx doctor`.
+exit 1
+
+$ denyx doctor --fix
+[... same diagnosis ...]
+
+Plan:
+  [FIX] mkdir .denyx/
+  [FIX] append `.denyx/` to .gitignore
+  [FIX] re-emit sandbox stanza from policy
+
+Apply the 3 auto-fixes above? [y/N]: y
+
+  [FIX] mkdir .denyx/: created
+  [FIX] append .gitignore: added line
+  [FIX] re-emit sandbox stanza: rewrote .claude/settings.json#sandbox
+
+Re-running diagnosis...
+[OK]   .denyx/ exists and is in .gitignore
+[OK]   sandbox stanza derived from current policy
+
+Setup is ready.
+exit 0
+```
+
+### When to run
+
+- After `denyx host-config` to verify the wiring landed.
+- Before opening a Claude Code / opencode session in a project for
+  the first time.
+- After updating Denyx itself, in case the binary moved or the flag
+  surface changed.
+- In CI as a project-readiness check (`denyx doctor || exit $?`).
+  Don't pass `--fix` in CI — it'll refuse on stdin-not-TTY anyway,
+  but explicit is better.
 
 ## `denyx-mcp doctor`
 
@@ -32,54 +187,28 @@ lockdown. Prints fix instructions for anything that's off; never
 auto-fixes.
 ```
 
+A subset of `denyx doctor`'s project-side checks. **Does not** run
+the cross-cutting consistency checks. **Does not** have `--fix`.
+Run this when only `denyx-mcp` is on `$PATH` — typically inside a
+Lima VM or WSL2 distro that the Claude Code MCP entry uses to launch
+the server.
+
 ### Flags
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--project-path <PATH>` | cwd | Project root to inspect. Pass a different path if running doctor from somewhere other than the project root. |
+| `--project-path <PATH>` | cwd | Project root to inspect. |
 
-### What it checks
+### When to use it instead of `denyx doctor`
 
-1. **`denyx.toml` presence and validity.** Missing is reported as INFO
-   (the runtime falls back to the safe-by-design `secure-defaults`
-   baseline). A present-but-invalid file is a failure.
-2. **Host-config wiring.** For each detected host, whether the MCP
-   server entry is present and points at `denyx-mcp` or
-   `denyx-local-mcp`.
-3. **Built-in-tool lockdown.** For Claude Code: whether
-   `permissions.deny` covers `Bash`, `Read`, `Write`, `Edit`, `Glob`,
-   `Grep`, `WebFetch`, `WebSearch`, `Monitor`, `NotebookEdit` (and
-   `PowerShell` on Windows), plus whether `disableBypassPermissionsMode`
-   is set. For opencode: whether `tools` disables built-ins and
-   `permission` is deny-by-default with a `denyx*` allow.
-4. **Audit-dir setup.** `./.denyx/` exists, is writable, and is in
-   `.gitignore` (so audit logs don't end up committed).
-5. **Self-write protection.** That neither `denyx.toml` nor the host
-   config files are in the policy's `write_allow` (catching a
-   misconfigured policy that would let the agent disable the gate).
-
-### Sample run
-
-```sh
-$ denyx-mcp doctor
-[OK]   denyx.toml present and valid
-[OK]   .denyx/ exists and is in .gitignore
-[OK]   .claude/settings.json — permissions.deny covers built-ins
-[OK]   .mcp.json wires denyx-mcp with --policy ./denyx.toml
-[INFO] opencode.json not present (skipping opencode checks)
-[OK]   policy does not include denyx.toml in write_allow
-exit 0
-```
-
-### When to run
-
-- After `denyx host-config` to verify the wiring landed.
-- Before opening a Claude Code / opencode session in a project for
-  the first time.
-- After updating Denyx itself, in case the binary moved or flag
-  surface changed.
-- In CI as a project-readiness check
-  (`denyx-mcp doctor || exit $?`).
+- The full `denyx` CLI isn't installed on the launch machine
+  (you've only deployed `denyx-mcp` for the runtime).
+- You're verifying the project from inside the same VM/distro the
+  MCP server runs in, to catch path/visibility mismatches the host
+  side can't see.
+- A host-side script wants to confirm the gate is wired without
+  shelling out to a different binary than the one the host
+  launches.
 
 ## `denyx-local-mcp doctor`
 
@@ -90,9 +219,10 @@ num_ctx pitfalls. Prints fix instructions on failure; never modifies
 anything.
 ```
 
-This binary's `doctor` covers everything `denyx-mcp doctor` does
-*plus* the local-LLM stack: server fingerprinting, chat + embed
-model availability, and the Ollama `num_ctx` truncation pitfall.
+Project-side checks **plus** the local-LLM stack: server
+fingerprinting, chat + embed model availability, Ollama `num_ctx`
+truncation pitfall. **Does not** run cross-cutting consistency.
+**Does not** have `--fix`.
 
 ### Flags
 
@@ -103,7 +233,7 @@ model availability, and the Ollama `num_ctx` truncation pitfall.
 | `--model <ID>` | `qwen2.5-coder:7b` | Chat model id to verify is served. Only used in [targeted mode](#targeted-mode). |
 | `--embed-model <ID>` | `nomic-embed-text` | Embed model id to verify is served and can produce a vector. Only used in targeted mode. |
 | `--project-path <PATH>` | cwd | Project root to inspect (same as `denyx-mcp doctor`). |
-| `--no-project` | *off* | Skip the project-side checks (policy file, host configs, audit dir, .gitignore). Useful when running `doctor` purely to verify a remote LLM endpoint. |
+| `--no-project` | *off* | Skip the project-side checks. Useful when running `doctor` purely to verify a remote LLM endpoint. |
 
 ### Scan mode
 
@@ -188,7 +318,7 @@ models / embed round-trip. Useful when:
 - **After installing or upgrading Ollama / llama.cpp / etc.**
 - **When `delegate_to_local` produces parse errors.** Most likely
   cause is `num_ctx` truncation, which doctor flags directly.
-- **When you can't tell whether the gate is engaged.** The
+- **When you can't tell whether the bridge is engaged.** The
   warn-vs-OK on the project-side checks distinguishes a wired
   bridge from a bypassed one.
 
@@ -196,13 +326,15 @@ models / embed round-trip. Useful when:
 
 | Question | Run |
 |---|---|
+| **Is my whole Denyx setup right (default question)?** | `denyx doctor` |
+| Is the policy I checked in actually the one the MCP entry launches with? | `denyx doctor` (cross-cutting) |
+| Is my project gated by Denyx at all? | any of the three |
+| Did I wire the local-executor bridge correctly? | `denyx-local-mcp doctor` |
 | Is my local LLM stack working? | `denyx-local-mcp doctor` (scan mode) |
-| Is my project gated by Denyx at all? | `denyx-mcp doctor` |
-| Did I wire the local-executor bridge correctly? | `denyx-local-mcp doctor` (warns when standalone shape is wired instead) |
-| Is the host's built-in deny list complete? | either |
-| Is `denyx.toml` valid? | either |
+| Is `denyx.toml` valid? | any of the three |
 | Does my remote OpenAI-compat endpoint serve `qwen2.5-coder:7b`? | `denyx-local-mcp doctor --endpoint <url> --no-project` |
 | Is Ollama's `num_ctx` set high enough? | `denyx-local-mcp doctor --endpoint <url>` |
+| Apply the mechanical fixes I just got told about | `denyx doctor --fix` (only `denyx` has it) |
 
 ## Exit codes
 
@@ -215,21 +347,28 @@ models / embed round-trip. Useful when:
 The exit code makes doctor scriptable in CI:
 
 ```sh
-denyx-mcp doctor || exit $?
+denyx doctor || exit $?
 ```
+
+`--fix` does not change the exit code semantics — after fixes are
+applied, doctor re-runs the diagnosis and the final exit code
+reflects the post-fix state.
 
 ## Common findings
 
-| Finding | Meaning | Fix |
+| Finding | Meaning | Auto-fixable by `denyx doctor --fix`? |
 |---|---|---|
-| `denyx.toml not present` | INFO — runtime uses `secure-defaults` baseline. | Run `denyx init` if you want a project-specific policy. |
-| `denyx.toml: [filesystem].write_allow includes denyx.toml` | ERROR — agent could rewrite the policy. | Remove the entry; the runtime will refuse to load this policy anyway. |
-| `.claude/settings.json: permissions.deny missing Read/Write/Bash` | WARN/ERROR — built-ins are not locked down; gate is bypassable. | Re-run `denyx host-config --host claude`. |
-| `.mcp.json wires denyx-mcp without --audit-log` | WARN — events go to stderr where Claude Code buries them. | Re-run `denyx host-config` (always passes `--audit-log` explicitly). |
-| `Ollama num_ctx = 2048 (recommended ≥ 8192)` | WARN — long Starlark programs will be silently truncated. | `export OLLAMA_CONTEXT_LENGTH=16384 && ollama serve`. |
-| `embed model not found in /v1/models` | ERROR — the local-executor bridge can't compute embeddings. | `ollama pull nomic-embed-text`. |
-| `wired denyx-mcp but local-executor expected` | WARN — the standalone shape is wired where the bridge was expected. | Re-run `host-config --no-mcp` and follow [12-local-executor.md](12-local-executor.md). |
-| `audit-dir not in .gitignore` | WARN — audit logs may end up committed. | `echo .denyx/ >> .gitignore`. |
+| `denyx.toml not present` | INFO — runtime uses `secure-defaults` baseline. | No (operator decision). Run `denyx init` to generate one. |
+| `denyx.toml: [filesystem].write_allow includes denyx.toml` | ERROR — agent could rewrite the policy. | No (operator decision). Remove the entry; the runtime refuses to load this policy anyway. |
+| `.claude/settings.json: permissions.deny missing Read/Write/Bash` | WARN/ERROR — built-ins not locked down. | **Yes** — re-emits from policy. |
+| `.claude/settings.json: sandbox stanza stale` | WARN — `allowedDomains`/`allowWrite` don't match current policy. | **Yes** — re-emits from policy. |
+| `.mcp.json wires denyx-mcp without --audit-log` | WARN — events go to stderr. | No (re-run `denyx host-config`). |
+| `policy ↔ host-config: --policy points to /tmp/old.toml` | WARN/ERROR — host launches with stale policy. | No (operator decision). Re-run `denyx host-config`. |
+| `Ollama num_ctx = 2048 (recommended ≥ 8192)` | WARN — long Starlark programs truncated. | No. `export OLLAMA_CONTEXT_LENGTH=16384 && ollama serve`. |
+| `embed model not found in /v1/models` | ERROR — bridge can't compute embeddings. | No. `ollama pull nomic-embed-text`. |
+| `wired denyx-mcp but local-executor expected` | WARN — standalone shape wired where the bridge was expected. | No. Re-run `host-config --no-mcp` and follow [12-local-executor.md](12-local-executor.md). |
+| `audit-dir not in .gitignore` | WARN — audit logs may end up committed. | **Yes** — appends `.denyx/`. |
+| `.denyx/ missing` | WARN — audit dir doesn't exist. | **Yes** — `mkdir`. |
 
 ## See also
 

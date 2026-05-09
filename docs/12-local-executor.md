@@ -477,13 +477,17 @@ Common failure shapes:
 
 ## Diagnosing your setup with `doctor`
 
-Both `denyx-mcp` and `denyx-local-mcp` ship a `doctor` subcommand —
-read-only preflight that inspects what's wired and prints
-copy-pasteable next-steps for anything that's off. Use them after
-running `denyx host-config` or before relying on the gate for
-non-trivial work. The full flag reference (both binaries, scan vs
-targeted modes, exit codes, common findings) lives at
-[doctor.md](doctor.md); the local-executor-specific notes are below.
+`denyx doctor` is the canonical preflight — read-only project +
+cross-cutting consistency checks, with `--fix` for mechanical
+auto-fixes. Use it after running `denyx host-config` or before
+relying on the gate for non-trivial work. The full flag reference
+(all three binaries, scan vs targeted modes, exit codes, common
+findings) lives at [doctor.md](doctor.md). For the local-executor
+flow specifically, **`denyx-local-mcp doctor` adds the LLM-stack
+checks that `denyx doctor` doesn't do** — server fingerprint, model
+availability, the Ollama `num_ctx` pitfall — so it's the one to
+reach for when the unknown is "is my local LLM serving correctly?".
+Notes below cover that variant.
 
 **`denyx-local-mcp doctor`** focuses on the LLM-side stack with the
 project state as a secondary check:
