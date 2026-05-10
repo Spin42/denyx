@@ -91,7 +91,7 @@ pub fn build_retry_message(error_text: &str, step: &str) -> String {
          \x20 - `try`/`except` → DELETE; let errors propagate.\n\n\
          Rewrite the WHOLE program. Output ONLY the corrected Starlark \
          code, starting at column 0.\n\n\
-         Step: {step}"
+         Step: <task>\n{step}\n</task>"
     )
 }
 
@@ -163,7 +163,7 @@ where
     // 3. First chat call.
     let mut messages = vec![
         ChatMessage::system(system_prompt),
-        ChatMessage::user(step.to_string()),
+        ChatMessage::user(format!("<task>\n{step}\n</task>")),
     ];
     let mut raw = chat.call_chat(&cfg.model, &messages)?;
     let mut script = strip_fences(&raw);
@@ -260,7 +260,7 @@ mod tests {
         assert!(msg.contains("..."), "should truncate");
         // The full 2000-char body must NOT appear verbatim.
         assert!(!msg.contains(&"X".repeat(700)));
-        assert!(msg.contains("Step: the step"));
+        assert!(msg.contains("Step: <task>\nthe step\n</task>"));
     }
 
     #[test]
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(second[2].content, "bad");
         assert_eq!(second[3].role, "user");
         assert!(second[3].content.contains("Common fixes:"));
-        assert!(second[3].content.contains("Step: step"));
+        assert!(second[3].content.contains("Step: <task>\nstep\n</task>"));
     }
 
     #[test]
