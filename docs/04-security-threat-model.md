@@ -39,6 +39,7 @@ policy: every effect goes through one of nine Rust functions, all in
 | **Agent reading a denied path via a symlink the operator allowed** | `fs.*` canonicalize paths before the policy check; the symlink target — not the symlink itself — is what the policy sees. |
 | **Agent modifying its own policy or audit log** | `Policy::guard_audit_log` and the self-writable guard refuse to start if the policy file or audit log is reachable to the agent under any of `write_allow` / `delete_allow`. |
 | **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutations, line removals, and seq jumps. |
+| **MCP tool definition poisoning (local-executor deployment)** | In the `denyx-local-mcp` architecture, the cloud orchestrator sees exactly one tool — `delegate_to_local` — so third-party MCP tool descriptions never enter its context. The local executor model receives tool metadata only from the operator-controlled policy file (`[tools.X]` routing entries), not from live MCP server schemas. A poisoned tool description in any co-installed MCP server has no path to either model's reasoning. |
 
 ## What it does NOT defend against
 
@@ -77,6 +78,15 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   bits per query; defeating them requires forbidding `len()`,
   comparison, and `in` on tainted values, which would break
   every legitimate use of a secret as a string.
+- **MCP tool definition poisoning (direct `denyx-mcp` deployment).** When
+  `denyx-mcp` is configured as one MCP server among several, the cloud model
+  reads all co-installed servers' tool descriptions directly — before Denyx
+  is in the picture. A malicious description can manipulate the model's
+  reasoning; Denyx's gate still fires on the resulting *actions*, but the
+  reasoning-layer manipulation is not detected or prevented. Use the
+  `denyx-local-mcp` local-executor architecture when MCP tool poisoning is
+  in your threat model: the cloud model only sees `delegate_to_local` and
+  the local model only sees policy-file routing hints.
 - **Pure-CPU denial-of-service inside the script.** `[runtime].max_seconds`
   bounds wall time, but during that window an agent can busy-loop,
   allocate, or fork-bomb on Linux without `bwrap`. Run inside a
