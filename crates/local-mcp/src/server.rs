@@ -202,7 +202,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rejection_event(step: &str, reason: &str) -> TraceEvent {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -219,6 +218,7 @@ fn rejection_event(step: &str, reason: &str) -> TraceEvent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_tool_call<C, E, R, T>(
     id: Value,
     params: &Value,
@@ -261,7 +261,10 @@ where
         );
     }
     if step.contains("</task>") {
-        trace.emit(&rejection_event(&step, "rejected: step contains delimiter injection attempt"));
+        trace.emit(&rejection_event(
+            &step,
+            "rejected: step contains delimiter injection attempt",
+        ));
         return make_response(
             id,
             Some(json!({
@@ -428,11 +431,11 @@ mod tests {
         run_with_inputs_blocked(input, chat, denyx, None)
     }
 
-    fn run_with_inputs_and_trace<'a>(
+    fn run_with_inputs_and_trace(
         input: &str,
         chat: StubChat,
         denyx: StubDenyx,
-        trace: &'a SpyTraceSink,
+        trace: &SpyTraceSink,
     ) -> Vec<Value> {
         let reader = Cursor::new(input.as_bytes().to_vec());
         let writer: Vec<u8> = Vec::new();

@@ -549,8 +549,14 @@ mod tests {
         .unwrap();
         let calls = chat.calls.lock().unwrap();
         let user_msg = &calls[0][1].content;
-        assert!(!user_msg.contains("do thing</task>"), "raw </task> must not appear");
-        assert!(user_msg.contains("do thing<\\/task>"), "escaped form must appear");
+        assert!(
+            !user_msg.contains("do thing</task>"),
+            "raw </task> must not appear"
+        );
+        assert!(
+            user_msg.contains("do thing<\\/task>"),
+            "escaped form must appear"
+        );
     }
 
     #[test]
