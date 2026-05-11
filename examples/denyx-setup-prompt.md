@@ -125,13 +125,26 @@ Run from cwd:
 `denyx` if installed via `cargo install`, or
 `<repo>/target/release/denyx` on the source-build fallback).
 
+The default starter is intentionally minimal: it omits `/tmp/**`
+from `write_allow` so `denyx doctor` doesn't warn on the policy
+out of the box. If the project's workflow needs scratch writes
+under `/tmp` (CI build dirs, custom scratch trees, the local-
+executor pentest harnesses), pass `--permissive` to keep the
+broader entry. Tell the user about the flag before running so
+they can decide; default-minimal is the right call for most
+projects.
+
 If `denyx.toml` already exists, ASK FIRST before clobbering. Offer
 to write `denyx.toml.new` instead and diff against the existing one.
 
 Show the user the generated file. Briefly explain what's in it (it
 inherits `secure-defaults`, allows the typical toolchain commands,
 denies destructive git operations, leaves `[network]` empty so any
-HTTP target is an explicit opt-in).
+HTTP target is an explicit opt-in). The starter includes a
+commented-out `[subprocess.requires_approval_args]` block as a
+discoverable example — it ships disabled so routine workflow
+doesn't prompt; an operator who wants per-call review on specific
+subcommands (e.g. `git push`, `cargo publish`) uncomments and tunes.
 
 **Add the host's memory files to the policy.** Because Step 4
 will disable the host's built-in `Read`/`Write`/`Edit` tools, the
@@ -217,10 +230,60 @@ Q4. **Subprocess.**
 Q5. **Approval gates.**
     "Should any operations require explicit per-call approval?
     secure-defaults already lists `fs.delete` and `subprocess.exec`
-    in `requires_approval`. Do you want to add anything else?"
-    → Add to top-level `requires_approval = [...]` if so.
+    in `requires_approval`. Two related questions:"
+
+    a. **Top-level (capability) approval.**
+       Adding a capability here prompts the operator for EVERY
+       call of it. Useful for genuinely-rare-but-dangerous things
+       like `database.write`. If anything beyond the
+       secure-defaults entries belongs here, add to top-level
+       `requires_approval = [...]`.
+
+    b. **Per-argv approval for subprocess.exec.**
+       The capability-level catch-all on `subprocess.exec` prompts
+       on every spawn — even routine `cargo`, `git`, `grep` calls.
+       If the operator wants finer-grained prompts (only on
+       dangerous subcommands like `git push` or `cargo publish`,
+       not on every spawn), opt out of capability-level approval
+       via `requires_approval = ["!subprocess.exec"]` and enumerate
+       the dangerous argv patterns in
+       `[subprocess.requires_approval_args]`. Substring match
+       against the joined argv. Example:
+
+       ```toml
+       requires_approval = ["!subprocess.exec"]
+
+       [subprocess.requires_approval_args]
+       git   = ["push", "reset --hard", "rebase -i"]
+       cargo = ["publish", "yank"]
+       ```
+
+       The honest tradeoff: this narrows the per-call human
+       tripwire to enumerated patterns. Argv shapes the operator
+       didn't think to list (e.g. `git checkout -B main
+       origin/main` for branch overwrite) proceed without a
+       prompt. Use deny_args for things that should fully refuse
+       (`push --force`, `reset --hard`); use requires_approval_args
+       for things that need a per-call eyeball. See
+       `docs/06-policy-file.md` for the full treatment.
+
+       This is the right setup when the confirm hook isn't a
+       reliable channel to the operator (e.g. headless CI,
+       elicitation degrading to deny in some Claude Code
+       configurations). Ask the user.
 
 == Step 4: Wire the host config (one command) ==
+
+**Optional `--strict-mcp` flag.** When merging `.mcp.json` for
+Claude Code or Cursor, this flag refuses the merge if any
+non-denyx MCP server is already configured for the project.
+The threat-model claim that "the cloud orchestrator only sees
+`delegate_to_local`" (in the `denyx-local-mcp` architecture)
+depends on denyx being the sole MCP server; `--strict-mcp`
+enforces that precondition at host-config time. Without the
+flag, host-config silently merges alongside other servers.
+Ask the user whether to pass it; for greenfield projects it's
+recommended.
 
 The `denyx host-config` subcommand writes everything in one go:
 
@@ -311,7 +374,18 @@ briefly explain: "I disabled the host's built-in effecting tools
 (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`,
 `WebSearch`, plus `Monitor`/`NotebookEdit` on Claude Code). Every
 effecting operation in this project now goes through Denyx's
-MCP tools and is gated by `denyx.toml`. The agent's own memory
+MCP tools and is gated by `denyx.toml`.
+
+**WebSearch is denied by default.** Claude Code's built-in
+WebSearch tool makes HTTP requests internally; Denyx doesn't gate
+it (the calls don't go through the MCP server). The deny-list
+the host-config writes therefore blocks WebSearch outright. If
+the user wants WebSearch enabled, they have to manually edit
+`.claude/settings.json` after host-config: remove `WebSearch`
+from `permissions.deny` and (optionally) add it to
+`permissions.allow`. There is no `--allow-builtin WebSearch`
+flag yet; this is a rough edge worth telling the user about
+before they discover it themselves. The agent's own memory
 files (`CLAUDE.md`, `AGENTS.md`, `.claude/CLAUDE.md`) are listed
 in `denyx.toml`'s `read_allow`/`write_allow` from Step 2, so
 memory updates still work — they just go through the policy
