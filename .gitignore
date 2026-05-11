@@ -23,6 +23,12 @@ Thumbs.db
 .opencode/
 .aider*
 
+# Denyx's per-project state. The audit log is hash-chained JSONL
+# that should stay on disk for forensic value (run
+# `denyx audit verify` to check the hash chain) but should never
+# be committed.
+.denyx/
+
 # Local environment files (never commit secrets)
 .env
 .env.*
