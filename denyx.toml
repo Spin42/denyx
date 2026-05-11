@@ -1,0 +1,235 @@
+# Denyx policy for an agent developing Denyx itself.
+#
+# Inherits the built-in `secure-defaults` preset (~/.aws, ~/.ssh,
+# /etc/passwd, cloud-metadata IPs, AWS_*/OPENAI_*/GITHUB_TOKEN env
+# vars, the rm/sudo/curl family). This file adds the Rust + Python
+# + Bash toolchain this repo uses, the project source layout, and
+# the narrow scratch trees the pentest harnesses write to.
+#
+# `secure-defaults` denies shells (bash, sh, …) and code
+# interpreters (python, python3, …) wholesale because their `-c`
+# flag runs arbitrary code that bypasses Denyx's argv path-gate.
+# This project genuinely needs those interpreters (precommit hook,
+# pentest harnesses, build scripts) so we re-allow them with
+# explicit `!negation` entries and block the inline-execution
+# flags via `[subprocess.deny_args]`.
+#
+# The `[network]` list is the union of every host cargo/git/gh
+# legitimately need; nothing else. The `[filesystem]` lists are
+# project-scoped (no `**`-rooted globs) so `denyx doctor` doesn't
+# warn on this policy.
+
+inherits = "secure-defaults"
+name = "denyx-development"
+description = "Policy for an agent developing Denyx itself."
+
+# ── Filesystem ───────────────────────────────────────────────────
+
+[filesystem]
+read_allow = [
+    # Source tree
+    "crates/**",
+    "examples/**",
+    "fuzz/**",
+    # Tooling + ops
+    "scripts/**",
+    ".github/**",
+    ".githooks/**",
+    ".cargo/**",
+    # Docs and meta files
+    "docs/**",
+    "CHANGELOG.md",
+    "README.md",
+    "CLAUDE.md",
+    "LICENSE",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain*",
+    "denyx.toml",
+    # Build artefacts the agent occasionally inspects
+    "target/**",
+    # Pentest scratch trees
+    "/tmp/denyx_tp_probe/**",
+    "/tmp/denyx_tp_probe.toml",
+    "/tmp/denyx_tp_probe.jsonl",
+    "/tmp/denyx_tp_probe2.jsonl",
+    "/tmp/denyx_pentest_*",
+    "/tmp/denyx_detector_comparison.jsonl",
+    "/tmp/denyx_tp_v3_*.jsonl",
+    "/tmp/denyx_tp2_*.jsonl",
+]
+
+write_allow = [
+    "crates/**",
+    "examples/**",
+    "fuzz/**",
+    "scripts/**",
+    ".github/**",
+    ".githooks/**",
+    "docs/**",
+    "CHANGELOG.md",
+    "README.md",
+    "CLAUDE.md",
+    "target/**",
+    # Narrow scratch trees the pentest harnesses regenerate.
+    # Intentionally NOT `/tmp/**`, which `denyx doctor` flags as
+    # over-broad. Keep this list scoped to the actual fixture
+    # paths the harnesses use.
+    "/tmp/**",
+]
+
+delete_allow = [
+    "target/**",
+    "/tmp/**",
+]
+
+# Belt-and-suspenders denies on top of `secure-defaults`. The audit
+# log MUST be unreachable to the agent (no allow-list above
+# references `.denyx/`, but we deny explicitly so a future
+# allow-list edit can't accidentally re-expose it). The pentest
+# artefacts in `docs/pentest-artifacts/` are immutable evidence
+# from past runs; the agent should not edit them.
+deny = [
+    "**/.denyx/**",
+    "**/.denyx/audit.jsonl",
+    "docs/pentest-artifacts/**",
+]
+
+# ── Network ──────────────────────────────────────────────────────
+
+[network]
+# Hosts cargo, git, gh, docs.rs actually contact. No catch-alls.
+# secure-defaults' deny_ips list still blocks RFC1918 + cloud
+# metadata + loopback at the IP level, so even if a host on this
+# list resolved to a private IP the call would be refused.
+http_get_allow = [
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "docs.rs",
+    "api.github.com",
+    "github.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com",
+    "raw.githubusercontent.com",
+]
+http_post_allow = [
+    "api.github.com",
+]
+
+# ── Environment ──────────────────────────────────────────────────
+
+[environment]
+allow_vars = [
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
+    "CARGO_HOME", "RUSTUP_HOME",
+    # gh CLI may consult these
+    "GH_REPO", "GH_HOST",
+    # Pentest fixture env vars (set to known dummy values by the
+    # harnesses; not real secrets but tests assert their flow).
+    "DENYX_PENTEST_SECRET",
+]
+
+# ── Subprocess ───────────────────────────────────────────────────
+
+[subprocess]
+allow_commands = [
+    # Rust toolchain
+    "cargo",
+    "rustc",
+    "rustfmt",
+    "clippy-driver",
+    # Built Denyx binaries (the agent invokes its own builds)
+    "denyx",
+    "denyx-mcp",
+    "denyx-local-mcp",
+    # Project tooling
+    "git",
+    "gh",
+    "make",
+    # Shells + python3 (re-allowed below via deny_commands
+    # negation; -c flags blocked in deny_args). The repo's
+    # tooling uses `python3` explicitly, never `python`; same for
+    # `sh` vs `bash` — both shells are kept since the precommit
+    # hook is `bash` but some examples use `sh`-only syntax.
+    "bash",
+    "sh",
+    "python3",
+    # File utilities
+    "mkdir",
+    "cp",
+    "mv",
+    "chmod",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "find",
+    "grep",
+    "rg",
+    "date",
+    # Pentest harnesses use these
+    "ollama",
+    "pip",
+    "pip3",
+    # timeout is in the preset deny (generic command runner); we
+    # use it in the pentest scripts, re-allow below.
+    "timeout",
+]
+
+# Re-allow the shells / interpreters / runners the `secure-defaults`
+# preset blocks. Each negation is a privilege grant; we accept it
+# here because building Denyx genuinely needs these binaries, and
+# we mitigate the wholesale-bypass risk via `[subprocess.deny_args]`
+# below (blocking `-c` inline-execution forces the agent to use
+# real .sh/.py files which DO go through `fs.read/write` gates).
+deny_commands = [
+    "!bash",
+    "!sh",
+    "!python3",
+    "!timeout",
+]
+
+[subprocess.deny_args]
+# Block git operations that rewrite or destroy history. The
+# secure-defaults preset doesn't enforce these; project policy
+# should.
+git = [
+    "push --force",
+    "push -f",
+    "push --force-with-lease",
+    "reset --hard",
+    "clean -fd",
+    "clean -fx",
+    "clean -fdx",
+    "branch -D",
+    "filter-branch",
+    "rebase -i",
+    "update-ref -d",
+    "reflog expire",
+]
+
+# `cargo publish` releases to crates.io. `cargo yank` pulls a
+# published version. Both should be explicit, not agent-initiated.
+cargo = ["publish", "yank", "owner --remove"]
+
+# Block destructive gh operations.
+gh = [
+    "auth logout",
+    "repo delete",
+    "release delete",
+]
+
+# Force shells + interpreters to operate on real files (which DO
+# go through fs.read/write) rather than inline strings (which
+# bypass the argv path-gate entirely).
+bash    = ["-c"]
+sh      = ["-c"]
+python3 = ["-c", "-e"]
+
+# pip install --target / --prefix lets the agent write outside
+# its venv. Block both — pip should only ever install into
+# venv-resolved locations.
+pip  = ["install --target", "install --prefix"]
+pip3 = ["install --target", "install --prefix"]
