@@ -266,7 +266,10 @@ fn taint_flow_refuses_local_only_fs_read_then_net_post() {
 net.http_post("https://example.com/x", body)
 "#;
     let (sources, outputs) = assert_taint_flow(verify(src, &policy));
-    assert!(sources.iter().any(|s| s.contains("/tmp/secret/")), "{sources:?}");
+    assert!(
+        sources.iter().any(|s| s.contains("/tmp/secret/")),
+        "{sources:?}"
+    );
     assert!(
         outputs.contains(&"net.http_post".to_string()),
         "{outputs:?}"

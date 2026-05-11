@@ -194,8 +194,8 @@ mod taint_flow {
         while i + needle.len() <= bytes.len() {
             if &bytes[i..i + needle.len()] == needle {
                 let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-                let after_ok = i + needle.len() < bytes.len()
-                    && !is_ident_byte(bytes[i + needle.len()]);
+                let after_ok =
+                    i + needle.len() < bytes.len() && !is_ident_byte(bytes[i + needle.len()]);
                 if before_ok && after_ok {
                     let mut j = i + needle.len();
                     // Skip whitespace between the name and "(".
@@ -257,7 +257,10 @@ mod taint_flow {
             // No literal directly inside env.read(...) — should
             // return empty so the runtime taint layer handles it.
             let env_args = extract_literal_args(src, "env.read");
-            assert!(env_args.is_empty(), "variable arg should not be extracted: {env_args:?}");
+            assert!(
+                env_args.is_empty(),
+                "variable arg should not be extracted: {env_args:?}"
+            );
         }
 
         #[test]
@@ -270,7 +273,10 @@ mod taint_flow {
             // match either.
             let src = "xenv.read(\"X\")\nobj.read(\"Y\")";
             let args = extract_literal_args(src, "env.read");
-            assert!(args.is_empty(), "boundary should reject prefix-attached: {args:?}");
+            assert!(
+                args.is_empty(),
+                "boundary should reject prefix-attached: {args:?}"
+            );
         }
     }
 }
