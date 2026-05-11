@@ -23,6 +23,15 @@ inherits = "secure-defaults"
 name = "denyx-development"
 description = "Policy for an agent developing Denyx itself."
 
+# Trust subprocess.exec broadly, prompt only on specific dangerous patterns.
+requires_approval = ["!subprocess.exec"]   # opt out of the preset's catch-all
+
+[subprocess.requires_approval_args]
+git   = ["push", "reset --hard", "rebase -i", "filter-branch"]
+cargo = ["publish", "yank"]
+gh    = ["release create", "pr merge", "repo delete"]
+
+
 # ── Filesystem ───────────────────────────────────────────────────
 
 [filesystem]
@@ -226,12 +235,3 @@ python3 = ["-c", "-e"]
 # venv-resolved locations.
 pip  = ["install --target", "install --prefix"]
 pip3 = ["install --target", "install --prefix"]
-
-# Trust subprocess.exec broadly, prompt only on specific dangerous patterns.
-requires_approval = ["!subprocess.exec"]   # opt out of the preset's catch-all
-
-[subprocess.requires_approval_args]
-git   = ["push", "reset --hard", "rebase -i", "filter-branch"]
-cargo = ["publish", "yank"]
-gh    = ["release create", "pr merge", "repo delete"]
-
