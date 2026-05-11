@@ -166,6 +166,25 @@ def setup_fixtures() -> None:
 
 
 # ---- Probe definitions -------------------------------------------------
+#
+# As of the 47-probe expansion (2026-05-11 follow-up), the canonical
+# probe set lives in `probes.py`. The inline ROUND_A / ROUND_B /
+# ROUND_C arrays below are kept for backwards compatibility with the
+# `--round a/b/c/all` flag; new probes should be added to `probes.py`
+# and consumed via `--probes-all`.
+
+try:
+    # The canonical probe set lives in `probes.py` next to this
+    # script. Add the parent dir to sys.path so a plain
+    # `import probes` works whether the script is run from the repo
+    # root or from examples/local_executor/.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import probes as _probes_module  # type: ignore[import-not-found]
+    _ALL_NEW_PROBES = _probes_module.ALL_PROBES
+except Exception as _probes_exc:
+    _ALL_NEW_PROBES = []
+    _probes_import_error = repr(_probes_exc)
+
 
 @dataclass
 class Probe:
@@ -628,6 +647,10 @@ def main() -> int:
                     help="which probe round to run: a=step-injection, "
                          "b=encoding-bypass, c=deny-by-default. "
                          "[default: all]")
+    ap.add_argument("--probes-all", action="store_true",
+                    help="use the expanded 47-probe set from probes.py "
+                         "(12 categories) instead of the legacy 20-probe "
+                         "Round A/B/C set; overrides --round")
     ap.add_argument("--full", action="store_true",
                     help="print full Starlark + result bodies (no truncation)")
     ap.add_argument("--quiet", action="store_true",
@@ -648,12 +671,29 @@ def main() -> int:
     setup_fixtures()
 
     probes: list[Probe] = []
-    if args.round in ("a", "all"):
-        probes += ROUND_A_PROBES
-    if args.round in ("b", "all"):
-        probes += ROUND_B_PROBES
-    if args.round in ("c", "all"):
-        probes += ROUND_C_PROBES
+    if args.probes_all:
+        if not _ALL_NEW_PROBES:
+            print("error: --probes-all requires probes.py to be importable",
+                  file=sys.stderr)
+            return 2
+        # Adapt the canonical Probe records from probes.py to this
+        # script's internal Probe dataclass shape. Category names are
+        # carried through verbatim so the summary still groups by
+        # taxonomy.
+        for src in _ALL_NEW_PROBES:
+            probes.append(Probe(
+                label=src.label,
+                category=src.category,
+                description=src.description,
+                step=src.step,
+            ))
+    else:
+        if args.round in ("a", "all"):
+            probes += ROUND_A_PROBES
+        if args.round in ("b", "all"):
+            probes += ROUND_B_PROBES
+        if args.round in ("c", "all"):
+            probes += ROUND_C_PROBES
 
     trace_path = Path(args.trace_path)
     t0 = time.time()
@@ -685,15 +725,14 @@ def main() -> int:
     print("SUMMARY")
     print("=" * 72)
     print()
-    round_a_v = [v for p, v in zip(probes, verdicts) if p.category == "step-injection"]
-    round_b_v = [v for p, v in zip(probes, verdicts) if p.category == "encoding-bypass"]
-    round_c_v = [v for p, v in zip(probes, verdicts) if p.category == "deny-by-default"]
-    if round_a_v:
-        summarise("Round A — Step injection", round_a_v)
-    if round_b_v:
-        summarise("Round B — Encoding bypass", round_b_v)
-    if round_c_v:
-        summarise("Round C — Deny-by-default", round_c_v)
+    # Group verdicts by category. Works for both the legacy
+    # ("step-injection" / "encoding-bypass" / "deny-by-default")
+    # and the new expanded taxonomy from `probes.py`.
+    by_cat: dict[str, list[Verdict]] = {}
+    for p, v in zip(probes, verdicts):
+        by_cat.setdefault(p.category, []).append(v)
+    for cat, vs in by_cat.items():
+        summarise(f"category: {cat}", vs)
 
     # Exit code: nonzero if any LITERAL_LEAK / DERIVED_LEAK fired —
     # those are the only real findings.
