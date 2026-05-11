@@ -181,6 +181,111 @@ of `["**"]`), or keep the broad allow and add an explicit
 `deny = ["denyx.toml"]` — deny wins, the runtime sees the file as
 unwritable, the guard lets the policy load.
 
+### Should the policy file itself be readable to the agent?
+
+Separate question from the self-writable guard. The guard refuses
+to load a policy whose `write_allow` covers itself — that closes
+the "agent rewrites its own gates" attack. **Read** access to the
+policy file is a different question: should `denyx.toml` appear in
+`read_allow`?
+
+Denyx makes no default choice here. You decide based on the threat
+model.
+
+#### What read access gives the agent
+
+It doesn't bypass anything. The runtime gate still enforces the
+same rules; the agent just sees a copy of the manifest. The
+material effects of granting read access are:
+
+1. **Reconnaissance for free.** The agent can enumerate
+   `allow_commands`, `read_allow`, `write_allow`, `local_only_*`
+   lists, network allow-lists, and `requires_approval_args`
+   patterns without probing the runtime. A capability-probing
+   pattern (try a call, see if it's denied, repeat) generates
+   audit-log noise an operator can investigate; reading the
+   policy generates zero denied events.
+2. **Deny-pattern evasion.** Patterns like `git = ["push --force"]`
+   in `deny_args` are substring matches. The agent that knows the
+   exact substring can iterate evasions (`git push origin main
+   --force-with-lease`, doubled whitespace, flag reordering) in
+   one shot instead of paying the audit cost of trial-and-error.
+3. **Approval-prompt avoidance.** When `requires_approval_args`
+   lists the dangerous patterns explicitly, the agent reading
+   them learns which argv shapes will *not* prompt — and can
+   then construct equivalent destructive operations (e.g.
+   `git fetch && git checkout -B main origin/main` instead of
+   `git reset --hard`) that achieve the same effect without
+   tripping the prompt.
+4. **Operational intelligence.** Team-mode policies may carry
+   `policy_url` / `audit_url` and `[tools.X]` entries pointing at
+   internal infrastructure. Those URLs would be reconnaissance
+   data for an attacker.
+
+#### What read access does NOT give the agent
+
+- Any bypass of the gate. The runtime is authoritative; the
+  policy file is its input, not its weak point.
+- The values behind `local_only_*` names. The list shows which
+  env vars / paths are tainted; the contents stay scrubbed.
+- The audit log. `.denyx/audit.jsonl` is denied by the
+  self-writable guard's filesystem twin (the runtime refuses to
+  start if the audit log is reachable to the agent under any
+  allow-list).
+
+#### When to grant read access
+
+- **Open-source / dev policies** like the `denyx init`-generated
+  starter, or this repo's own `denyx.toml`. The policy is in git
+  and visible to anyone with repo access anyway; denying read in
+  the policy is theatre. Read access is useful for debuggability
+  (the agent can answer "what's currently in `allow_commands`?"
+  without an out-of-band lookup).
+- **Single-operator local workflows** where the operator is the
+  only realistic threat actor.
+
+#### When to deny read access
+
+- **Team-mode / production policies** where the file contains
+  operational details (internal URLs, named credential-shaped
+  env vars, infrastructure-revealing tool routing). The marginal
+  cost of denying read is near-zero — the agent never *needs* to
+  read its own policy, because the runtime reads it on the agent's
+  behalf and enforces. The marginal benefit is reducing the
+  attacker's reconnaissance surface and forcing audit-visible
+  probing.
+- **Regulated environments** where "the agent shouldn't know
+  what the gate gates" is itself a compliance signal. Deny by
+  default.
+- **Any policy whose `requires_approval_args` patterns are the
+  primary defense against destructive operations.** Letting the
+  agent read those patterns weakens them — see point 3 above.
+
+#### How to deny it
+
+Leave the policy file out of every allow-list. If your
+`read_allow` is broad (`"src/**"`, `"**/*.toml"`, etc.) and would
+incidentally include `denyx.toml`, add an explicit deny:
+
+```toml
+[filesystem]
+read_allow = ["**/*.toml", "src/**"]
+deny = ["denyx.toml", "**/denyx.toml"]
+```
+
+Deny wins. The runtime can still read the file at startup (the
+gate runs in the parent process, not the script); the agent's
+`fs.read` is the only thing rejected. Same model as the
+self-writable guard, applied to read instead of write.
+
+#### The honest summary
+
+Read access is a stealth/efficiency upgrade for a hostile agent,
+not a bypass. For Denyx's own development policy (this repo) the
+tradeoff is in favour of read. For policies wrapping real
+production workloads with operational details in the file, the
+default should flip the other way.
+
 ### `[network]`
 
 | Field               | Effect                                                          |
