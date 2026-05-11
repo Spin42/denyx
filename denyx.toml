@@ -49,14 +49,7 @@ read_allow = [
     # Build artefacts the agent occasionally inspects
     "target/**",
     # Pentest scratch trees
-    "/tmp/denyx_tp_probe/**",
-    "/tmp/denyx_tp_probe.toml",
-    "/tmp/denyx_tp_probe.jsonl",
-    "/tmp/denyx_tp_probe2.jsonl",
-    "/tmp/denyx_pentest_*",
-    "/tmp/denyx_detector_comparison.jsonl",
-    "/tmp/denyx_tp_v3_*.jsonl",
-    "/tmp/denyx_tp2_*.jsonl",
+    "/tmp/**",
 ]
 
 write_allow = [
@@ -233,3 +226,12 @@ python3 = ["-c", "-e"]
 # venv-resolved locations.
 pip  = ["install --target", "install --prefix"]
 pip3 = ["install --target", "install --prefix"]
+
+# Trust subprocess.exec broadly, prompt only on specific dangerous patterns.
+requires_approval = ["!subprocess.exec"]   # opt out of the preset's catch-all
+
+[subprocess.requires_approval_args]
+git   = ["push", "reset --hard", "rebase -i", "filter-branch"]
+cargo = ["publish", "yank"]
+gh    = ["release create", "pr merge", "repo delete"]
+
