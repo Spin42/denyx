@@ -28,6 +28,7 @@ Thumbs.db
 # `denyx audit verify` to check the hash chain) but should never
 # be committed.
 .denyx/
+.mcp.json
 
 # Local environment files (never commit secrets)
 .env
