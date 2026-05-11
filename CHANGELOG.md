@@ -15,89 +15,140 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ### Added
 
-- **Pre-exec tainted-output-flow refusal.** `verifier::verify` now
-  statically detects scripts that combine a literal-argument
-  `env.read("LOCAL_ONLY_VAR")` or `fs.read("/local-only-path")`
-  with any output-producing call (`print`, `fs.write`, `fs.delete`,
-  `net.http_*`, `subprocess.exec`) and refuses them **before
-  evaluation** with a typed `VerifierRejection::TaintFlow` error.
-  Replaces the previous "permit-and-scrub at runtime" behaviour for
-  the literal-arg shape. Variable-arg reads (`env.read(name)`)
-  still flow through the unchanged runtime IFC layer
-  (`redact_lines` + arg-side gate). Motivated by the Round 2
-  tool-poisoning pentest finding that prompt injection at 7B–22B
-  local LLMs has a ~100% success rate and the `<task>`-wrapper
-  defenses do not stop it — the only layer that actually held was
-  the runtime IFC scrubber, and converting that to a pre-exec
-  refusal gives a stronger guarantee with a clearer audit signal.
-  Implementation: `crates/host/src/verifier.rs` (new `taint_flow`
-  submodule), tests in `crates/host/tests/verifier.rs`
-  (`taint_flow_*`).
+- **Doctor's over-broad-allow-list check.** `denyx doctor` now
+  flags entries in `filesystem.{read,write,delete}_allow` that
+  defeat the deny-by-default property. Three risk tiers:
+  Universal patterns (`**`, `/**`, `/`) → Warning; HomeDir
+  patterns (`~`, `~/**`, `$HOME/**`) → Warning; top-level system
+  directories (`/tmp/**`, `/etc/**`, `/usr/**`, `/var/**`,
+  `/opt/**`, `/home/**`, `/Users/**`) → Info. Issues aggregate
+  per `(section, risk)` so the doctor prints at most one line
+  per class, not one per pattern. Surfaces the operator-side
+  footgun the Round 2 pentest caught in the fixture. Tests in
+  `crates/host/src/policy_host_consistency.rs::tests`
+  (`classify_overbroad_*`, `overbroad_*`).
+- **`denyx host-config --strict-mcp`.** New flag for Claude Code
+  / Cursor wiring (the two hosts that use a shared `.mcp.json`).
+  When set, refuses to merge if any non-denyx `mcpServers` entry
+  is already present. Closes the architectural-configuration
+  gap noted in the Round 2 report: the threat-model claim that
+  "the cloud orchestrator only sees `delegate_to_local`" depends
+  on denyx-local-mcp being the sole configured MCP server, and
+  this flag enforces the precondition at host-config time
+  rather than leaving it to operator diligence. The existing
+  file is left untouched on refusal; the error names the
+  offending entries. Tests in
+  `crates/cli/src/host_config.rs::tests::strict_mcp_*` and
+  end-to-end coverage in
+  `crates/cli/tests/setup_flow.rs::host_config_strict_mcp_*`.
+- **`denyx init --permissive`.** Polarity flip: the default
+  `denyx init` now strips the `/tmp/**` entry from `write_allow`
+  so the doctor doesn't warn on the starter policy out of the
+  box. Operators who want the broader scratch-tree behaviour
+  pass `--permissive` explicitly. The honest tradeoff is
+  surfaced in the post-init message (the minimal mode prints
+  the rationale + the flag). Tests in
+  `crates/cli/src/init.rs::tests` (8 tests covering the strip,
+  the permissive path, TOML validity, and protection against
+  over-stripping).
+- **Pre-exec tainted-output-flow refusal.** `verifier::verify`
+  now statically refuses scripts whose data flow couples a
+  literal-argument `env.read`/`fs.read` of a local-only value with
+  any output-producing call (`print`, `fs.write`, `fs.delete`,
+  `net.http_*`, `subprocess.exec`). The same property used to be
+  enforced at runtime by the IFC scrubber + arg-side gate; the
+  verifier now catches the literal-argument shape before the
+  Starlark evaluator runs, which gives a cleaner audit signal.
+  Variable-argument reads still flow through the unchanged
+  runtime IFC. `VerifierRejection` gains a `TaintFlow` variant
+  (the type is now an enum). Implementation in
+  `crates/host/src/verifier.rs` (`taint_flow` submodule); tests
+  in `crates/host/tests/verifier.rs` (`taint_flow_*`).
 - **End-to-end regression test for the single-tool MCP wire
   surface.** `tools_list_advertises_only_delegate_to_local` in
   `crates/local-mcp/tests/end_to_end.rs` spawns the real binary
   and asserts that an MCP `tools/list` returns exactly one tool
-  named `delegate_to_local` with only a `step` input property. The
-  threat-model claim "the cloud orchestrator sees exactly one
-  tool" rests on this; a regression that adds a second advertised
-  tool now fails CI.
+  named `delegate_to_local`. The threat-model claim "the cloud
+  orchestrator sees exactly one tool" depends on this and on
+  operator-side host configuration (see Round 2 report).
 - **`examples/local_executor/run_tool_poisoning_probe.py`** —
   three-round probe (step injection, encoding bypass, deny-by-
   default audit) driving `denyx-local-mcp` directly via JSON-RPC.
-  Used in the Round 2 pentest to validate the new defense across
-  4 local models (qwen2.5-coder 7B/14B, phi4 14B, codestral 22B).
+  Reproducer for the Round 2 pentest.
+- **`examples/local_executor/probes.py`** — canonical taxonomy of
+  47 hand-crafted probes across 12 categories, used by both the
+  runtime probe and the detector-comparison harness. Sources for
+  each probe are documented in-file (Greshake, HackAPrompt,
+  Willison, denyx-r1, novel).
+- **`examples/local_executor/run_detector_comparison.py`** —
+  detector-comparison harness that runs the 47-probe set through
+  llm-guard's `PromptInjection` (DeBERTa classifier), NeMo
+  Guardrails' `self_check_input` rail (LLM-as-judge with a local
+  Ollama model), and Denyx's `</task>` literal-substring guard.
+  Tabulates detection rates per category.
+- **Local pre-commit hook** mirroring CI's fmt + clippy gates.
+  `scripts/precommit.sh` plus a one-line `.githooks/pre-commit`
+  wrapper; one-time setup is `git config core.hooksPath .githooks`.
 
 ### Changed
 
-- **`VerifierRejection` is now an enum** with `Capability` and
-  `TaintFlow` variants. Callers that only used `.to_string()`
-  (the host runtime, every test that asserts via the rejection's
-  display) are unaffected; tests that did `err.capability` direct
-  field access were updated to match on the variant.
-- **`docs/04-security-threat-model.md`**: the "exfiltrating
-  local-only secrets" defense row now lists four layers (pre-exec
-  refusal, substring scrub, chunking detection, arg-side denial)
-  instead of three. Added a precondition note to the "MCP tool
-  definition poisoning" row (requires `--strict-mcp-config` and
-  denyx-local-mcp as the only configured MCP server). New rows
-  for **step-parameter injection** (the `<task>` wrappers are
-  mitigations, not boundaries) and **deny-by-default for
-  unmentioned resources** (with the operator caveat about
-  over-broad globs).
-- **`docs/05-owasp-agentic-coverage.md`**: ASI-02 section
-  documents the four-layer defense stack and references the
-  Round 2 pentest report. Test list updated.
-- **Tests in `crates/host/tests/taint.rs`** that previously
-  exercised the runtime scrubber via literal-argument reads now
-  use variable-argument reads, so they continue to exercise the
+- Tests in `crates/host/tests/taint.rs` that previously exercised
+  the runtime scrubber via literal-argument reads now use
+  variable-argument reads, so they continue to exercise the
   runtime path (which is unchanged). The pre-exec refusal of the
   literal-argument shape has dedicated tests in
   `crates/host/tests/verifier.rs`.
+- Threat model and OWASP-coverage docs were rewritten to be
+  honest about what each layer defends: the LLM-side `<task>`
+  wrappers and system-prompt warning did not measurably reduce
+  injection obedience in the Round 2 sample, and the enforcement
+  Denyx actually provides is on the script's runtime behaviour,
+  not on the LLM's reasoning.
 
 ### Pentest follow-up — Round 2
 
-[docs/security-pentest-r2-tool-poisoning.md](docs/security-pentest-r2-tool-poisoning.md)
-records the 2026-05-11 round and its v2 follow-up after the
-pre-exec refusal landed:
+See [docs/security-pentest-r2-tool-poisoning.md](docs/security-pentest-r2-tool-poisoning.md).
+Headline:
 
-- Models: qwen2.5-coder:7b, phi4:14b, qwen2.5-coder:14b,
-  codestral:22b (no DeepSeek 22B vanilla exists; codestral is the
-  size-matched substitute).
-- Total attempts: 80 (4 models × (10 step-injection + 6 encoding-
-  bypass + 4 deny-by-default)).
-- Result: **0 literal leaks, 0 derived leaks.** 63 attempts hit
-  the new pre-exec gate (`VERIFIER_HELD`), 9 hit the runtime
-  policy gate (`POLICY_HELD`), 7 failed on model-side Starlark
-  dialect errors, 1 was vacuously safe (read into a variable,
-  never printed). No literal or recovered secret in any result.
-- Honest findings preserved in the report: the `<task>` /
-  system-prompt-warning / `</task>`-reject defenses introduced
-  in `52f8eab`/`a402f39`/`6c6ddf2`/`9fc5178` provide **no
-  measurable protection at any model scale tested** — they
-  should be documented as mitigations, not security boundaries.
-  Capability-budget declaration (proposed during design) was
-  withdrawn: same-orchestrator declaration of `step` AND
-  `expected_capabilities` is one channel, not two.
+- Tested three LLM-side step-parameter defenses (delimiter
+  wrapping, system-prompt warning, literal-`</task>` rejection)
+  against four local code models (qwen2.5-coder 7B/14B, phi4
+  14B, codestral 22B). The wrappers did not measurably reduce
+  injection obedience on this n=4 sample.
+- The runtime IFC + capability gate absorbed every leak attempt;
+  0 literal or recovered leaks across 80 probe attempts. Read
+  this as evidence the runtime stack works, not as evidence the
+  LLM-side wrappers do.
+- One operator-side footgun caught during testing: too-broad
+  `**`-rooted globs in `read_allow` defeat deny-by-default by
+  construction. Surfacing this in `denyx doctor` is the
+  recommended follow-up.
+- `denyx host-config` does not emit `--strict-mcp-config`, so
+  the "cloud orchestrator only sees `delegate_to_local`" claim
+  depends on operator setup Denyx doesn't enforce. Worth fixing
+  or qualifying.
+
+A v3 follow-up (same day) added a 47-probe taxonomy and a
+detector-comparison experiment against two off-the-shelf
+prompt-injection detectors:
+
+- **llm-guard `PromptInjection`** (DeBERTa-v3 classifier):
+  43/47 (91%) detected. Misses concentrate in `cover_task`
+  (legitimate-looking framings) and `deny_by_default`.
+- **NeMo Guardrails `self_check_input`** (LLM-as-judge with
+  `qwen2.5-coder:7b`): 30/47 (63%) detected. Significantly
+  weaker than the dedicated classifier, with 0% detection on
+  `cover_task` and `translation` categories.
+- **Denyx's `</task>` literal-substring guard**: 3/47 (6%) —
+  only catches probes that happen to contain the byte sequence.
+  It was never a general-purpose detector and should not be
+  documented as one.
+
+No detector caught every probe (lowest false-negative rate was
+9%). The runtime gates remain the load-bearing layer in Denyx's
+defense; detection and runtime enforcement are complementary, not
+substitutes. Full data + per-category breakdown in the Round 2
+report.
 
 ## [0.2.0] — 2026-05-09
 
