@@ -342,6 +342,73 @@ impl Session {
 // ─────────────────────── Tests ───────────────────────
 
 #[test]
+fn tools_list_advertises_only_delegate_to_local() {
+    // Threat-model regression guard for the MCP tool-poisoning claim
+    // in docs/04-security-threat-model.md: the local-executor
+    // deployment promises the cloud orchestrator sees exactly one
+    // tool. If any future change makes the binary advertise a
+    // second tool, the structural prevention claim breaks and this
+    // test must be updated alongside the threat-model doc.
+    //
+    // Tests the spawned binary (not just the dispatch function unit-
+    // tested in server.rs) so any wiring regression — flag, feature,
+    // alternate handler — that introduces another tool over the wire
+    // is caught here.
+    let mcp_bin = ensure_denyx_mcp();
+    let tmp = unique_tempdir("e2e_tools_list");
+    let policy = write_minimal_policy(&tmp);
+    // No chat or embed calls expected; supply an empty queue so any
+    // accidental call fails loudly.
+    let mock = MockOllama::new(vec![]);
+
+    let args: Vec<String> = vec![
+        "serve".into(),
+        "--policy".into(),
+        policy.to_string_lossy().into_owned(),
+        "--mcp-bin".into(),
+        mcp_bin.to_string_lossy().into_owned(),
+        "--endpoint".into(),
+        mock.url(),
+        "--no-precompute".into(),
+    ];
+
+    let mut s = Session::spawn(&args);
+    s.handshake();
+    s.send(&json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+    }));
+    let resp = s.recv();
+
+    let tools = resp["result"]["tools"]
+        .as_array()
+        .expect("tools/list must return an array");
+    assert_eq!(
+        tools.len(),
+        1,
+        "denyx-local-mcp must advertise EXACTLY one tool; got: {tools:?}"
+    );
+    assert_eq!(
+        tools[0]["name"], "delegate_to_local",
+        "the one advertised tool must be `delegate_to_local`"
+    );
+    // Lock in the input schema shape so a future change adding new
+    // input fields is a deliberate decision reviewed against the
+    // threat model (each new input is potential injection surface).
+    let props = tools[0]["inputSchema"]["properties"]
+        .as_object()
+        .expect("inputSchema.properties must be an object");
+    let mut keys: Vec<&String> = props.keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![&"step".to_string()],
+        "delegate_to_local's input schema must expose only the `step` \
+         property; any addition needs threat-model review"
+    );
+    s.close();
+}
+
+#[test]
 fn legacy_no_subcommand_invocation_still_runs_serve_mode() {
     // Pre-subcommand `.mcp.json` configs invoke the binary as
     // `denyx-local-mcp --policy ./… --mcp-bin ./…` (no "serve"

@@ -84,18 +84,30 @@ answer there.
 > hijacking, or denial-of-wallet."*
 
 **Denyx position: strong.** This is the project's bread and
-butter. Three layers:
+butter. Four layers, in pre-exec → runtime order:
 
 1. **Capability gate** at every effecting builtin. Allowlist what
    the agent can use; everything else fails as a typed error.
-2. **Visibility classes** (`allow` / `local_only_*` / `deny_*`)
+2. **Pre-exec tainted-output-flow refusal** in the verifier. A
+   script that contains a literal-arg `env.read`/`fs.read` of a
+   local-only value AND any output-producing call (`print`,
+   `fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec`) is
+   refused **before evaluation**. Added in the Round-2 pentest
+   follow-up (2026-05-11) after a 4-model probe showed prompt
+   injection at the local LLM is 100% successful — the only
+   layer that catches the injection-induced script before bytes
+   touch the runtime. Tests in `crates/host/tests/verifier.rs`
+   (`taint_flow_*`).
+3. **Visibility classes** (`allow` / `local_only_*` / `deny_*`)
    per resource. `local_only_*` values are tainted and redacted at
-   output boundaries.
-3. **IFC layer** with transform-aware redaction (reverse, hex,
+   output boundaries (fallback when the static analysis cannot
+   resolve the read's argument).
+4. **IFC layer** with transform-aware redaction (reverse, hex,
    single-byte XOR + hex(XOR), base64 std/url-safe, ROT-1..25,
-   chunking detection). If the agent reads a local-only secret and
-   tries to encode it before bubbling it up, the encoded form is
-   recognised and redacted.
+   chunking detection) and **arg-side denial** at every outbound
+   effect. If the agent reads a local-only secret through a
+   variable-arg path and tries to encode it before bubbling it
+   up, the encoded form is recognised and redacted.
 
 Tests:
 
@@ -104,15 +116,35 @@ Tests:
 - `asi02_destructive_op_via_subprocess_force_push_is_denied` —
   `git push --force` blocked by `[subprocess.deny_args]` even
   though `git` is in `allow_commands`.
-- `asi02_local_only_secret_redacted_in_printed_output` — a
-  local-only file is readable by the agent (it needs the API
-  key to do its work) but the value is redacted from printed
-  output, so the secret can't bubble up to a cloud orchestrator.
+- `asi02_local_only_secret_refused_pre_exec_when_print_present` —
+  the new pre-exec gate: a literal-arg fs.read of a
+  `local_only_read` path combined with `print(...)` is refused at
+  the verifier with a `tainted-output-flow` error, before the
+  Starlark evaluator runs.
+- `tests/taint.rs` (`fs_local_only_read_redacts_in_printed_output`,
+  `env_local_only_var_redacts_in_printed_output`, etc.) — the
+  runtime redaction fallback for variable-arg reads that the
+  static gate cannot resolve.
 
-**Limit:** the IFC transform set is finite. Custom AES, custom
-permutations, length-leak side channels, comparison oracles, and
-substring-guess oracles are NOT covered. The threat model
-(`docs/04-security-threat-model.md`) is explicit.
+**Empirical:** the [Round 2 pentest report](security-pentest-r2-tool-poisoning.md)
+records 80 attempts across 4 local LLMs (qwen 7B/14B, phi-4 14B,
+codestral 22B) targeting the `delegate_to_local` step parameter
+with step injection (Round A), encoding bypass (Round B), and
+deny-by-default audit (Round C) probes. **0 literal leaks; 0
+recovery-panel leaks.** 63/80 attempts hit `VERIFIER_HELD`
+(the pre-exec gate), 9 hit `POLICY_HELD` (Round-C deny-by-default),
+the rest were vacuously safe or model-side dialect failures.
+
+**Limit:** the static analysis matches only **literal-argument**
+reads (`env.read("NAME")` / `fs.read("/path")`). A
+variable-argument read falls through to the runtime IFC layer,
+which has the same documented residual risk as before: custom AES,
+custom permutations, length-leak side channels, comparison
+oracles, and substring-guess oracles are NOT covered. Also,
+operator-side: `read_allow = ["**"]` or any sufficiently broad
+glob defeats the deny-by-default property by construction —
+narrowing the allow-list is the operator's responsibility. The
+threat model (`docs/04-security-threat-model.md`) is explicit.
 
 ---
 

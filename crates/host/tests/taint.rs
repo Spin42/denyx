@@ -41,8 +41,16 @@ allow = ["fs.read"]
     );
     let runner = runner_for(&toml, tmp);
     let path_lit = secret_path.to_string_lossy().replace('\\', "/");
+    // NOTE: this test exercises the **runtime IFC scrubber**
+    // (`redact_lines`) — which is the fallback layer for cases the
+    // pre-exec tainted-output-flow verifier doesn't catch. We use a
+    // variable-arg `fs.read` so the literal-arg analysis falls
+    // through, letting the runtime path do the work. The pre-exec
+    // behaviour (refusal of the literal-arg shape) has its own
+    // tests in `tests/verifier.rs`.
     let src = format!(
-        r#"x = fs.read("{path_lit}")
+        r#"p = "{path_lit}"
+x = fs.read(p)
 print("got:", x)
 print("len:", len(x))
 "#
@@ -80,8 +88,12 @@ allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
+    // Variable-arg env.read so the runtime IFC path (`redact_lines`)
+    // is exercised here; pre-exec literal-arg refusal is covered in
+    // tests/verifier.rs.
     let src = format!(
-        r#"k = env.read("{var}")
+        r#"name = "{var}"
+k = env.read(name)
 print("auth=Bearer", k)
 "#
     );
@@ -116,8 +128,11 @@ allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
+    // Variable-arg env.read keeps this test on the runtime IFC path.
+    // Pre-exec refusal for the literal-arg shape is in tests/verifier.rs.
     let src = format!(
-        r#"k = env.read("{var}")
+        r#"name = "{var}"
+k = env.read(name)
 print("PREFIX[" + k + "]SUFFIX")
 "#
     );
@@ -295,8 +310,12 @@ local_only_commands = ["printf"]
     let cap = Arc::new(Capture::default());
     let runner = Runner::new(policy).with_audit(cap.clone());
 
+    // Variable-arg env.read so the pre-exec tainted-output-flow
+    // refusal (literal-arg-only) doesn't fire; this test is about the
+    // RUNTIME redaction of the audit-event payload.
     let src = format!(
-        r#"k = env.read("{var}")
+        r#"name = "{var}"
+k = env.read(name)
 out = subprocess.exec(["printf", "%s", k])
 "#
     );

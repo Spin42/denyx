@@ -6,6 +6,17 @@
 //! is the second line — both must agree before a capability fires. The
 //! verifier strips comments and string literals first so capability names
 //! quoted as data don't cause false positives.
+//!
+//! The verifier also enforces a static **tainted-output-flow** check
+//! (the `taint_flow` module below): a script that reads any
+//! `local_only_*` env var or filesystem path AND contains any
+//! output-producing call (`print`, `fs.write`, `fs.delete`,
+//! `net.http_*`, `subprocess.exec`) is refused before execution. This
+//! tightens the asymmetric Round-1 behaviour where `print` of a
+//! tainted value was permitted-then-scrubbed and `fs.write` was
+//! refused at the arg-side gate; both now refuse uniformly at the
+//! verifier. The motivation (Round-2 pentest) is documented in
+//! `docs/security-pentest-r2-tool-poisoning.md`.
 
 use std::collections::BTreeSet;
 
@@ -14,9 +25,26 @@ use denyx_policy::Policy;
 use crate::CAPABILITIES;
 
 #[derive(Debug, thiserror::Error)]
-#[error("verifier: capability {capability:?} called by script but not allowed by policy")]
-pub struct VerifierRejection {
-    pub capability: String,
+pub enum VerifierRejection {
+    #[error("verifier: capability {capability:?} called by script but not allowed by policy")]
+    Capability { capability: String },
+
+    /// A script reads at least one `local_only_*` value and also
+    /// contains at least one output-producing call. The two cannot
+    /// coexist: if the read is required for compute, the script must
+    /// avoid all outputs; if any output is required, it must not
+    /// also read local-only data.
+    #[error(
+        "verifier: tainted-output-flow refused — script reads local-only data \
+         ({sources:?}) AND contains output-producing call(s) ({outputs:?}); \
+         local-only values may not flow to non-local-only destinations. To use \
+         local-only data, restructure the script so its outputs do not appear \
+         after a local-only read, or route output through a local-only sink"
+    )]
+    TaintFlow {
+        sources: Vec<String>,
+        outputs: Vec<String>,
+    },
 }
 
 pub fn verify(source: &str, policy: &Policy) -> Result<(), VerifierRejection> {
@@ -24,8 +52,11 @@ pub fn verify(source: &str, policy: &Policy) -> Result<(), VerifierRejection> {
     let used = scan_capabilities(&stripped);
     for cap in used {
         if policy.check_function(&cap).is_err() {
-            return Err(VerifierRejection { capability: cap });
+            return Err(VerifierRejection::Capability { capability: cap });
         }
+    }
+    if let Some((sources, outputs)) = taint_flow::detect(source, &stripped, policy) {
+        return Err(VerifierRejection::TaintFlow { sources, outputs });
     }
     Ok(())
 }
@@ -67,6 +98,181 @@ fn contains_word(haystack: &str, word: &str) -> bool {
 /// the identifier context, so the boundary check fails.
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
+}
+
+/// Static tainted-output-flow detection. See module docstring.
+///
+/// The check is intentionally conservative: any `env.read` or `fs.read`
+/// whose literal-string argument matches a `local_only_*` entry counts
+/// as a local-only read. Non-literal arguments (variables,
+/// concatenations) are not analysed here — they fall through to the
+/// runtime taint layer, which is unchanged.
+mod taint_flow {
+    use super::{contains_word, is_ident_byte};
+    use denyx_policy::Policy;
+    use std::path::Path;
+
+    /// The output-producing calls. If any of these is present in a
+    /// script that also reads a local-only value, the verifier refuses
+    /// pre-exec. `subprocess.exec` is included even though its argv-
+    /// gate would refuse a tainted argv at runtime: a tainted value can
+    /// still influence subprocess behaviour via control flow (e.g.
+    /// "spawn echo IF the secret starts with X"), so the conservative
+    /// answer is to refuse the combination at source level.
+    const OUTPUT_CALLS: &[&str] = &[
+        "print",
+        "fs.write",
+        "fs.delete",
+        "net.http_get",
+        "net.http_post",
+        "net.http_put",
+        "net.http_patch",
+        "net.http_delete",
+        "subprocess.exec",
+    ];
+
+    /// Returns `Some((sources, outputs))` if the script contains BOTH
+    /// a local-only read AND an output call. `source` is the raw
+    /// script (used for literal-arg extraction); `stripped` is the
+    /// strings-and-comments-removed view used for output-call
+    /// presence checks (so a `"print"` string literal inside a
+    /// docstring doesn't trip the gate).
+    pub fn detect(
+        source: &str,
+        stripped: &str,
+        policy: &Policy,
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        let mut sources: Vec<String> = Vec::new();
+
+        for name in extract_literal_args(source, "env.read") {
+            if policy.env_is_local_only(&name) {
+                let tag = format!("env.read({name:?})");
+                if !sources.contains(&tag) {
+                    sources.push(tag);
+                }
+            }
+        }
+        for path_str in extract_literal_args(source, "fs.read") {
+            let p = Path::new(&path_str);
+            if policy.fs_read_is_local_only(p) {
+                let tag = format!("fs.read({path_str:?})");
+                if !sources.contains(&tag) {
+                    sources.push(tag);
+                }
+            }
+        }
+        if sources.is_empty() {
+            return None;
+        }
+
+        let mut outputs: Vec<String> = Vec::new();
+        for call in OUTPUT_CALLS {
+            if contains_word(stripped, call) {
+                outputs.push((*call).to_string());
+            }
+        }
+        if outputs.is_empty() {
+            return None;
+        }
+        Some((sources, outputs))
+    }
+
+    /// Extract literal string arguments of every `fn_call("...")`
+    /// occurrence in `source`. Walks bytes directly (no Starlark
+    /// parser dependency), in the same style as the rest of the
+    /// verifier. Skips occurrences where the arg is a variable / a
+    /// concatenation / anything other than a single string literal —
+    /// those cases fall through to the runtime taint layer.
+    fn extract_literal_args(source: &str, fn_call: &str) -> Vec<String> {
+        let bytes = source.as_bytes();
+        let needle = fn_call.as_bytes();
+        let mut out = Vec::new();
+        if needle.is_empty() {
+            return out;
+        }
+        let mut i = 0;
+        while i + needle.len() <= bytes.len() {
+            if &bytes[i..i + needle.len()] == needle {
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after_ok = i + needle.len() < bytes.len()
+                    && !is_ident_byte(bytes[i + needle.len()]);
+                if before_ok && after_ok {
+                    let mut j = i + needle.len();
+                    // Skip whitespace between the name and "(".
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'(' {
+                        j += 1;
+                        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                            let q = bytes[j];
+                            j += 1;
+                            let start = j;
+                            while j < bytes.len() && bytes[j] != q && bytes[j] != b'\n' {
+                                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                                    j += 2;
+                                } else {
+                                    j += 1;
+                                }
+                            }
+                            if j < bytes.len() && bytes[j] == q {
+                                if let Ok(lit) = std::str::from_utf8(&bytes[start..j]) {
+                                    out.push(lit.to_string());
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn extract_literal_args_picks_up_double_and_single_quoted() {
+            let src = r#"
+                a = env.read("USER")
+                b = env.read('HOME')
+                c = fs.read("/tmp/x")
+            "#;
+            let env_args = extract_literal_args(src, "env.read");
+            assert_eq!(env_args, vec!["USER".to_string(), "HOME".to_string()]);
+            let fs_args = extract_literal_args(src, "fs.read");
+            assert_eq!(fs_args, vec!["/tmp/x".to_string()]);
+        }
+
+        #[test]
+        fn extract_literal_args_skips_variable_args() {
+            let src = "name = \"USER\"\nx = env.read(name)";
+            // No literal directly inside env.read(...) — should
+            // return empty so the runtime taint layer handles it.
+            let env_args = extract_literal_args(src, "env.read");
+            assert!(env_args.is_empty(), "variable arg should not be extracted: {env_args:?}");
+        }
+
+        #[test]
+        fn extract_literal_args_ignores_unrelated_calls() {
+            // `read("foo")` is NOT `env.read("foo")` — the
+            // `before_ok` boundary should accept only when the
+            // preceding byte isn't an ident byte. Here `obj.read`
+            // is a different fully-qualified call. The function-call
+            // string here is `env.read`, and `xenv.read` shouldn't
+            // match either.
+            let src = "xenv.read(\"X\")\nobj.read(\"Y\")";
+            let args = extract_literal_args(src, "env.read");
+            assert!(args.is_empty(), "boundary should reject prefix-attached: {args:?}");
+        }
+    }
 }
 
 /// Strip Starlark `# line comments`, `"..."`, `'...'`, `"""..."""`,

@@ -13,6 +13,92 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Pre-exec tainted-output-flow refusal.** `verifier::verify` now
+  statically detects scripts that combine a literal-argument
+  `env.read("LOCAL_ONLY_VAR")` or `fs.read("/local-only-path")`
+  with any output-producing call (`print`, `fs.write`, `fs.delete`,
+  `net.http_*`, `subprocess.exec`) and refuses them **before
+  evaluation** with a typed `VerifierRejection::TaintFlow` error.
+  Replaces the previous "permit-and-scrub at runtime" behaviour for
+  the literal-arg shape. Variable-arg reads (`env.read(name)`)
+  still flow through the unchanged runtime IFC layer
+  (`redact_lines` + arg-side gate). Motivated by the Round 2
+  tool-poisoning pentest finding that prompt injection at 7B–22B
+  local LLMs has a ~100% success rate and the `<task>`-wrapper
+  defenses do not stop it — the only layer that actually held was
+  the runtime IFC scrubber, and converting that to a pre-exec
+  refusal gives a stronger guarantee with a clearer audit signal.
+  Implementation: `crates/host/src/verifier.rs` (new `taint_flow`
+  submodule), tests in `crates/host/tests/verifier.rs`
+  (`taint_flow_*`).
+- **End-to-end regression test for the single-tool MCP wire
+  surface.** `tools_list_advertises_only_delegate_to_local` in
+  `crates/local-mcp/tests/end_to_end.rs` spawns the real binary
+  and asserts that an MCP `tools/list` returns exactly one tool
+  named `delegate_to_local` with only a `step` input property. The
+  threat-model claim "the cloud orchestrator sees exactly one
+  tool" rests on this; a regression that adds a second advertised
+  tool now fails CI.
+- **`examples/local_executor/run_tool_poisoning_probe.py`** —
+  three-round probe (step injection, encoding bypass, deny-by-
+  default audit) driving `denyx-local-mcp` directly via JSON-RPC.
+  Used in the Round 2 pentest to validate the new defense across
+  4 local models (qwen2.5-coder 7B/14B, phi4 14B, codestral 22B).
+
+### Changed
+
+- **`VerifierRejection` is now an enum** with `Capability` and
+  `TaintFlow` variants. Callers that only used `.to_string()`
+  (the host runtime, every test that asserts via the rejection's
+  display) are unaffected; tests that did `err.capability` direct
+  field access were updated to match on the variant.
+- **`docs/04-security-threat-model.md`**: the "exfiltrating
+  local-only secrets" defense row now lists four layers (pre-exec
+  refusal, substring scrub, chunking detection, arg-side denial)
+  instead of three. Added a precondition note to the "MCP tool
+  definition poisoning" row (requires `--strict-mcp-config` and
+  denyx-local-mcp as the only configured MCP server). New rows
+  for **step-parameter injection** (the `<task>` wrappers are
+  mitigations, not boundaries) and **deny-by-default for
+  unmentioned resources** (with the operator caveat about
+  over-broad globs).
+- **`docs/05-owasp-agentic-coverage.md`**: ASI-02 section
+  documents the four-layer defense stack and references the
+  Round 2 pentest report. Test list updated.
+- **Tests in `crates/host/tests/taint.rs`** that previously
+  exercised the runtime scrubber via literal-argument reads now
+  use variable-argument reads, so they continue to exercise the
+  runtime path (which is unchanged). The pre-exec refusal of the
+  literal-argument shape has dedicated tests in
+  `crates/host/tests/verifier.rs`.
+
+### Pentest follow-up — Round 2
+
+[docs/security-pentest-r2-tool-poisoning.md](docs/security-pentest-r2-tool-poisoning.md)
+records the 2026-05-11 round and its v2 follow-up after the
+pre-exec refusal landed:
+
+- Models: qwen2.5-coder:7b, phi4:14b, qwen2.5-coder:14b,
+  codestral:22b (no DeepSeek 22B vanilla exists; codestral is the
+  size-matched substitute).
+- Total attempts: 80 (4 models × (10 step-injection + 6 encoding-
+  bypass + 4 deny-by-default)).
+- Result: **0 literal leaks, 0 derived leaks.** 63 attempts hit
+  the new pre-exec gate (`VERIFIER_HELD`), 9 hit the runtime
+  policy gate (`POLICY_HELD`), 7 failed on model-side Starlark
+  dialect errors, 1 was vacuously safe (read into a variable,
+  never printed). No literal or recovered secret in any result.
+- Honest findings preserved in the report: the `<task>` /
+  system-prompt-warning / `</task>`-reject defenses introduced
+  in `52f8eab`/`a402f39`/`6c6ddf2`/`9fc5178` provide **no
+  measurable protection at any model scale tested** — they
+  should be documented as mitigations, not security boundaries.
+  Capability-budget declaration (proposed during design) was
+  withdrawn: same-orchestrator declaration of `step` AND
+  `expected_capabilities` is one channel, not two.
+
 ## [0.2.0] — 2026-05-09
 
 A "make Denyx pleasant to wire into a real coding agent" release.

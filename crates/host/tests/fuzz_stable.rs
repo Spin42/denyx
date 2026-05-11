@@ -126,11 +126,16 @@ fn verifier_does_not_panic_on_random_inputs() {
         match (&r1, &r2) {
             (Ok(()), Ok(())) => {}
             (Err(a), Err(b)) => {
-                if a.capability != b.capability {
+                // Two rejections must have the same Display form
+                // (the user-visible message). The internal enum
+                // shape may differ, but the message is what the
+                // verifier promises to be idempotent on.
+                let am = a.to_string();
+                let bm = b.to_string();
+                if am != bm {
                     panic!(
                         "iter {i}: verifier non-idempotent on input: {src:?}\n\
-                         first: {:?}, second: {:?}",
-                        a.capability, b.capability,
+                         first: {am:?}, second: {bm:?}",
                     );
                 }
             }

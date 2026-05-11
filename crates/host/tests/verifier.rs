@@ -6,8 +6,19 @@
 
 use std::path::PathBuf;
 
-use denyx_host::verifier::verify;
+use denyx_host::verifier::{verify, VerifierRejection};
 use denyx_policy::{Policy, PolicyFile};
+
+/// Helper: assert the rejection is a Capability variant carrying the
+/// expected name. Pre-enum tests asserted `err.capability == name`;
+/// this helper preserves the same intent in one line.
+fn assert_capability(r: Result<(), VerifierRejection>, expected: &str) {
+    match r {
+        Err(VerifierRejection::Capability { capability }) => assert_eq!(capability, expected),
+        Err(other) => panic!("expected Capability({expected:?}), got {other:?}"),
+        Ok(()) => panic!("expected Capability({expected:?}), got Ok"),
+    }
+}
 
 fn empty_policy() -> Policy {
     // Policy that allows nothing: any capability use should be flagged.
@@ -23,8 +34,7 @@ allow = []
 fn flags_underscored_capability_call() {
     // Direct use of the registered global is detected and rejected.
     let src = r#"_denyx_fs_read("x")"#;
-    let err = verify(src, &empty_policy()).unwrap_err();
-    assert_eq!(err.capability, "fs.read");
+    assert_capability(verify(src, &empty_policy()), "fs.read");
 }
 
 #[test]
@@ -43,8 +53,7 @@ fn ignores_substring_match_with_extra_prefix_or_suffix() {
 #[test]
 fn flags_dotted_capability_call() {
     let src = r#"x = fs.read("x")"#;
-    let err = verify(src, &empty_policy()).unwrap_err();
-    assert_eq!(err.capability, "fs.read");
+    assert_capability(verify(src, &empty_policy()), "fs.read");
 }
 
 #[test]
@@ -132,9 +141,7 @@ fn triple_quoted_then_real_capability_call_flags_only_real_call() {
     let src = r#"docstring = """this script will fs.read a file"""
 result = fs.read("path")
 "#;
-    let err =
-        verify(src, &empty_policy()).expect_err("real fs.read call must be flagged by verifier");
-    assert_eq!(err.capability, "fs.read");
+    assert_capability(verify(src, &empty_policy()), "fs.read");
 }
 
 #[test]
@@ -170,9 +177,7 @@ fn capability_name_after_triple_quoted_string_is_still_flagged() {
     // the string — and any capability call after the docstring
     // would be hidden from the scanner. BYPASS.
     let src = "doc = \"\"\"hello world\"\"\"\nresult = fs.read(\"path\")\n";
-    let err = verify(src, &empty_policy())
-        .expect_err("capability call after closing triple-quote must be flagged");
-    assert_eq!(err.capability, "fs.read");
+    assert_capability(verify(src, &empty_policy()), "fs.read");
 }
 
 #[test]
@@ -187,4 +192,136 @@ read_allow = ["**"]
     let policy = Policy::from_file(file, PathBuf::from("/tmp")).unwrap();
     let src = r#"x = fs.read("x")"#;
     verify(src, &policy).expect("allowed capability must pass");
+}
+
+// ── Tainted-output-flow refusal (new in Round-2 pentest follow-up) ───
+//
+// These tests pin down the pre-exec "tainted read AND output call →
+// refuse" gate added in commit XXXXXX. See the module docstring in
+// verifier.rs for motivation. The tests cover four shapes:
+//   1. local-only env read + print → REFUSED
+//   2. local-only env read + fs.write → REFUSED (overlaps the runtime
+//      arg-side gate but fires earlier)
+//   3. local-only env read with NO output → ALLOWED (compute-only)
+//   4. plain (non-local-only) env read + print → ALLOWED
+
+fn taint_flow_policy() -> Policy {
+    // env: SECRET is local-only-tainted; PLAIN is just allow.
+    // fs: /tmp/work writable; /tmp/secret/** is local-only-read.
+    // net.http_post allowed to example.com so the
+    // local-only-read + net.http_post test exercises the taint-
+    // flow gate, not the capability check.
+    let toml = r#"
+inherits = "secure-defaults"
+[filesystem]
+read_allow = ["/tmp/work/**", "/tmp/secret/**"]
+write_allow = ["/tmp/work/**"]
+local_only_read = ["/tmp/secret/**"]
+
+[network]
+http_post_allow = ["example.com"]
+
+[environment]
+allow_vars      = ["PLAIN", "USER", "HOME"]
+local_only_vars = ["SECRET"]
+"#;
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    Policy::from_file(file, PathBuf::from("/tmp")).unwrap()
+}
+
+fn assert_taint_flow(r: Result<(), VerifierRejection>) -> (Vec<String>, Vec<String>) {
+    match r {
+        Err(VerifierRejection::TaintFlow { sources, outputs }) => (sources, outputs),
+        Err(other) => panic!("expected TaintFlow rejection, got {other:?}"),
+        Ok(()) => panic!("expected TaintFlow rejection, got Ok"),
+    }
+}
+
+#[test]
+fn taint_flow_refuses_local_only_env_then_print() {
+    let policy = taint_flow_policy();
+    let src = r#"s = env.read("SECRET")
+print(s)
+"#;
+    let (sources, outputs) = assert_taint_flow(verify(src, &policy));
+    assert!(sources.iter().any(|s| s.contains("SECRET")), "{sources:?}");
+    assert!(outputs.contains(&"print".to_string()), "{outputs:?}");
+}
+
+#[test]
+fn taint_flow_refuses_local_only_env_then_fs_write() {
+    let policy = taint_flow_policy();
+    let src = r#"s = env.read("SECRET")
+fs.write("/tmp/work/leak.txt", s)
+"#;
+    let (sources, outputs) = assert_taint_flow(verify(src, &policy));
+    assert!(sources.iter().any(|s| s.contains("SECRET")), "{sources:?}");
+    assert!(outputs.contains(&"fs.write".to_string()), "{outputs:?}");
+}
+
+#[test]
+fn taint_flow_refuses_local_only_fs_read_then_net_post() {
+    let policy = taint_flow_policy();
+    let src = r#"body = fs.read("/tmp/secret/api.key")
+net.http_post("https://example.com/x", body)
+"#;
+    let (sources, outputs) = assert_taint_flow(verify(src, &policy));
+    assert!(sources.iter().any(|s| s.contains("/tmp/secret/")), "{sources:?}");
+    assert!(
+        outputs.contains(&"net.http_post".to_string()),
+        "{outputs:?}"
+    );
+}
+
+#[test]
+fn taint_flow_allows_local_only_read_with_no_output() {
+    // Compute-only script: reads the secret, derives a length, but
+    // never prints / writes / spawns. Legitimate; must pass.
+    let policy = taint_flow_policy();
+    let src = r#"s = env.read("SECRET")
+n = len(s)
+"#;
+    verify(src, &policy).expect("compute-only local-only read must pass");
+}
+
+#[test]
+fn taint_flow_allows_plain_env_read_with_print() {
+    // The env var is in allow_vars but NOT in local_only_vars — it
+    // is not tainted. print(env.read("PLAIN")) is fine.
+    let policy = taint_flow_policy();
+    let src = r#"u = env.read("PLAIN")
+print(u)
+"#;
+    verify(src, &policy).expect("non-local-only env read with print must pass");
+}
+
+#[test]
+fn taint_flow_ignores_local_only_name_inside_quoted_string_in_print() {
+    // `print("SECRET is fine")` mentions the local-only var name but
+    // doesn't call env.read on it. The strip_strings_and_comments
+    // step removes the literal before contains_word fires; the
+    // taint-flow extractor only counts literals inside env.read(...)
+    // calls. Must not refuse.
+    let policy = taint_flow_policy();
+    let src = r#"print("SECRET is fine")"#;
+    verify(src, &policy).expect("name-in-string-literal must not refuse");
+}
+
+#[test]
+fn taint_flow_variable_arg_falls_through_to_runtime() {
+    // env.read with a variable arg cannot be statically resolved to
+    // a name. The pre-exec gate must NOT refuse on this shape —
+    // it falls through to the runtime taint layer (which marks the
+    // returned value tainted at runtime if the resolved name is in
+    // local_only_vars).
+    let policy = taint_flow_policy();
+    let src = r#"name = "SECRET"
+s = env.read(name)
+print(s)
+"#;
+    // This passes the pre-exec gate (no literal SECRET in env.read).
+    // Runtime taint propagation will still scrub the output if it
+    // resolves to a local-only name. Document that the runtime
+    // gate is the authoritative defense in this case.
+    verify(src, &policy).expect("variable-arg env.read must not pre-exec-refuse");
 }

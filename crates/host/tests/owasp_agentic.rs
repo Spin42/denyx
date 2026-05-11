@@ -125,11 +125,15 @@ allow = ["subprocess.exec"]
 }
 
 #[test]
-fn asi02_local_only_secret_redacted_in_printed_output() {
-    // A local-only secret is readable by the agent (the agent NEEDS
-    // the API key to do its work) but the IFC layer must redact it
-    // from any printed output, audit log, or returned tool result —
-    // so the secret cannot bubble up to a cloud orchestrator.
+fn asi02_local_only_secret_refused_pre_exec_when_print_present() {
+    // A local-only secret is reachable by the agent (the agent NEEDS
+    // the API key to do its work), but the pre-execution verifier
+    // refuses any script that combines a local-only read with an
+    // output-producing call (`print`, `fs.write`, `fs.delete`,
+    // `net.http_*`, `subprocess.exec`). This is stronger than the
+    // earlier "permit-and-scrub" behaviour: the script never runs,
+    // so there is no opportunity to leak via an encoding the IFC
+    // doesn't cover. See `docs/security-pentest-r2-tool-poisoning.md`.
     let tmp = std::env::temp_dir();
     let secret_path = tmp.join(format!("denyx_owasp_secret_{}.txt", std::process::id()));
     let secret = "exfil-this-please-token-aB12cD34eF56gH78";
@@ -151,11 +155,17 @@ allow = ["fs.read"]
 print("here is the value:", x)"#,
         path = secret_path.to_string_lossy().replace('\\', "/")
     );
-    let outcome = runner.run("asi02c", &src, "ifc.star").unwrap();
-    let joined = outcome.printed.join("\n");
+    let err = runner
+        .run("asi02c", &src, "ifc.star")
+        .expect_err("verifier must refuse local-only-read + print pre-exec");
+    let msg = err.to_string();
     assert!(
-        !joined.contains(secret),
-        "ASI-02 (IFC): printed output must not contain raw secret. Got: {joined:?}"
+        msg.contains("tainted-output-flow") || msg.contains("local-only"),
+        "ASI-02 (verifier): error must name the tainted-output-flow class. Got: {msg:?}"
+    );
+    assert!(
+        !msg.contains(secret),
+        "ASI-02 (verifier): error message itself must not contain the secret. Got: {msg:?}"
     );
     let _ = std::fs::remove_file(&secret_path);
 }
