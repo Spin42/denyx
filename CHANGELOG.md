@@ -13,8 +13,29 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-11
+
 ### Added
 
+- **Two new language templates: `--lang java` and `--lang dotnet`.**
+  Java covers both Maven and Gradle in one template (allow-lists
+  include `pom.xml` / `target/` AND `build.gradle*` / `build/`),
+  with aliases routing `kotlin` / `scala` / `jvm` / `maven` /
+  `gradle`. .NET covers `dotnet` CLI + `*.csproj` / `*.fsproj` /
+  `*.vbproj` + `bin/` + `obj/`, with aliases `csharp` / `cs` /
+  `fsharp` / `fs` / `vb`. Templates parse cleanly under the
+  existing minimal/permissive tests, which now iterate every
+  language. 3 new alias-resolution unit tests.
+- **Commented-out `[subprocess.requires_approval_args]` examples
+  in every existing language template** (Python / Node / Ruby /
+  Rust / Go). The block ships disabled so routine workflow doesn't
+  prompt; an operator who wants per-call review on specific
+  subcommands uncomments and tunes. Each language carries
+  language-appropriate example patterns.
+- **Setup-prompt updates** in `examples/denyx-setup-prompt.md`
+  surfacing the new flags (`--permissive`, `--strict-mcp`,
+  `requires_approval_args`) and a note about WebSearch staying in
+  the host deny list by default.
 - **`[subprocess.requires_approval_args]`** — per-command,
   per-argv-pattern confirm-hook prompts. Complements the existing
   top-level `requires_approval` list (which fires the hook for

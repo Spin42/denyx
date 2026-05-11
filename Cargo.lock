@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "allocative",
  "anyhow",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-local-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-policy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "globset",

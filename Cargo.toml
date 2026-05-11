@@ -13,7 +13,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 authors = ["Marc Lainez <marc@spin42.com>"]
@@ -25,8 +25,8 @@ homepage = "https://github.com/Spin42/denyx"
 rust-version = "1.80"
 
 [workspace.dependencies]
-denyx-policy = { path = "crates/policy", version = "0.2.0" }
-denyx-host = { path = "crates/host", version = "0.2.0" }
+denyx-policy = { path = "crates/policy", version = "0.3.0" }
+denyx-host = { path = "crates/host", version = "0.3.0" }
 
 anyhow = "1"
 thiserror = "2"
