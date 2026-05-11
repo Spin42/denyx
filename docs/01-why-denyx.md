@@ -104,6 +104,7 @@ capability gate, and output-boundary redaction. None depends on prompting.
 | Agent fetches from prod / cloud-metadata IPs   | `[network].deny_ips` (CIDR), DNS resolution checked |
 | Agent leaks API keys to the cloud orchestrator | `[environment].local_only_vars`, output redaction |
 | Prompt injection sends commands as text         | Verifier rejects forbidden capability names before eval |
+| MCP tool poisoning (local-executor deployment) | Cloud model sees only `delegate_to_local`; local executor reads tool metadata from operator-controlled policy file only — third-party tool descriptions never reach either model's context |
 | Agent runtime mis-renders an "approval" prompt  | Confirm hook is part of the runtime, not the model |
 | Agent uses git destructively                    | `[subprocess.deny_args] git = ["push --force", ...]` |
 | Agent deploys to staging / prod                 | Default policy denies `kubectl`, `terraform`, `aws`, ... |

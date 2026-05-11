@@ -39,12 +39,12 @@ profile.
 > outputs, or messages) redirect an agent's goals or plan, causing
 > harmful multi-step actions."*
 
-**Denyx position: mitigated, not detected.** Denyx is a runtime
-gate, not a prompt firewall. It does not try to detect when the
-agent's reasoning has been hijacked. Its claim is the inverse:
-**enforcement is independent of intent.** Whether the agent
-sincerely wants to read `/etc/passwd` or has been prompt-injected
-into wanting to, the policy gate fires the same way.
+**Denyx position: mitigated, not detected — stronger with local-executor.**
+Denyx is a runtime gate, not a prompt firewall. It does not try to detect
+when the agent's reasoning has been hijacked. Its claim is the inverse:
+**enforcement is independent of intent.** Whether the agent sincerely wants
+to read `/etc/passwd` or has been prompt-injected into wanting to, the
+policy gate fires the same way.
 
 Test: `asi01_prompt_injection_style_script_is_denied_at_runtime_gate`
 runs a Starlark script with prompt-injection-style framing
@@ -53,12 +53,27 @@ authorised"*) that calls `fs.read("/etc/passwd")`. The runtime gate
 denies the call with a typed `DenyxError::Policy`, regardless of
 the framing.
 
-**Limit:** if the prompt injection causes the agent to choose an
-*allowed* action that's nonetheless harmful (e.g. a write within
-`write_allow` that overwrites a build script with a malicious
-version), Denyx does not detect that. The policy is the contract;
-hijacking can't expand the contract but can misuse what the
-contract permits. Tightening `write_allow` is the answer there.
+**MCP tool definition poisoning** is a specific form of goal hijacking
+where malicious instructions are embedded in a tool's name, description,
+or schema so the model's reasoning is manipulated before it takes any
+action. Coverage here depends on the deployment mode:
+
+- **`denyx-local-mcp` (local-executor):** structural prevention. The cloud
+  orchestrator sees only `delegate_to_local`; it never reads third-party
+  MCP tool descriptions. The local executor model receives tool metadata
+  only from the operator-controlled policy file. No poisoned description
+  from any co-installed MCP server can reach either model's context.
+- **`denyx-mcp` (direct):** blast-radius reduction only. The cloud model
+  reads all MCP tool descriptions as usual. A poisoned description can
+  manipulate reasoning; Denyx's gate still fires on the resulting actions,
+  but the reasoning-layer manipulation is not detected.
+
+**Limit:** in both modes, if the prompt injection (or tool poisoning) causes
+the agent to choose an *allowed* action that's nonetheless harmful (e.g. a
+write within `write_allow` that overwrites a build script), Denyx does not
+detect that. The policy is the contract; hijacking can't expand the contract
+but can misuse what the contract permits. Tightening `write_allow` is the
+answer there.
 
 ---
 

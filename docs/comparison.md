@@ -79,6 +79,13 @@ These sit between the agent and an MCP server, scanning or proxying.
   (`~/.mcp-scan/guardrails-config.yml`). Tool Pinning (hash tools to
   detect rug-pulls) is a notable feature. **MCP-layer enforcement: ✅.
   Tamper-evident audit: ✗. Value-tier IFC: ✗** (PII regex only).
+  On tool poisoning specifically: mcp-scan detects suspicious content
+  in tool descriptions (heuristic, scanner-based). Denyx's local-executor
+  architecture takes the opposite approach — tool descriptions are
+  structurally excluded from the model's context so there is nothing
+  to scan or detect. Complementary approaches: mcp-scan works at the
+  direct-deployment layer; Denyx's structural prevention is available
+  in the local-executor shape.
 - **[Snyk Agent Scan / Skill Inspector](https://snyk.io/blog/snyk-vercel-securing-agent-skill-ecosystem/)**
   — commercial layer over the mcp-scan core; auto-discovers across
   Claude Code, Claude Desktop, Cursor, Gemini CLI, Windsurf. Supply-
@@ -276,18 +283,26 @@ May 2026:
    encoded forms — the only productised IFC-style "use but don't leak"
    I found. CaMeL and FIDES are research; Pipelock has process-level
    capability separation but not value-level tiering.
-2. **Cross-host policy translation** via `denyx host-config` — one
+2. **Structural MCP tool poisoning prevention** via the local-executor
+   architecture. Third-party tool descriptions never enter either
+   model's context — the cloud orchestrator sees only `delegate_to_local`,
+   the local executor reads tool routing hints from the operator-controlled
+   policy file only. mcp-scan detects poisoning heuristically; Denyx
+   eliminates the exposure surface. Only available in the
+   `denyx-local-mcp` deployment shape; direct `denyx-mcp` deployment
+   does not have this property.
+3. **Cross-host policy translation** via `denyx host-config` — one
    `denyx.toml` becomes Claude Code's `settings.json` deny list,
    opencode's `permission` + `tools` block, Cursor's `.cursor/mcp.json`,
    Copilot's `.vscode/settings.json`, Continue's `.continue/config.json`,
    Cline's stderr snippet. Not found anywhere else. See
    [host-config.md](host-config.md).
-3. **SHA-256-chained tamper-evident audit** with `denyx audit verify`
+4. **SHA-256-chained tamper-evident audit** with `denyx audit verify`
    post-hoc — rare but not unique (OpenFang, nono, Pipelock peers).
-4. **MCP server + standalone CLI + embeddable Rust crate** from one
+5. **MCP server + standalone CLI + embeddable Rust crate** from one
    workspace — fits both "drop into Claude Code" and "use as a CI gate
    without any host" without forcing one integration model.
-5. **Capability builtins under a Starlark substrate**, with policy as
+6. **Capability builtins under a Starlark substrate**, with policy as
    parsed config (NOT Starlark-as-policy). The agent can't emit code
    that mutates the policy because the policy is data the model
    doesn't see and the runtime doesn't expose mutation primitives.

@@ -590,6 +590,16 @@ orchestrator's context. With this stack:
 - Tainted values (`local_only_*` policy entries) get scrubbed at the
   Denyx boundary before the result string crosses to the orchestrator.
   The cloud side literally cannot see your `OPENAI_API_KEY`.
+- **MCP tool definition poisoning is prevented by architecture.**
+  The cloud orchestrator is offered exactly one tool (`delegate_to_local`),
+  so it never reads tool descriptions from co-installed MCP servers.
+  The local executor model receives tool routing metadata only from the
+  operator-controlled policy file — not from live MCP server schemas.
+  A poisoned tool description in any third-party MCP server has no path
+  to either model's context. This is a structural guarantee, not a
+  detection heuristic. (In the direct `denyx-mcp` deployment the cloud
+  model still reads all MCP tool descriptions; choose `denyx-local-mcp`
+  when tool poisoning is in your threat model.)
 - One policy file governs the entire run. The audit log is one file.
 - The local model can be cheap (qwen 7B at ~7 GB on disk, ~30 s/task on
   a modern laptop). The cloud model only handles task decomposition,
