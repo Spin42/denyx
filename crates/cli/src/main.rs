@@ -245,6 +245,19 @@ struct HostConfigArgs {
     /// lockdown only.
     #[arg(long)]
     no_mcp: bool,
+
+    /// When merging `.mcp.json` for Claude Code / Cursor (which
+    /// share the schema), refuse to write if any non-denyx
+    /// `mcpServers` entry is already present. The threat-model
+    /// claim that "the cloud orchestrator only sees
+    /// `delegate_to_local`" depends on denyx-local-mcp being the
+    /// sole configured MCP server; this flag enforces that
+    /// precondition at host-config time. Without it, an operator
+    /// can silently invalidate the claim by adding any other
+    /// server to the project. Has no effect on hosts that don't
+    /// use a shared `.mcp.json` (opencode, Continue).
+    #[arg(long)]
+    strict_mcp: bool,
 }
 
 /// One or more hosts to wire. Wraps a `Vec<Host>` so clap can parse
@@ -426,6 +439,17 @@ struct InitArgs {
     /// to protect a pre-existing policy.
     #[arg(short, long)]
     force: bool,
+
+    /// Generate a more permissive starter policy. Adds `/tmp/**` to
+    /// `write_allow` so scripts can drop scratch files there without
+    /// editing the policy. The minimal default (without this flag)
+    /// is the conservative choice: project-scoped write paths only.
+    /// Opt into `--permissive` when "make it work without thinking
+    /// about what to allow" is more important than narrow blast
+    /// radius. The doctor will warn on the broader allow-lists this
+    /// produces — that's intentional, not a bug.
+    #[arg(long)]
+    permissive: bool,
 }
 
 fn main() -> ExitCode {
@@ -499,6 +523,7 @@ fn host_config_cmd(args: HostConfigArgs) -> Result<(), CliError> {
         wsl_distro: args.wsl_distro,
         sandbox: args.sandbox.as_sandbox(),
         windows: args.windows,
+        strict_mcp: args.strict_mcp,
     };
     let existing_mode = args.existing.as_existing();
 
@@ -676,7 +701,22 @@ fn write_claude(
         let mcp_value = claude_mcp(opts);
         let final_mcp = match (existing, read_json_if_exists(&mcp_path)?) {
             (Existing::Replace, _) | (_, None) => mcp_value,
-            (Existing::Merge, Some(existing_val)) => merge_claude_mcp(existing_val, mcp_value),
+            (Existing::Merge, Some(existing_val)) => {
+                if opts.strict_mcp {
+                    match host_config::merge_claude_mcp_strict(existing_val, mcp_value) {
+                        Ok(v) => v,
+                        Err(violation) => {
+                            return Err(CliError::Other(format!(
+                                "{}\n  (existing file: {}, --existing replace would overwrite it)",
+                                violation,
+                                mcp_path.display(),
+                            )));
+                        }
+                    }
+                } else {
+                    merge_claude_mcp(existing_val, mcp_value)
+                }
+            }
         };
         write_json(&mcp_path, &final_mcp)?;
         eprintln!("  + wrote {}", mcp_path.display());
@@ -729,7 +769,22 @@ fn write_cursor(dir: &Path, opts: &Opts, existing: Existing, no_mcp: bool) -> Re
     let value = host_config::cursor_mcp(opts);
     let final_value = match (existing, read_json_if_exists(&path)?) {
         (Existing::Replace, _) | (_, None) => value,
-        (Existing::Merge, Some(existing_val)) => host_config::merge_cursor_mcp(existing_val, value),
+        (Existing::Merge, Some(existing_val)) => {
+            if opts.strict_mcp {
+                match host_config::merge_claude_mcp_strict(existing_val, value) {
+                    Ok(v) => v,
+                    Err(violation) => {
+                        return Err(CliError::Other(format!(
+                            "{}\n  (existing file: {}, --existing replace would overwrite it)",
+                            violation,
+                            path.display(),
+                        )));
+                    }
+                }
+            } else {
+                host_config::merge_cursor_mcp(existing_val, value)
+            }
+        }
     };
     write_json(&path, &final_value)?;
     eprintln!("  + wrote {} (Cursor)", path.display());
@@ -1048,7 +1103,7 @@ fn print_section_list(label: &str, items: &[String]) {
 }
 
 fn init_cmd(args: InitArgs) -> Result<(), CliError> {
-    let body = init::generate(args.lang);
+    let body = init::generate(args.lang, args.permissive);
     if args.output == "-" {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(body.as_bytes())?;
@@ -1061,11 +1116,22 @@ fn init_cmd(args: InitArgs) -> Result<(), CliError> {
         )));
     }
     std::fs::write(&path, &body)?;
+    let mode_label = if args.permissive {
+        "permissive"
+    } else {
+        "minimal"
+    };
     eprintln!(
-        "denyx: wrote {path} ({lang}). Review the file, then run with --policy {path}.",
+        "denyx: wrote {path} ({lang}, {mode_label}). Review the file, then run with --policy {path}.",
         path = path.display(),
         lang = args.lang.name(),
     );
+    if !args.permissive {
+        eprintln!(
+            "       Minimal policy excludes `/tmp/**` from write_allow. \
+             Pass --permissive if your workflow needs scratch writes there."
+        );
+    }
     Ok(())
 }
 

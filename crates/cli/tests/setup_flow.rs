@@ -282,3 +282,100 @@ fn setup_flow_init_then_host_config_then_mcp_handshake() {
 
     s.close();
 }
+
+#[test]
+fn host_config_strict_mcp_refuses_when_other_servers_in_mcp_json() {
+    // E2E: --strict-mcp should fail to write when an existing
+    // .mcp.json carries a non-denyx server entry. The file must
+    // remain unchanged.
+    let tmp = tempdir();
+
+    // Generate a policy so host-config has something to read.
+    run_denyx(&["init", "--lang", "rust", "--output", "denyx.toml"], &tmp);
+
+    // Seed an existing .mcp.json with a non-denyx server.
+    let existing = json!({
+        "mcpServers": {
+            "github": { "command": "github-mcp", "args": [] }
+        }
+    });
+    let mcp_path = tmp.join(".mcp.json");
+    std::fs::write(&mcp_path, serde_json::to_string(&existing).unwrap()).unwrap();
+    let mtime_before = std::fs::metadata(&mcp_path).unwrap().modified().unwrap();
+
+    let out = run_denyx(
+        &[
+            "host-config",
+            "--policy",
+            "denyx.toml",
+            "--host",
+            "claude",
+            "--platform",
+            "native",
+            "--sandbox",
+            "off",
+            "--strict-mcp",
+        ],
+        &tmp,
+    );
+    assert!(
+        !out.status.success(),
+        "expected host-config to fail with --strict-mcp + existing other server; \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("strict-mcp") || stderr.contains("github"),
+        "stderr should mention the strict-mcp refusal and/or the offending server: {stderr}"
+    );
+
+    // The existing .mcp.json must NOT have been clobbered.
+    let mtime_after = std::fs::metadata(&mcp_path).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_before, mtime_after,
+        "strict-mcp refusal must leave the existing .mcp.json untouched"
+    );
+    let on_disk = read_json(&mcp_path);
+    assert!(
+        on_disk["mcpServers"]["github"].is_object(),
+        "existing github entry must be preserved: {on_disk}"
+    );
+    assert!(
+        on_disk["mcpServers"].get("denyx").is_none(),
+        "denyx entry must NOT have been written: {on_disk}"
+    );
+}
+
+#[test]
+fn host_config_strict_mcp_succeeds_when_clean_slate() {
+    // Counterpart to the refusal test: with no other MCP servers
+    // configured, --strict-mcp writes normally.
+    let tmp = tempdir();
+    run_denyx(&["init", "--lang", "rust", "--output", "denyx.toml"], &tmp);
+
+    let out = run_denyx(
+        &[
+            "host-config",
+            "--policy",
+            "denyx.toml",
+            "--host",
+            "claude",
+            "--platform",
+            "native",
+            "--sandbox",
+            "off",
+            "--strict-mcp",
+        ],
+        &tmp,
+    );
+    assert!(
+        out.status.success(),
+        "strict-mcp should succeed on a clean slate; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(tmp.join(".mcp.json").exists());
+    let mcp = read_json(&tmp.join(".mcp.json"));
+    assert!(mcp["mcpServers"]["denyx"].is_object());
+}

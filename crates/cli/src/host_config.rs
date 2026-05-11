@@ -121,6 +121,16 @@ pub struct Opts {
     pub sandbox: Sandbox,
     /// True on Windows; adds `PowerShell` to the Claude Code deny list.
     pub windows: bool,
+    /// When merging `.mcp.json` for Claude Code / Cursor (which share
+    /// the schema), refuse to write if any non-denyx `mcpServers`
+    /// entry is already present. The threat model in
+    /// `docs/04-security-threat-model.md` and the Round 2 pentest
+    /// report note that the "cloud orchestrator only sees
+    /// `delegate_to_local`" claim depends on no other MCP servers
+    /// being co-installed; without `--strict-mcp` the operator can
+    /// silently invalidate that claim by adding any other server to
+    /// the same project.
+    pub strict_mcp: bool,
 }
 
 /// Built-in effecting tools we deny on Claude Code. The list is
@@ -501,9 +511,75 @@ pub fn cline_instructions(opts: &Opts) -> String {
 // `Replace` mode bypasses the merge entirely — see
 // `final_value_for_write` in main.rs.
 
+/// Returned by [`merge_claude_mcp_strict`] when `--strict-mcp` is set
+/// and the existing `.mcp.json` contains MCP server entries besides
+/// the one we'd write. The CLI surfaces the message to the operator
+/// and refuses to write (the existing file is unchanged).
+#[derive(Debug, Clone)]
+pub struct StrictMcpViolation {
+    /// Names of `mcpServers` entries present in the existing file
+    /// that are not `denyx`. Sorted for deterministic error messages.
+    pub other_servers: Vec<String>,
+}
+
+impl std::fmt::Display for StrictMcpViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "--strict-mcp refused: .mcp.json already has {} non-denyx MCP server entr{}: {}. \
+             The threat model claim that the cloud orchestrator only sees `delegate_to_local` \
+             holds only when denyx-local-mcp is the sole configured MCP server. Either remove \
+             the other entries, drop --strict-mcp (and accept the weaker structural claim), \
+             or pass `--existing replace` to overwrite the file.",
+            self.other_servers.len(),
+            if self.other_servers.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            self.other_servers.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for StrictMcpViolation {}
+
+/// Strict-merge variant of [`merge_claude_mcp`]. Returns the merged
+/// `.mcp.json` if the existing file contains no non-denyx server
+/// entries, OR an error listing the offending entries. The merge
+/// itself is identical to [`merge_claude_mcp`] when permitted.
+pub fn merge_claude_mcp_strict(
+    existing: Value,
+    generated: Value,
+) -> Result<Value, StrictMcpViolation> {
+    let other_servers = other_mcp_servers(&existing);
+    if !other_servers.is_empty() {
+        return Err(StrictMcpViolation { other_servers });
+    }
+    Ok(merge_claude_mcp(existing, generated))
+}
+
+/// Return the names of any `mcpServers` entries in `existing` other
+/// than `denyx`. Used by `--strict-mcp` and by the warn-on-merge
+/// helper below.
+pub(crate) fn other_mcp_servers(existing: &Value) -> Vec<String> {
+    let Some(obj) = existing.pointer("/mcpServers").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = obj
+        .keys()
+        .filter(|k| k.as_str() != "denyx")
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
 /// Merge a `.mcp.json`. The denyx entry is inserted/replaced;
 /// other servers under `mcpServers` and other top-level keys
-/// remain untouched.
+/// remain untouched. When the caller wants the strict-mcp behaviour
+/// (refuse on co-installed servers), use [`merge_claude_mcp_strict`]
+/// instead.
 pub fn merge_claude_mcp(existing: Value, generated: Value) -> Value {
     let mut out = if existing.is_object() {
         existing
@@ -760,6 +836,7 @@ mod tests {
             wsl_distro: None,
             sandbox: Sandbox::Auto,
             windows: false,
+            strict_mcp: false,
         }
     }
 
@@ -1055,6 +1132,102 @@ write_allow = ["src/**", "/tmp/**", "~/.cache/myproj/**"]
         let generated = claude_mcp(&opts_native());
         let merged = merge_claude_mcp(existing, generated);
         assert_eq!(merged["mcpServers"]["denyx"]["command"], json!("denyx-mcp"));
+    }
+
+    // ── --strict-mcp behaviour ─────────────────────────────────────
+
+    #[test]
+    fn strict_mcp_succeeds_when_no_other_servers() {
+        // Empty mcpServers map → strict-mcp merges cleanly.
+        let existing = json!({ "mcpServers": {}, "unrelatedKey": "preserved" });
+        let generated = claude_mcp(&opts_native());
+        let merged = merge_claude_mcp_strict(existing, generated)
+            .expect("no other servers should not trip strict-mcp");
+        assert!(merged["mcpServers"]["denyx"].is_object());
+        assert_eq!(merged["unrelatedKey"], json!("preserved"));
+    }
+
+    #[test]
+    fn strict_mcp_succeeds_when_only_denyx_present() {
+        // Existing file has only a stale `denyx` entry — strict-mcp
+        // should still merge (the entry is replaced, not flagged as
+        // "another server").
+        let existing = json!({
+            "mcpServers": { "denyx": { "command": "old-denyx-mcp", "args": [] } }
+        });
+        let generated = claude_mcp(&opts_native());
+        let merged = merge_claude_mcp_strict(existing, generated)
+            .expect("stale denyx entry should not trip strict-mcp");
+        assert_eq!(merged["mcpServers"]["denyx"]["command"], json!("denyx-mcp"));
+    }
+
+    #[test]
+    fn strict_mcp_refuses_when_other_servers_present() {
+        let existing = json!({
+            "mcpServers": {
+                "github": { "command": "github-mcp", "args": [] },
+                "denyx": { "command": "old-denyx-mcp", "args": [] }
+            }
+        });
+        let generated = claude_mcp(&opts_native());
+        let err = merge_claude_mcp_strict(existing, generated)
+            .expect_err("strict-mcp must refuse when other servers are present");
+        assert_eq!(err.other_servers, vec!["github".to_string()]);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("github"),
+            "error message must name the offending server: {msg}"
+        );
+        assert!(
+            msg.contains("--strict-mcp"),
+            "error message should mention the flag: {msg}"
+        );
+    }
+
+    #[test]
+    fn strict_mcp_lists_all_other_servers_sorted() {
+        let existing = json!({
+            "mcpServers": {
+                "filesystem": { "command": "fs-mcp", "args": [] },
+                "github": { "command": "github-mcp", "args": [] },
+                "denyx": { "command": "old", "args": [] },
+                "atlassian": { "command": "atlas-mcp", "args": [] }
+            }
+        });
+        let generated = claude_mcp(&opts_native());
+        let err = merge_claude_mcp_strict(existing, generated).unwrap_err();
+        assert_eq!(
+            err.other_servers,
+            vec![
+                "atlassian".to_string(),
+                "filesystem".to_string(),
+                "github".to_string(),
+            ],
+            "other servers must be sorted; denyx must be excluded"
+        );
+    }
+
+    #[test]
+    fn strict_mcp_succeeds_on_empty_file() {
+        // No mcpServers key at all; strict-mcp should not refuse.
+        let existing = json!({});
+        let generated = claude_mcp(&opts_native());
+        let merged = merge_claude_mcp_strict(existing, generated)
+            .expect("empty file should not trip strict-mcp");
+        assert!(merged["mcpServers"]["denyx"].is_object());
+    }
+
+    #[test]
+    fn other_mcp_servers_excludes_denyx() {
+        let v = json!({
+            "mcpServers": {
+                "denyx": {},
+                "github": {},
+                "filesystem": {}
+            }
+        });
+        let others = other_mcp_servers(&v);
+        assert_eq!(others, vec!["filesystem".to_string(), "github".to_string()]);
     }
 
     #[test]
