@@ -459,6 +459,7 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
                     "sandbox allowedDomains stale"
                 }
                 ConsistencyIssue::SandboxAllowWriteStale { .. } => "sandbox allowWrite stale",
+                ConsistencyIssue::OverBroadAllowList { .. } => "over-broad allow-list entry",
             };
             match sev {
                 Severity::Critical => {

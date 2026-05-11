@@ -79,6 +79,35 @@ pub enum ConsistencyIssue {
     /// `sandbox.filesystem.allowWrite`. Same drift as
     /// `SandboxAllowedDomainsStale` but for filesystem writes.
     SandboxAllowWriteStale { missing_paths: Vec<String> },
+    /// One or more entries in `filesystem.{read,write,delete}_allow`
+    /// are catastrophically broad (`**`, `/**`, `~/**`, …) or sweep
+    /// a top-level system directory (`/tmp/**`, `/etc/**`, …). The
+    /// runtime works as documented; the lesson is operator-side. A
+    /// `read_allow = ["**"]` defeats the deny-by-default property
+    /// by construction. Aggregated into one issue per (section,
+    /// risk) pair so the doctor doesn't print a wall of lines.
+    OverBroadAllowList {
+        section: &'static str,
+        risk: BroadGlobRisk,
+        patterns: Vec<String>,
+    },
+}
+
+/// Classification of an overly-permissive allow-list entry. Two
+/// distinct severities: Universal/HomeDir patterns are flagged as
+/// Warning (almost certainly a mistake); SystemDirectory patterns
+/// (like `/tmp/**`) are flagged as Info (sometimes intentional in
+/// scratch-tree or CI fixtures, but worth surfacing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BroadGlobRisk {
+    /// Catches the entire filesystem: `**`, `/**`, or `/`.
+    Universal,
+    /// Catches the entire home directory: `~`, `~/**`, `$HOME/**`.
+    HomeDir,
+    /// Top-level system directory rooted at `/`: `/tmp/**`,
+    /// `/var/**`, `/etc/**`, `/usr/**`, `/opt/**`, `/home/**`,
+    /// `/Users/**`.
+    SystemDirectory,
 }
 
 /// Severity classification for the doctor's [OK]/[INFO]/[WARN]/[FAIL]
@@ -120,6 +149,14 @@ impl ConsistencyIssue {
             // until host-config is re-run.
             Self::SandboxAllowedDomainsStale { .. } => Severity::Warning,
             Self::SandboxAllowWriteStale { .. } => Severity::Warning,
+            // Universal / HomeDir patterns are almost always a
+            // mistake (Warning); SystemDirectory entries are
+            // sometimes intentional (Info, surfaces but doesn't
+            // alarm).
+            Self::OverBroadAllowList { risk, .. } => match risk {
+                BroadGlobRisk::Universal | BroadGlobRisk::HomeDir => Severity::Warning,
+                BroadGlobRisk::SystemDirectory => Severity::Info,
+            },
         }
     }
 
@@ -199,6 +236,21 @@ impl ConsistencyIssue {
                     missing_paths.join(", ")
                 )
             }
+            Self::OverBroadAllowList { section, risk, patterns } => {
+                let n = patterns.len();
+                let kind = match risk {
+                    BroadGlobRisk::Universal => "filesystem-wide",
+                    BroadGlobRisk::HomeDir => "home-dir-wide",
+                    BroadGlobRisk::SystemDirectory => "system-dir-wide",
+                };
+                let preview: Vec<&str> = patterns.iter().take(6).map(String::as_str).collect();
+                let suffix = if n > 6 { format!(", … (+{} more)", n - 6) } else { String::new() };
+                format!(
+                    "[{section}] has {n} {kind} entr{} ({}){suffix}",
+                    if n == 1 { "y" } else { "ies" },
+                    preview.join(", ")
+                )
+            }
         }
     }
 
@@ -224,6 +276,20 @@ impl ConsistencyIssue {
                 "Heads-up: the doctor's PATH is the env that ran `denyx doctor`. The gate (denyx-mcp) may run in a different env — a Lima VM on macOS, a WSL2 distro on Windows, a container in CI — where these commands could be present. Verify the gate's runtime PATH if any of these matter; remove from [subprocess].allow_commands if you don't actually need them.".to_string(),
             Self::SandboxAllowedDomainsStale { .. } | Self::SandboxAllowWriteStale { .. } =>
                 "Re-run `denyx host-config --existing replace --host claude` to refresh the sandbox stanza from the live policy. The sandbox stanza is a frozen snapshot taken at host-config time; edits to denyx.toml don't propagate automatically. Without the refresh, calls Denyx permits will be blocked at the OS layer (bubblewrap on Linux/WSL2, Seatbelt on macOS) with errors that don't mention Denyx.".to_string(),
+            Self::OverBroadAllowList { section, risk, patterns } => {
+                let advice = match risk {
+                    BroadGlobRisk::Universal =>
+                        "These patterns match the entire filesystem and defeat the deny-by-default property. Replace each with the narrowest set of paths the agent actually needs.",
+                    BroadGlobRisk::HomeDir =>
+                        "These patterns cover the entire home directory, which usually contains credentials (~/.aws, ~/.ssh, ~/.config, ~/.netrc) the secure-defaults preset already deny-lists but the allow-list above will re-grant unless tightened. Restrict to the specific subdirs the agent needs.",
+                    BroadGlobRisk::SystemDirectory =>
+                        "Sweeping a top-level system directory often grants more than intended. Restrict to specific subdirs the agent actually needs, e.g. `/tmp/denyx-scratch/**` instead of `/tmp/**`.",
+                };
+                let listed = patterns.join(", ");
+                format!(
+                    "{advice}\nOffending entries in `[{section}]`: {listed}"
+                )
+            }
         }
     }
 }
@@ -244,8 +310,114 @@ pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<Consi
         out.extend(check_policy_paths_exist(file, &diagnosis.root));
         out.extend(check_subprocess_commands_on_path(file));
         out.extend(check_sandbox_drift(file, diagnosis));
+        out.extend(check_overbroad_allow_lists(file));
     }
     out
+}
+
+/// Flag entries in the filesystem allow-lists that are broad enough
+/// to defeat the deny-by-default property. Three risk tiers:
+///   - `BroadGlobRisk::Universal`: matches everything (`**`, `/**`).
+///   - `BroadGlobRisk::HomeDir`: matches the entire home directory.
+///   - `BroadGlobRisk::SystemDirectory`: matches a top-level system
+///     directory (`/tmp/**`, `/var/**`, etc.).
+///
+/// Issues are aggregated per `(section, risk)` pair so the doctor
+/// prints at most one line per section per risk class, not one per
+/// pattern.
+///
+/// Motivation: during the Round 2 pentest the first Round-C run
+/// produced a false-positive "leak" because the fixture used
+/// `read_allow = ["WORKDIR/**"]`, which transitively allowed the
+/// forbidden subtree. The runtime was correct; the policy was the
+/// problem. This check surfaces that operator-side risk before it
+/// turns into a real incident. See
+/// `docs/security-pentest-r2-tool-poisoning.md`.
+fn check_overbroad_allow_lists(file: &denyx_policy::PolicyFile) -> Vec<ConsistencyIssue> {
+    let sections: [(&'static str, &Vec<String>); 3] = [
+        ("filesystem.read_allow", &file.filesystem.read_allow),
+        ("filesystem.write_allow", &file.filesystem.write_allow),
+        ("filesystem.delete_allow", &file.filesystem.delete_allow),
+    ];
+    // Group by (section, risk) so we emit one ConsistencyIssue per
+    // section+risk, listing every offending pattern.
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<(&'static str, BroadGlobRisk), Vec<String>> = BTreeMap::new();
+    for (section, entries) in sections {
+        for entry in entries {
+            if let Some(risk) = classify_overbroad(entry) {
+                grouped
+                    .entry((section, risk))
+                    .or_default()
+                    .push(entry.clone());
+            }
+        }
+    }
+    grouped
+        .into_iter()
+        .map(
+            |((section, risk), patterns)| ConsistencyIssue::OverBroadAllowList {
+                section,
+                risk,
+                patterns,
+            },
+        )
+        .collect()
+}
+
+/// Classify a single allow-list entry into a `BroadGlobRisk`, or
+/// return `None` if the entry is narrow enough to be uninteresting.
+/// Trimmed copy; whitespace tolerated.
+fn classify_overbroad(pattern: &str) -> Option<BroadGlobRisk> {
+    let p = pattern.trim();
+
+    // Catastrophic: matches every file the gate could reach.
+    if matches!(p, "**" | "/**" | "/") {
+        return Some(BroadGlobRisk::Universal);
+    }
+
+    // Entire home directory. Matters because the `secure-defaults`
+    // preset's deny list intentionally covers `~/.aws/**`,
+    // `~/.ssh/**`, etc.; an overlapping allow-list re-grants those.
+    // (Policy file is parsed verbatim — `~` expansion happens later
+    // in `resolve_path`. We match the textual form an operator
+    // typically writes.)
+    if matches!(p, "~" | "~/" | "~/**" | "$HOME" | "$HOME/" | "$HOME/**") {
+        return Some(BroadGlobRisk::HomeDir);
+    }
+
+    // Top-level system directories an operator sometimes pastes in
+    // when scaffolding a fixture or wiring CI. Surfaces as Info, not
+    // Warning — sometimes legitimate (a scratch tree under `/tmp`,
+    // a CI build dir under `/opt`) but worth flagging.
+    const BROAD_SYSTEM_DIRS: &[&str] = &[
+        "/tmp",
+        "/tmp/",
+        "/tmp/**",
+        "/var",
+        "/var/",
+        "/var/**",
+        "/etc",
+        "/etc/",
+        "/etc/**",
+        "/usr",
+        "/usr/",
+        "/usr/**",
+        "/opt",
+        "/opt/",
+        "/opt/**",
+        "/home",
+        "/home/",
+        "/home/**",
+        "/Users",
+        "/Users/",
+        "/Users/**",
+    ];
+    if BROAD_SYSTEM_DIRS.contains(&p) {
+        return Some(BroadGlobRisk::SystemDirectory);
+    }
+
+    None
 }
 
 // ─────────────────────── individual checks ───────────────────────
@@ -966,5 +1138,229 @@ write_allow = ["/var/log/myapp/**"]
         };
         assert!(!i.summary().is_empty());
         assert!(!i.fix().is_empty());
+    }
+
+    // ── classify_overbroad ─────────────────────────────────────────
+
+    #[test]
+    fn classify_overbroad_flags_universal_patterns() {
+        for p in ["**", "/**", "/"] {
+            assert_eq!(
+                classify_overbroad(p),
+                Some(BroadGlobRisk::Universal),
+                "expected {p:?} to be Universal"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_overbroad_flags_home_dir_patterns() {
+        for p in ["~", "~/", "~/**", "$HOME", "$HOME/", "$HOME/**"] {
+            assert_eq!(
+                classify_overbroad(p),
+                Some(BroadGlobRisk::HomeDir),
+                "expected {p:?} to be HomeDir"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_overbroad_flags_system_directories() {
+        for p in [
+            "/tmp/**",
+            "/var/**",
+            "/etc/**",
+            "/usr/**",
+            "/opt/**",
+            "/home/**",
+            "/Users/**",
+        ] {
+            assert_eq!(
+                classify_overbroad(p),
+                Some(BroadGlobRisk::SystemDirectory),
+                "expected {p:?} to be SystemDirectory"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_overbroad_passes_narrow_patterns() {
+        // These are typical scoped allow-list entries; they must NOT
+        // trip the gate or the doctor would warn on every reasonable
+        // policy.
+        let narrow = [
+            "src/**",
+            "./src/**",
+            "/proj/src/**",
+            "/tmp/denyx-scratch/**",
+            "/var/log/denyx/**",
+            "**/*.toml",
+            "Cargo.toml",
+            "**/.env",
+        ];
+        for p in narrow {
+            assert_eq!(
+                classify_overbroad(p),
+                None,
+                "{p:?} should NOT be flagged as over-broad"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_overbroad_tolerates_whitespace() {
+        // Real-world TOML sometimes carries trailing whitespace in
+        // a string literal. The classifier trims before matching.
+        assert_eq!(classify_overbroad("  **  "), Some(BroadGlobRisk::Universal));
+        assert_eq!(classify_overbroad("\t~/**"), Some(BroadGlobRisk::HomeDir));
+    }
+
+    // ── check_overbroad_allow_lists ────────────────────────────────
+
+    fn policy_with(read: &[&str], write: &[&str], delete: &[&str]) -> denyx_policy::PolicyFile {
+        // Build a minimal PolicyFile by serialising a TOML snippet
+        // and parsing it. This way the test fixture goes through the
+        // same path real configs do.
+        let read_list = read
+            .iter()
+            .map(|p| format!("{p:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let write_list = write
+            .iter()
+            .map(|p| format!("{p:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let delete_list = delete
+            .iter()
+            .map(|p| format!("{p:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let toml = format!(
+            r#"
+[filesystem]
+read_allow = [{read_list}]
+write_allow = [{write_list}]
+delete_allow = [{delete_list}]
+"#
+        );
+        denyx_policy::PolicyFile::from_toml_str(&toml).expect("parse")
+    }
+
+    #[test]
+    fn overbroad_emits_no_issues_for_narrow_policy() {
+        let f = policy_with(&["src/**"], &["./build/**"], &[]);
+        let issues = check_overbroad_allow_lists(&f);
+        assert!(issues.is_empty(), "got {issues:?}");
+    }
+
+    #[test]
+    fn overbroad_emits_warning_for_universal_in_read_allow() {
+        let f = policy_with(&["**"], &[], &[]);
+        let issues = check_overbroad_allow_lists(&f);
+        assert_eq!(issues.len(), 1);
+        match &issues[0] {
+            ConsistencyIssue::OverBroadAllowList {
+                section,
+                risk,
+                patterns,
+            } => {
+                assert_eq!(*section, "filesystem.read_allow");
+                assert_eq!(*risk, BroadGlobRisk::Universal);
+                assert_eq!(patterns, &vec!["**".to_string()]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        assert_eq!(issues[0].severity(), Severity::Warning);
+    }
+
+    #[test]
+    fn overbroad_emits_info_for_system_dir() {
+        let f = policy_with(&["/tmp/**"], &[], &[]);
+        let issues = check_overbroad_allow_lists(&f);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity(), Severity::Info);
+    }
+
+    #[test]
+    fn overbroad_aggregates_by_section_and_risk() {
+        // Two Universal entries in read_allow should produce ONE
+        // issue listing both patterns (not two issues).
+        let f = policy_with(&["**", "/**"], &[], &[]);
+        let issues = check_overbroad_allow_lists(&f);
+        assert_eq!(issues.len(), 1);
+        if let ConsistencyIssue::OverBroadAllowList { patterns, .. } = &issues[0] {
+            assert_eq!(patterns.len(), 2);
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn overbroad_splits_across_sections() {
+        // Universal entry in read_allow + Universal entry in
+        // write_allow = two issues (different sections).
+        let f = policy_with(&["**"], &["/**"], &[]);
+        let issues = check_overbroad_allow_lists(&f);
+        assert_eq!(issues.len(), 2);
+        let sections: std::collections::BTreeSet<&str> = issues
+            .iter()
+            .filter_map(|i| match i {
+                ConsistencyIssue::OverBroadAllowList { section, .. } => Some(*section),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            ["filesystem.read_allow", "filesystem.write_allow"]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn overbroad_splits_universal_and_system_dir() {
+        // Mixed risks in the same section produce one issue per risk
+        // class.
+        let f = policy_with(&["**", "/tmp/**"], &[], &[]);
+        let issues = check_overbroad_allow_lists(&f);
+        assert_eq!(issues.len(), 2);
+        let risks: Vec<BroadGlobRisk> = issues
+            .iter()
+            .filter_map(|i| match i {
+                ConsistencyIssue::OverBroadAllowList { risk, .. } => Some(*risk),
+                _ => None,
+            })
+            .collect();
+        assert!(risks.contains(&BroadGlobRisk::Universal));
+        assert!(risks.contains(&BroadGlobRisk::SystemDirectory));
+    }
+
+    #[test]
+    fn overbroad_summary_mentions_section_and_pattern() {
+        let i = ConsistencyIssue::OverBroadAllowList {
+            section: "filesystem.read_allow",
+            risk: BroadGlobRisk::Universal,
+            patterns: vec!["**".into()],
+        };
+        let s = i.summary();
+        assert!(s.contains("filesystem.read_allow"), "{s}");
+        assert!(s.contains("**"), "{s}");
+    }
+
+    #[test]
+    fn overbroad_fix_mentions_deny_by_default() {
+        let i = ConsistencyIssue::OverBroadAllowList {
+            section: "filesystem.read_allow",
+            risk: BroadGlobRisk::Universal,
+            patterns: vec!["**".into()],
+        };
+        let fix = i.fix();
+        assert!(
+            fix.contains("deny-by-default")
+                || fix.contains("narrowest set")
+                || fix.contains("Restrict"),
+            "fix should explain why this matters: {fix}"
+        );
     }
 }
