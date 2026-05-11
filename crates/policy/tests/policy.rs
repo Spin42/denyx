@@ -291,6 +291,129 @@ fn deny_args_empty_argv_is_noop() {
     assert!(p.check_subprocess_args(&[]).is_ok());
 }
 
+// ── requires_approval_args ──────────────────────────────────────
+//
+// Same matching shape as deny_args (substring against joined
+// argv) but the runtime effect is a prompt, not a deny. The
+// accessor returns the matched pattern so the caller can render
+// a useful confirm-hook summary.
+
+fn approval_args_policy() -> Policy {
+    let toml = r#"
+[subprocess]
+allow_commands = ["git", "cargo", "gh"]
+
+[subprocess.requires_approval_args]
+git = ["push", "reset --hard"]
+cargo = ["publish"]
+gh = ["release create"]
+
+[functions]
+allow = ["subprocess.exec"]
+"#;
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    Policy::from_file(file, PathBuf::from("/work")).unwrap()
+}
+
+#[test]
+fn approval_args_matches_specific_subcommand() {
+    let p = approval_args_policy();
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["git", "push", "origin"])),
+        Some("push")
+    );
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["git", "reset", "--hard", "HEAD~3"])),
+        Some("reset --hard")
+    );
+}
+
+#[test]
+fn approval_args_basename_match() {
+    // Absolute path argv0 still matches the basename entry.
+    let p = approval_args_policy();
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["/usr/bin/git", "push", "-f"])),
+        Some("push")
+    );
+}
+
+#[test]
+fn approval_args_returns_none_when_no_match() {
+    // git add / commit / log don't trip any pattern → no prompt.
+    let p = approval_args_policy();
+    assert!(p
+        .subprocess_argv_requires_approval(&argv(&["git", "add", "."]))
+        .is_none());
+    assert!(p
+        .subprocess_argv_requires_approval(&argv(&["git", "commit", "-m", "x"]))
+        .is_none());
+    assert!(p
+        .subprocess_argv_requires_approval(&argv(&["git", "log", "--oneline"]))
+        .is_none());
+}
+
+#[test]
+fn approval_args_returns_none_for_unconfigured_command() {
+    // gh has a pattern, but `gh pr view` doesn't match "release create".
+    let p = approval_args_policy();
+    assert!(p
+        .subprocess_argv_requires_approval(&argv(&["gh", "pr", "view"]))
+        .is_none());
+    // Command with NO entry in the map at all.
+    assert!(p
+        .subprocess_argv_requires_approval(&argv(&["ls", "-la"]))
+        .is_none());
+}
+
+#[test]
+fn approval_args_returns_none_for_empty_argv() {
+    let p = approval_args_policy();
+    assert!(p.subprocess_argv_requires_approval(&[]).is_none());
+}
+
+#[test]
+fn approval_args_substring_match_caveat() {
+    // Substring match — the pattern "publish" matches any arg
+    // sequence containing it. Same caveat as deny_args; documented.
+    let p = approval_args_policy();
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["cargo", "publish", "--dry-run"])),
+        Some("publish")
+    );
+    // But a subcommand whose name only HAPPENS to contain the
+    // substring also matches — operators should write more
+    // specific patterns if this matters.
+    assert!(p
+        .subprocess_argv_requires_approval(&argv(&["cargo", "build"]))
+        .is_none());
+}
+
+#[test]
+fn approval_args_inheritance_concat_with_negation() {
+    // Preset / inheritance merge uses the same `!`-negation as
+    // deny_args. Demonstrate by inheriting a fake base via TOML.
+    let toml = r#"
+inherits = "secure-defaults"
+[subprocess]
+allow_commands = ["git"]
+[subprocess.requires_approval_args]
+git = ["push", "rebase -i"]
+[functions]
+allow = ["subprocess.exec"]
+"#;
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["git", "push", "origin"])),
+        Some("push")
+    );
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["git", "rebase", "-i"])),
+        Some("rebase -i")
+    );
+}
+
 #[test]
 fn inherits_secure_defaults_pulls_in_baseline_denies() {
     let user = r#"

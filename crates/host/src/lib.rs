@@ -398,6 +398,21 @@ impl HostCtx {
         if !self.policy.requires_approval(capability) {
             return Ok(());
         }
+        self.require_confirm_unconditional(capability, summary)
+    }
+
+    /// Variant of `require_confirm` that fires the hook regardless
+    /// of whether the capability is in `policy.requires_approval`.
+    /// Used by per-argv subprocess approval, where the policy says
+    /// "prompt only on these specific patterns" rather than
+    /// "prompt on every call." The audit-event path and the
+    /// confirm-denied error shape are identical to the
+    /// capability-level variant.
+    fn require_confirm_unconditional(
+        &self,
+        capability: &str,
+        summary: String,
+    ) -> Result<(), DenyxError> {
         let req = ConfirmRequest {
             task_id: self.task_id.clone(),
             capability: capability.to_string(),
@@ -744,7 +759,26 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 &pair_refs,
             )?;
         }
-        ctx.require_confirm("subprocess.exec", format!("exec: {}", cmd_summary))?;
+        // Capability-level requires_approval already prompts for
+        // every subprocess.exec call. Per-argv requires_approval_args
+        // is the finer-grained path: when the capability-level list
+        // does NOT include subprocess.exec, the runtime still prompts
+        // on argv patterns the operator marked sensitive (e.g. only
+        // `git push` and `git reset --hard`, not every git call).
+        //
+        // If both are set, the capability-level catch-all wins (it
+        // already fires the hook); the per-argv check is then a
+        // no-op so the operator doesn't see two prompts back-to-back.
+        if ctx.policy.requires_approval("subprocess.exec") {
+            ctx.require_confirm("subprocess.exec", format!("exec: {}", cmd_summary))?;
+        } else if let Some(matched) = ctx.policy.subprocess_argv_requires_approval(&argv) {
+            ctx.require_confirm_unconditional(
+                "subprocess.exec",
+                format!(
+                    "exec: {cmd_summary} (matches [subprocess.requires_approval_args] pattern {matched:?})"
+                ),
+            )?;
+        }
         // Build the child env from scratch. The default `Command`
         // inherits the parent's full env, which would leak vars
         // beyond what `[environment].allow_vars` permits — that's a

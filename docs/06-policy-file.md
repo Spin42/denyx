@@ -231,6 +231,7 @@ name is the single source of truth.
 | `local_only_commands` | Commands the script may exec; stdout/stderr tainted          |
 | `deny_commands`       | Commands always denied (deny wins)                           |
 | `deny_args`           | Per-command forbidden argument patterns (table)              |
+| `requires_approval_args` | Per-command argv patterns that trigger the confirm hook (table) |
 
 Commands match against the basename of `argv[0]`, so `"git"` matches
 both `"git"` and `"/usr/bin/git"`. An absolute-path entry like
@@ -251,6 +252,43 @@ The substring discipline is deliberately simple. It has known
 false-positive cases (the pattern `add` would match `bundle config add`
 even though intent was `bundle add`); use more specific patterns
 (`"add "` with trailing space, or `"add gem-name"`) when needed.
+
+#### Per-argv confirm-hook prompts (`requires_approval_args`)
+
+The top-level `requires_approval` list (covered in its own section
+below) fires the confirm hook for **every** call of a capability —
+all `subprocess.exec`s, all `fs.delete`s. That's the right shape
+when the capability itself is the boundary you want to gate.
+
+For `subprocess.exec` specifically, operators often want a finer
+grain: *"I trust `git` enough to run `git add` / `git commit`
+without a prompt, but I want a human-in-the-loop before any
+`git push` or `git reset --hard`."* `[subprocess.requires_approval_args]`
+expresses exactly this — same map-of-substring-patterns shape as
+`deny_args`, but the runtime effect is a prompt, not a deny:
+
+```toml
+[subprocess.requires_approval_args]
+git   = ["push", "reset --hard", "rebase -i"]
+cargo = ["publish"]
+gh    = ["release create", "pr merge"]
+```
+
+Matching semantics are identical to `deny_args` (substring against
+the joined argv tail, basename argv0 lookup with full-path
+fallback). When a pattern matches, the confirm hook is called with
+a summary that names the matched pattern, so a UI prompt can
+render *"`git push --force` matches `push` — approve?"* rather
+than a generic *"subprocess.exec — approve?"*.
+
+If `"subprocess.exec"` is **also** in the top-level
+`requires_approval` list, the capability-level prompt wins; the
+per-argv check is suppressed so the operator never sees two
+dialogs for one call.
+
+`!`-negation is supported during inheritance, same as `deny_args`:
+a user policy can drop an inherited pattern by writing
+`git = ["!push"]` in `[subprocess.requires_approval_args]`.
 
 #### Subprocess is a privilege boundary
 
@@ -490,6 +528,17 @@ hook on every call.
 ```toml
 requires_approval = ["fs.delete", "subprocess.exec"]
 ```
+
+During policy inheritance the list is merged with the same
+`!`-negation discipline as `deny_commands`: a user file can drop
+an inherited entry by writing `requires_approval = ["!subprocess.exec"]`.
+Used against the `secure-defaults` preset, this lets an operator
+opt out of capability-level prompts on specific items while
+keeping the rest of the baseline. For finer-grained control on
+`subprocess.exec` specifically — *"only prompt on dangerous argv
+patterns of allowed binaries"* — see
+[`[subprocess.requires_approval_args]`](#per-argv-confirm-hook-prompts-requires_approval_args)
+above.
 
 What "escalated to the caller" means depends on the embedder:
 

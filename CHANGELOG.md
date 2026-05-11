@@ -15,6 +15,32 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ### Added
 
+- **`[subprocess.requires_approval_args]`** — per-command,
+  per-argv-pattern confirm-hook prompts. Complements the existing
+  top-level `requires_approval` list (which fires the hook for
+  EVERY call of a capability) with a finer grain:
+  *"trust `git` in general, but prompt before any `git push` or
+  `git reset --hard`."* Same map-of-substring-patterns shape as
+  `deny_args`. When `subprocess.exec` is in the capability-level
+  `requires_approval`, the per-argv check is suppressed so the
+  operator doesn't see two prompts for one call. Confirm-hook
+  summary text names the matched pattern so a UI prompt can
+  render *"`git push --force` matches `push` — approve?"*
+  instead of a generic capability-level prompt. Inheritance uses
+  the same `!`-negation discipline as `deny_args`. Implementation:
+  new field on `SubprocessPolicy`, new accessor
+  `Policy::subprocess_argv_requires_approval`, new internal
+  `Runner::require_confirm_unconditional`. 7 policy-crate unit
+  tests + 4 host-crate integration tests; documented in
+  `docs/06-policy-file.md`.
+- **Clarification: top-level `requires_approval` supports
+  `!`-negation during inheritance.** This already worked through
+  `concat_dedup`; the docs now state it explicitly. `requires_approval = ["!subprocess.exec"]`
+  in a user policy that inherits the `secure-defaults` preset is
+  the right way to opt out of capability-level prompts on
+  specific items. (Earlier internal note that said negation
+  wasn't supported was wrong.)
+
 - **Doctor's over-broad-allow-list check.** `denyx doctor` now
   flags entries in `filesystem.{read,write,delete}_allow` that
   defeat the deny-by-default property. Three risk tiers:

@@ -356,6 +356,26 @@ pub struct SubprocessPolicy {
     /// the spec so portable policies can capture intent today.
     #[serde(default)]
     pub deny_args: std::collections::BTreeMap<String, Vec<String>>,
+    /// Per-command argument approval list. Map keys are commands
+    /// (basename match), values are argument patterns (substring
+    /// match against the joined argv) that trigger the confirm hook
+    /// before the call proceeds. Same matching shape as `deny_args`,
+    /// but the outcome is a per-call human prompt instead of an
+    /// unconditional deny.
+    ///
+    /// Useful when an operator trusts a binary in general but wants
+    /// a human-in-the-loop for specific dangerous subcommands. For
+    /// example, `"git" = ["push", "reset --hard"]` lets the agent
+    /// run `git add` / `git commit` / `git diff` freely but prompts
+    /// before any `git push` or `reset --hard`. This is the finer-
+    /// grained complement to the top-level `requires_approval` list,
+    /// which fires the hook for **every** call of a capability.
+    ///
+    /// If `"subprocess.exec"` is already in the top-level
+    /// `requires_approval`, the per-argv list is a no-op (the
+    /// capability-level catch-all already fires for every call).
+    #[serde(default)]
+    pub requires_approval_args: std::collections::BTreeMap<String, Vec<String>>,
     /// OS-level isolation mode for subprocess.exec. "none" (default)
     /// runs the child as a normal process inheriting the parent's
     /// filesystem and (filtered) env. "bwrap" wraps every call with
@@ -606,6 +626,13 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
                 over.subprocess.local_only_commands,
             ),
             deny_args: merge_deny_args(base.subprocess.deny_args, over.subprocess.deny_args),
+            // Per-argv approval list uses the same map+`!`-negation
+            // merge as deny_args — semantics are identical, only the
+            // runtime effect differs (prompt vs deny).
+            requires_approval_args: merge_deny_args(
+                base.subprocess.requires_approval_args,
+                over.subprocess.requires_approval_args,
+            ),
             // Sandbox is a scalar; over wins if it's not the default
             // (None). User explicitly setting `sandbox = "none"` to
             // override an inherited "bwrap" is currently
@@ -668,6 +695,7 @@ pub struct Policy {
     subprocess_deny: Vec<String>,
     subprocess_local_only: Vec<String>,
     subprocess_deny_args: std::collections::BTreeMap<String, Vec<String>>,
+    subprocess_requires_approval_args: std::collections::BTreeMap<String, Vec<String>>,
     /// Capabilities derived from the populated resource sections.
     /// Single source of truth for what `check_function` permits.
     fn_derived: Vec<&'static str>,
@@ -879,6 +907,7 @@ impl Policy {
         let subprocess_deny = file.subprocess.deny_commands.clone();
         let subprocess_local_only = file.subprocess.local_only_commands.clone();
         let subprocess_deny_args = file.subprocess.deny_args.clone();
+        let subprocess_requires_approval_args = file.subprocess.requires_approval_args.clone();
         let fn_derived = derive_capabilities(&file);
         let tools = file.tools.clone();
         let requires_approval = file.requires_approval.clone();
@@ -905,6 +934,7 @@ impl Policy {
             subprocess_deny,
             subprocess_local_only,
             subprocess_deny_args,
+            subprocess_requires_approval_args,
             fn_derived,
             tools,
             requires_approval,
@@ -1466,6 +1496,38 @@ impl Policy {
             }
         }
         Ok(())
+    }
+
+    /// Apply [subprocess.requires_approval_args] to a fully-resolved
+    /// argv. Returns `Some(matched_pattern)` if the joined argv
+    /// contains any pattern listed under the basename or full argv0,
+    /// or `None` if no per-argv approval is configured / required.
+    /// Caller uses the returned pattern to render the confirm-hook
+    /// summary so the operator sees WHICH pattern triggered.
+    ///
+    /// Matching semantics are identical to `check_subprocess_args`:
+    /// substring match against the joined argv (excluding argv[0]).
+    /// Empty argv returns `None`.
+    pub fn subprocess_argv_requires_approval(&self, argv: &[String]) -> Option<&str> {
+        if argv.is_empty() {
+            return None;
+        }
+        let argv0 = &argv[0];
+        let basename = std::path::Path::new(argv0)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(argv0);
+        let patterns = self
+            .subprocess_requires_approval_args
+            .get(basename)
+            .or_else(|| self.subprocess_requires_approval_args.get(argv0))?;
+        let joined = argv[1..].join(" ");
+        for pattern in patterns {
+            if joined.contains(pattern) {
+                return Some(pattern.as_str());
+            }
+        }
+        None
     }
 
     /// Walk argv (skipping argv[0]) and reject the call if any

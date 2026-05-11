@@ -140,3 +140,133 @@ requires_approval = ["fs.delete", "subprocess.exec"]
     assert!(p.requires_approval("subprocess.exec"));
     assert!(!p.requires_approval("fs.read"));
 }
+
+// ── Per-argv requires_approval_args ─────────────────────────────
+//
+// `[subprocess.requires_approval_args]` lets an operator say
+// "only prompt on specific dangerous argv patterns of an allowed
+// command" without putting subprocess.exec in the capability-level
+// requires_approval (which would prompt on every call). Same
+// substring-match semantics as deny_args.
+
+#[test]
+fn approval_args_fires_only_on_pattern_match() {
+    let toml = r#"
+[subprocess]
+allow_commands = ["true", "echo"]
+
+[subprocess.requires_approval_args]
+echo = ["--secret"]
+"#;
+    let (runner, hook) = make(toml, ConfirmDecision::Allow);
+
+    // No pattern match → no prompt.
+    runner
+        .run("t", r#"subprocess.exec(["echo", "hello"])"#, "test.star")
+        .unwrap();
+    assert!(
+        hook.seen.lock().unwrap().is_empty(),
+        "no prompt expected when argv doesn't match"
+    );
+
+    // Pattern match → one prompt with the matched pattern in the
+    // summary.
+    runner
+        .run(
+            "t",
+            r#"subprocess.exec(["echo", "--secret", "x"])"#,
+            "test.star",
+        )
+        .unwrap();
+    let seen = hook.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one prompt expected: {seen:?}");
+    assert_eq!(seen[0].0, "subprocess.exec");
+    assert!(
+        seen[0].1.contains("--secret"),
+        "summary should name the matched pattern: {:?}",
+        seen[0]
+    );
+    assert!(
+        seen[0].1.contains("requires_approval_args"),
+        "summary should say WHY the prompt fired: {:?}",
+        seen[0]
+    );
+}
+
+#[test]
+fn approval_args_denial_surfaces_as_typed_error() {
+    let toml = r#"
+[subprocess]
+allow_commands = ["echo"]
+
+[subprocess.requires_approval_args]
+echo = ["--no"]
+"#;
+    let (runner, _hook) = make(toml, ConfirmDecision::Deny);
+    let err = runner
+        .run(
+            "t",
+            r#"subprocess.exec(["echo", "--no", "x"])"#,
+            "test.star",
+        )
+        .unwrap_err();
+    match err {
+        DenyxError::ConfirmDenied(cap) => assert_eq!(cap, "subprocess.exec"),
+        other => panic!("expected ConfirmDenied(subprocess.exec), got: {other:?}"),
+    }
+}
+
+#[test]
+fn capability_level_approval_short_circuits_per_argv() {
+    // When subprocess.exec is in the TOP-LEVEL requires_approval,
+    // every call prompts. The per-argv list MUST NOT fire a second
+    // prompt for the same call (operator would see two back-to-back
+    // dialogs for one exec).
+    let toml = r#"
+requires_approval = ["subprocess.exec"]
+
+[subprocess]
+allow_commands = ["true"]
+
+[subprocess.requires_approval_args]
+true = ["any"]
+"#;
+    let (runner, hook) = make(toml, ConfirmDecision::Allow);
+    runner
+        .run("t", r#"subprocess.exec(["true", "any"])"#, "test.star")
+        .unwrap();
+    let seen = hook.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "only the capability-level prompt should fire, got: {seen:?}"
+    );
+    // The summary is the capability-level shape (no "matches
+    // [subprocess.requires_approval_args] pattern" suffix).
+    assert!(
+        !seen[0].1.contains("requires_approval_args"),
+        "per-argv path should be suppressed when capability-level approval is on: {:?}",
+        seen[0]
+    );
+}
+
+#[test]
+fn approval_args_no_match_no_prompt_no_op() {
+    // No relevant patterns and no capability-level approval — the
+    // exec proceeds with zero prompts.
+    let toml = r#"
+[subprocess]
+allow_commands = ["true"]
+
+[subprocess.requires_approval_args]
+echo = ["x"]
+"#;
+    let (runner, hook) = make(toml, ConfirmDecision::Deny);
+    runner
+        .run("t", r#"subprocess.exec(["true"])"#, "test.star")
+        .unwrap();
+    assert!(
+        hook.seen.lock().unwrap().is_empty(),
+        "no patterns for 'true' configured → no prompt regardless of decision"
+    );
+}
