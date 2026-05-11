@@ -113,6 +113,10 @@ and the deployment guides.
 > cd denyx
 > cargo build --release
 > export PATH="$PWD/target/release:$PATH"
+>
+> # One-time hook setup so `git commit` runs the same fmt + clippy
+> # gates as CI locally. See scripts/precommit.sh for what it runs.
+> git config core.hooksPath .githooks
 > ```
 
 **2. `cd` to the project you want to gate** (NOT the Denyx checkout — your

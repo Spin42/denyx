@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Versioned git pre-commit hook. Runs the same fmt + clippy gates as
+# .github/workflows/ci.yml's `fmt` and `clippy` jobs, so a commit
+# that would fail CI is caught locally before it leaves your machine.
+#
+# This hook is NOT installed by default — git ignores files under
+# .githooks/ unless `core.hooksPath` is pointed at this directory.
+# Install with:
+#
+#   git config core.hooksPath .githooks
+#
+# That setting is per-clone (it's in .git/config, not versioned), so
+# every contributor runs the command once after cloning.
+#
+# To bypass the hook for a single commit (rarely a good idea), use
+# `git commit --no-verify`. CI will still catch a failure on push.
+
+exec "$(git rev-parse --show-toplevel)/scripts/precommit.sh"
