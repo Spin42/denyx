@@ -22,6 +22,13 @@ pub enum Lang {
     Ruby,
     Rust,
     Go,
+    /// Java / JVM. Allow-list covers both Maven (`mvn`, `pom.xml`,
+    /// `target/`) and Gradle (`gradle`, `build.gradle*`, `build/`).
+    /// Operators on one build system can prune the other; mixed-
+    /// build projects (rare but real) get coverage out of the box.
+    Java,
+    /// .NET — `dotnet` CLI, `*.csproj` / `*.sln`, `bin/` + `obj/`.
+    Dotnet,
 }
 
 impl Lang {
@@ -32,6 +39,8 @@ impl Lang {
             Lang::Ruby => "ruby",
             Lang::Rust => "rust",
             Lang::Go => "go",
+            Lang::Java => "java",
+            Lang::Dotnet => "dotnet",
         }
     }
 
@@ -42,6 +51,8 @@ impl Lang {
             Lang::Ruby => RUBY,
             Lang::Rust => RUST,
             Lang::Go => GO,
+            Lang::Java => JAVA,
+            Lang::Dotnet => DOTNET,
         }
     }
 }
@@ -55,8 +66,10 @@ impl FromStr for Lang {
             "ruby" | "rb" | "rails" => Ok(Lang::Ruby),
             "rust" | "rs" => Ok(Lang::Rust),
             "go" | "golang" => Ok(Lang::Go),
+            "java" | "kotlin" | "scala" | "jvm" | "maven" | "gradle" => Ok(Lang::Java),
+            "dotnet" | "csharp" | "cs" | "fsharp" | "fs" | "vb" => Ok(Lang::Dotnet),
             other => Err(format!(
-                "unknown language {other:?}; expected one of: python, node, ruby, rust, go"
+                "unknown language {other:?}; expected one of: python, node, ruby, rust, go, java, dotnet"
             )),
         }
     }
@@ -227,6 +240,21 @@ python  = ["-c", "-e"]
 python3 = ["-c", "-e"]
 pip     = ["install --target", "install --prefix"]   # don't write outside venv
 
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv; same shape as `deny_args` above. Useful when
+# you trust the binary in general but want a per-call review on
+# weighty operations.
+#
+# Note: a pattern that overlaps a `deny_args` entry is dead code
+# (deny wins). Pick patterns that pass deny_args but are still
+# worth a per-call check.
+#
+# [subprocess.requires_approval_args]
+# git  = ["push"]
+# pip  = ["install --user"]
+# pip3 = ["install --user"]
+
 # Capabilities are auto-derived from the populated resource sections
 # above: read_allow ⇒ fs.read, write_allow ⇒ fs.write, allow_commands
 # ⇒ subprocess.exec, allow_vars ⇒ env.read, http_*_allow ⇒ net.http_*.
@@ -365,6 +393,17 @@ yarn = ["publish"]
 # the argv path gate cannot reason about the JS inside the string.
 node = ["-e", "-p", "--eval", "--print"]
 
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv; same shape as `deny_args` above. Patterns that
+# overlap `deny_args` are dead code (deny wins).
+#
+# [subprocess.requires_approval_args]
+# git  = ["push"]
+# npm  = ["install -g", "install --global"]
+# pnpm = ["install -g"]
+# yarn = ["global add"]
+
 # Capabilities are auto-derived from the populated resource sections
 # above. Populate [network].http_get_allow to enable net.http_get.
 
@@ -500,6 +539,17 @@ gem = ["push"]
 # go through fs.read/write gates.
 ruby = ["-e", "-r"]
 
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv. Patterns that overlap `deny_args` are dead
+# code (deny wins).
+#
+# [subprocess.requires_approval_args]
+# git    = ["push"]
+# gem    = ["install --user-install"]
+# rails  = ["generate", "destroy"]
+# bundle = ["update"]
+
 # Capabilities are auto-derived from the populated resource sections
 # above. Populate [network].http_get_allow to enable net.http_get.
 
@@ -605,6 +655,15 @@ git = [
 # Opt in explicitly per-project if your agent actually releases.
 cargo = ["publish", "yank", "owner --remove"]
 
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv. Patterns that overlap `deny_args` are dead
+# code (deny wins).
+#
+# [subprocess.requires_approval_args]
+# git   = ["push"]
+# cargo = ["install"]
+
 # Capabilities are auto-derived from the populated resource sections
 # above. Populate [network].http_get_allow to enable net.http_get.
 
@@ -702,6 +761,15 @@ git = [
     "reflog expire",
 ]
 
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv. Patterns that overlap `deny_args` are dead
+# code (deny wins).
+#
+# [subprocess.requires_approval_args]
+# git = ["push"]
+# go  = ["install"]
+
 # Capabilities are auto-derived from the populated resource sections
 # above. Populate [network].http_get_allow to enable net.http_get.
 
@@ -733,9 +801,19 @@ mod tests {
     /// generator is responsible for stripping it under the minimal
     /// default; the const itself must still contain it (the
     /// permissive path uses the const verbatim).
+    const ALL_LANGS: &[Lang] = &[
+        Lang::Python,
+        Lang::Node,
+        Lang::Ruby,
+        Lang::Rust,
+        Lang::Go,
+        Lang::Java,
+        Lang::Dotnet,
+    ];
+
     #[test]
     fn templates_carry_tmp_glob_so_permissive_can_keep_it() {
-        for lang in [Lang::Python, Lang::Node, Lang::Ruby, Lang::Rust, Lang::Go] {
+        for &lang in ALL_LANGS {
             assert!(
                 lang.template().contains("\"/tmp/**\""),
                 "{} template should include /tmp/** so the permissive path keeps it",
@@ -746,7 +824,7 @@ mod tests {
 
     #[test]
     fn generate_minimal_strips_tmp_glob() {
-        for lang in [Lang::Python, Lang::Node, Lang::Ruby, Lang::Rust, Lang::Go] {
+        for &lang in ALL_LANGS {
             let out = generate(lang, false);
             assert!(
                 !out.contains("\"/tmp/**\""),
@@ -758,7 +836,7 @@ mod tests {
 
     #[test]
     fn generate_permissive_keeps_tmp_glob() {
-        for lang in [Lang::Python, Lang::Node, Lang::Ruby, Lang::Rust, Lang::Go] {
+        for &lang in ALL_LANGS {
             let out = generate(lang, true);
             assert!(
                 out.contains("\"/tmp/**\""),
@@ -773,7 +851,7 @@ mod tests {
         // Stripping a list entry must not break TOML parsing. Each
         // language template's minimal form must still parse as a
         // PolicyFile.
-        for lang in [Lang::Python, Lang::Node, Lang::Ruby, Lang::Rust, Lang::Go] {
+        for &lang in ALL_LANGS {
             let body = generate(lang, false);
             denyx_policy::PolicyFile::from_toml_str(&body).unwrap_or_else(|e| {
                 panic!(
@@ -786,7 +864,7 @@ mod tests {
 
     #[test]
     fn generate_permissive_is_valid_toml() {
-        for lang in [Lang::Python, Lang::Node, Lang::Ruby, Lang::Rust, Lang::Go] {
+        for &lang in ALL_LANGS {
             let body = generate(lang, true);
             denyx_policy::PolicyFile::from_toml_str(&body).unwrap_or_else(|e| {
                 panic!(
@@ -836,6 +914,8 @@ write_allow = ["src/**"]
             (Lang::Ruby, &["app/**", "lib/**", "tmp/**"]),
             (Lang::Rust, &["src/**", "tests/**", "target/**"]),
             (Lang::Go, &["**/*.go"]),
+            (Lang::Java, &["src/**", "target/**", "build/**"]),
+            (Lang::Dotnet, &["src/**", "**/bin/**", "**/obj/**"]),
         ];
         for (lang, expected) in cases {
             let body = generate(*lang, false);
@@ -846,5 +926,295 @@ write_allow = ["src/**"]
                 );
             }
         }
+    }
+}
+
+const JAVA: &str = r#"# Denyx policy generated by `denyx init --lang java`.
+#
+# Inherits `secure-defaults`. Adds JVM toolchain coverage for both
+# Maven and Gradle — most JVM projects use one or the other, but the
+# allow-lists are forgiving so a project that mixes them (a Gradle
+# top-level + an embedded Maven plugin build, say) still works.
+# Operators on a single-build-system project can prune the other.
+#
+# Kotlin and Scala projects fit this template too: their toolchains
+# build on the JVM, and `kotlin` / `scala` aliases route here.
+#
+# Default = minimal: `denyx init` strips the embedded `/tmp/**` write
+# entry. Pass `--permissive` to keep it.
+
+inherits = "secure-defaults"
+
+[filesystem]
+read_allow = [
+    "src/**",
+    "test/**",
+    "tests/**",
+    # Maven
+    "pom.xml",
+    ".mvn/**",
+    "mvnw",
+    "mvnw.cmd",
+    # Gradle
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "gradle.properties",
+    "gradlew",
+    "gradlew.bat",
+    "gradle/**",
+    # Kotlin
+    "*.kt",
+    "*.kts",
+    # General
+    "README*",
+    ".java-version",
+    ".sdkmanrc",
+]
+write_allow = [
+    "src/**",
+    "test/**",
+    "tests/**",
+    # Maven build output
+    "target/**",
+    # Gradle build output
+    "build/**",
+    ".gradle/**",
+    "/tmp/**",
+]
+deny = [
+    "**/.env.production",
+    "**/.env.staging",
+    "**/.env.qa",
+    "**/application-production.yml",
+    "**/application-production.yaml",
+    "**/application-production.properties",
+    "**/application-staging.yml",
+    "**/application-staging.yaml",
+    "**/application-prod.yml",
+    "**/application-prod.yaml",
+    "**/secrets.yml",
+    "**/secrets.yaml",
+    "**/secrets.properties",
+]
+
+[network]
+# By default no host is reachable. Add hosts you actually need:
+# http_get_allow = ["repo.maven.apache.org", "plugins.gradle.org", "services.gradle.org", "repo1.maven.org"]
+
+[environment]
+allow_vars = [
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
+    # JVM-side
+    "JAVA_HOME", "JDK_HOME", "JRE_HOME",
+    "M2_HOME", "MAVEN_HOME", "GRADLE_HOME", "GRADLE_USER_HOME",
+    "KOTLIN_HOME",
+    # JVM flags + tools
+    "JAVA_OPTS", "MAVEN_OPTS", "GRADLE_OPTS",
+]
+
+[subprocess]
+allow_commands = [
+    # JVM runtime + compiler
+    "java", "javac",
+    # Build systems
+    "mvn", "./mvnw", "mvnw",
+    "gradle", "./gradlew", "gradlew",
+    # Kotlin
+    "kotlin", "kotlinc",
+    # Scala (sbt is the common build, but project-specific; not added by default)
+    "scala", "scalac",
+    # Project tooling
+    "git",
+    "make",
+]
+# `secure-defaults` denies the `java` interpreter wholesale because
+# `java -jar` and `java <ClassName>` execute arbitrary bytecode that
+# bypasses the argv path-gate. The Java template needs `java` to
+# function, so we negate the deny — and accept the privilege grant.
+# `mvn`/`gradle` ultimately invoke `java` too, but they're project-
+# bound (pom.xml / build.gradle) rather than generic exec surfaces.
+deny_commands = ["!java"]
+
+[subprocess.deny_args]
+git = [
+    "push --force",
+    "push -f",
+    "push --force-with-lease",
+    "reset --hard",
+    "clean -fd",
+    "clean -fx",
+    "clean -fdx",
+    "branch -D",
+    "filter-branch",
+    "rebase -i",
+    "update-ref -d",
+    "reflog expire",
+]
+# Maven deploy + release plugins push artefacts to a remote repository.
+# Opt in per-project if your agent legitimately publishes.
+mvn = ["deploy", "release:perform", "release:prepare"]
+# Gradle publish targets do the same; opt in per-project.
+gradle = ["publish", "publishToMavenCentral", "publishPlugins"]
+# Block inline-execution flags on the JVM CLI. `java -jar <arbitrary.jar>`
+# loads bytecode that does whatever it pleases, but the `.jar` argument
+# is path-gated. Inline `-e` doesn't exist for `java`. The wholesale
+# `!java` negation above is the privilege grant; no additional flag
+# block is meaningful at the CLI layer.
+
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv. Patterns that overlap `deny_args` are dead
+# code (deny wins).
+#
+# [subprocess.requires_approval_args]
+# git    = ["push"]
+# mvn    = ["clean install", "install"]
+# gradle = ["clean", "build"]
+
+# Capabilities are auto-derived from the populated resource sections
+# above. Populate [network].http_get_allow to enable net.http_get.
+"#;
+
+const DOTNET: &str = r#"# Denyx policy generated by `denyx init --lang dotnet`.
+#
+# Inherits `secure-defaults`. Adds .NET toolchain coverage — `dotnet`
+# CLI plus C# / F# / VB project files. Build output lands in `bin/`
+# and `obj/` per project.
+#
+# Default = minimal: `denyx init` strips the embedded `/tmp/**` write
+# entry. Pass `--permissive` to keep it.
+
+inherits = "secure-defaults"
+
+[filesystem]
+read_allow = [
+    "src/**",
+    "test/**",
+    "tests/**",
+    "*.sln",
+    "**/*.csproj",
+    "**/*.fsproj",
+    "**/*.vbproj",
+    "**/Directory.Build.props",
+    "**/Directory.Build.targets",
+    "**/Directory.Packages.props",
+    "global.json",
+    "nuget.config",
+    "NuGet.Config",
+    "**/appsettings.json",
+    "**/appsettings.Development.json",
+    "README*",
+]
+write_allow = [
+    "src/**",
+    "test/**",
+    "tests/**",
+    "**/bin/**",
+    "**/obj/**",
+    "/tmp/**",
+]
+deny = [
+    "**/.env.production",
+    "**/.env.staging",
+    "**/.env.qa",
+    "**/appsettings.Production.json",
+    "**/appsettings.Staging.json",
+    "**/appsettings.Production.*.json",
+    "**/secrets.json",
+    # User-Secrets storage (per-user, but the agent shouldn't read
+    # them — see `dotnet user-secrets` docs).
+    "~/.microsoft/usersecrets/**",
+    "%APPDATA%/Microsoft/UserSecrets/**",
+]
+
+[network]
+# By default no host is reachable. Add hosts you actually need:
+# http_get_allow = ["api.nuget.org", "www.nuget.org", "globalcdn.nuget.org"]
+
+[environment]
+allow_vars = [
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
+    "DOTNET_ROOT", "DOTNET_CLI_TELEMETRY_OPTOUT",
+    "NUGET_PACKAGES", "NUGET_HTTP_CACHE_PATH",
+    # ASP.NET runtime env (commonly set to Development locally)
+    "ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT",
+]
+
+[subprocess]
+allow_commands = [
+    # .NET CLI
+    "dotnet",
+    # Project tooling
+    "git",
+    "make",
+]
+
+[subprocess.deny_args]
+git = [
+    "push --force",
+    "push -f",
+    "push --force-with-lease",
+    "reset --hard",
+    "clean -fd",
+    "clean -fx",
+    "clean -fdx",
+    "branch -D",
+    "filter-branch",
+    "rebase -i",
+    "update-ref -d",
+    "reflog expire",
+]
+# `dotnet nuget push` publishes to a registry; `dotnet user-secrets`
+# reads/writes per-user secrets the agent shouldn't generally touch;
+# `dotnet ef database update` mutates the database. Opt in per-project.
+dotnet = [
+    "nuget push",
+    "user-secrets",
+    "ef database update",
+    "ef database drop",
+    "workload install",
+]
+
+# Optional per-argv approval. Uncomment patterns you want the
+# operator to eyeball before each call. Substring match against
+# the joined argv. Patterns that overlap `deny_args` are dead
+# code (deny wins).
+#
+# [subprocess.requires_approval_args]
+# git    = ["push"]
+# dotnet = ["tool install --global", "publish"]
+
+# Capabilities are auto-derived from the populated resource sections
+# above. Populate [network].http_get_allow to enable net.http_get.
+"#;
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn java_aliases_resolve() {
+        for s in ["java", "JAVA", "kotlin", "scala", "jvm", "maven", "gradle"] {
+            assert_eq!(Lang::from_str(s).unwrap(), Lang::Java, "{s}");
+        }
+    }
+
+    #[test]
+    fn dotnet_aliases_resolve() {
+        for s in ["dotnet", "DOTNET", "csharp", "cs", "fsharp", "fs", "vb"] {
+            assert_eq!(Lang::from_str(s).unwrap(), Lang::Dotnet, "{s}");
+        }
+    }
+
+    #[test]
+    fn unknown_language_error_lists_supported_set() {
+        let e = Lang::from_str("haskell").unwrap_err();
+        // The error message advertises the supported set; the new
+        // additions must be in it.
+        assert!(e.contains("java"), "{e}");
+        assert!(e.contains("dotnet"), "{e}");
     }
 }
