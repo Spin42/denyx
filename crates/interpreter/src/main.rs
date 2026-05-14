@@ -12,8 +12,14 @@
 //   stdout: JSON `Response` (verdict + result)
 //   imports: `denyx::host_*` Wasm functions, hand-wired by the host
 //   exports: `denyx_alloc` / `denyx_dealloc` — the host uses these to
-//            return byte-buffers (string payloads from gated builtins
-//            like `fs.read`) back into the interpreter's linear memory.
+//            return byte-buffers (string payloads from gated builtins)
+//            back into the interpreter's linear memory.
+//
+// Return-string convention for gated builtins:
+//   The host's import returns a single `u64` packed as:
+//       (ptr as u64) << 32 | (len as u64)
+//   The interpreter unpacks, reads `len` UTF-8 bytes from `ptr`, takes
+//   ownership, and frees the buffer via denyx_dealloc.
 //
 // The native target builds a stub that prints a usage hint and exits
 // non-zero, so `cargo build --workspace` keeps working on a regular host.
@@ -80,25 +86,39 @@ fn wasm_main() {
     print_response(&resp);
 }
 
+/// Starlark prelude evaluated before the user script. Binds the
+/// underscored builtin functions (`_denyx_fs_read`, …) to capability-
+/// grouped struct namespaces (`fs.read`, …) so scripts can use the
+/// familiar denyx surface.
+#[cfg(target_arch = "wasm32")]
+const PRELUDE: &str = r#"
+fs = struct(
+    read = _denyx_fs_read,
+)
+"#;
+
 #[cfg(target_arch = "wasm32")]
 fn evaluate(req: &Request) -> Response {
-    use starlark::environment::{Globals, LibraryExtension, Module};
+    use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
     use starlark::eval::Evaluator;
     use starlark::syntax::{AstModule, Dialect};
 
     let _ = req.task_id.len(); // reserved for audit correlation, Phase 5+
 
-    let ast = match AstModule::parse(&req.source_path, req.source.clone(), &Dialect::Standard) {
+    let user_ast = match AstModule::parse(&req.source_path, req.source.clone(), &Dialect::Standard)
+    {
         Ok(a) => a,
         Err(e) => return err_response("starlark-parse", e.to_string()),
     };
-    // `Globals::standard()` is the Starlark spec — no `print`. denyx
-    // scripts use `print` (it's the canonical observable side-effect),
-    // so add the Print extension. The list is explicit rather than
-    // using `Globals::extended()` so any future Bazel-flavored
-    // extensions we want to expose are an explicit decision, not a
-    // silent inheritance.
-    let globals = Globals::extended_by(&[LibraryExtension::Print]);
+    // Globals = Starlark standard library + Bazel-flavored extensions
+    // PRELUDE relies on (Print for `print()`, StructType for `struct(…)`)
+    // + denyx's gated builtins. Extensions are listed explicitly rather
+    // than using `Globals::extended()` so any future surface change is
+    // a deliberate decision rather than a silent inheritance.
+    let globals =
+        GlobalsBuilder::extended_by(&[LibraryExtension::Print, LibraryExtension::StructType])
+            .with(denyx_builtins)
+            .build();
     let module = Module::new();
     // Declare the print handler before the Evaluator so it outlives the
     // borrow set_print_handler() takes. Rust drops locals in reverse
@@ -106,7 +126,18 @@ fn evaluate(req: &Request) -> Response {
     let print_handler = HostPrintHandler;
     let mut eval = Evaluator::new(&module);
     eval.set_print_handler(&print_handler);
-    match eval.eval_module(ast, &globals) {
+
+    // Evaluate the prelude into the module's namespace. PRELUDE is a
+    // hardcoded constant — failure here means the interpreter is
+    // broken, not the user's script.
+    let prelude_ast =
+        AstModule::parse("denyx_prelude.star", PRELUDE.to_owned(), &Dialect::Standard)
+            .expect("PRELUDE is a hardcoded constant; should always parse");
+    if let Err(e) = eval.eval_module(prelude_ast, &globals) {
+        return err_response("starlark-prelude", e.to_string());
+    }
+
+    match eval.eval_module(user_ast, &globals) {
         Ok(value) => ok_response(value.to_string()),
         Err(e) => err_response("starlark-eval", e.to_string()),
     }
@@ -146,9 +177,8 @@ fn print_response(resp: &Response) {
 // `extern "C"` imports and call them directly.
 //
 // String values cross via (ptr: u32, len: u32) pairs into the
-// interpreter's linear memory.
-//
-// For Phase 2 only `host_print` is declared. Phase 4 adds the rest.
+// interpreter's linear memory. Imports that return strings pack the
+// result `(ptr, len)` into a single `u64`: `(ptr as u64) << 32 | len`.
 
 #[cfg(target_arch = "wasm32")]
 mod host {
@@ -158,6 +188,16 @@ mod host {
         /// run-result; depending on host policy it may also stream them
         /// to its own stdout.
         pub fn host_print(ptr: u32, len: u32);
+
+        /// Read a file. Argument: UTF-8 path slice at `(path_ptr,
+        /// path_len)` in guest memory. Returns the file contents as a
+        /// packed `(ptr: u64<<32, len: u64 & 0xFFFFFFFF)` u64 pointing
+        /// into a freshly `denyx_alloc`-allocated guest buffer the
+        /// caller must free with `denyx_dealloc`.
+        ///
+        /// Policy denials trap the instance — host catches the trap
+        /// and surfaces `DenyxError::Policy`.
+        pub fn host_fs_read(path_ptr: u32, path_len: u32) -> u64;
     }
 }
 
@@ -172,6 +212,47 @@ impl starlark::PrintHandler for HostPrintHandler {
         }
         Ok(())
     }
+}
+
+// ── Gated builtins (Starlark globals) ──────────────────────────────────
+//
+// These functions are visible in Starlark as `_denyx_fs_read`, etc.
+// PRELUDE re-binds them under capability-grouped structs so scripts
+// use the public `fs.read`, `net.http_get`, … forms.
+//
+// Each function unpacks the host's packed-u64 return, copies the
+// payload into an owned `String`, frees the host-allocated buffer via
+// `denyx_dealloc`, and returns. Host-side denials surface here as
+// Starlark errors propagated from the wasmtime trap.
+
+#[cfg(target_arch = "wasm32")]
+#[starlark::starlark_module]
+fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
+    /// Implementation for `fs.read(path)`.
+    fn _denyx_fs_read(path: &str) -> anyhow::Result<String> {
+        let packed = unsafe { host::host_fs_read(path.as_ptr() as u32, path.len() as u32) };
+        unpack_string(packed)
+    }
+}
+
+/// Helper used by every string-returning builtin: unpack the host's
+/// packed-u64 return, copy the payload, free the host buffer.
+#[cfg(target_arch = "wasm32")]
+fn unpack_string(packed: u64) -> anyhow::Result<String> {
+    let ptr = (packed >> 32) as u32;
+    let len = (packed & 0xFFFF_FFFF) as u32;
+    if ptr == 0 || len == 0 {
+        return Ok(String::new());
+    }
+    // SAFETY: host wrote `len` bytes at `ptr` via denyx_alloc; we own
+    // this buffer until we call denyx_dealloc below.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let result = std::str::from_utf8(bytes)
+        .map(|s| s.to_owned())
+        .map_err(|e| anyhow::anyhow!("host-returned string is not valid UTF-8: {e}"));
+    // SAFETY: pairing the denyx_alloc(len) call the host made for us.
+    unsafe { denyx_dealloc(ptr, len) };
+    result
 }
 
 // ── Allocator exports the host calls ───────────────────────────────────

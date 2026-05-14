@@ -739,6 +739,7 @@ dependencies = [
 name = "denyx-interpreter"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
  "starlark",
