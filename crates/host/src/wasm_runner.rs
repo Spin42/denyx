@@ -16,7 +16,8 @@
 //! - stdin:  `{"task_id": "...", "source_path": "...", "source": "..."}`
 //! - stdout: `{"status": "ok"|"error", "result": "...", "error": {...}}`
 //! - imports under module `"denyx"`: `host_print` (4.1), `host_fs_read`
-//!   (4.3), `host_fs_write` (4.4); the rest wired one capability at a
+//!   (4.3), `host_fs_write` (4.4), `host_fs_delete` (4.5); the rest
+//!   wired one capability at a
 //!   time in subsequent Phase 4 commits.
 //! - exports: `denyx_alloc(len)` / `denyx_dealloc(ptr, len)` — the host
 //!   calls these to return byte-buffer payloads (string results from
@@ -308,6 +309,58 @@ impl WasmRunner {
             )
             .map_err(|e| DenyxError::Other(format!("link host_fs_write: {e}")))?;
 
+        // ── host_fs_delete (Phase 4.5) ────────────────────────────
+        let fs_delete_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_fs_delete",
+                move |mut caller: Caller<'_, WasmState>,
+                      path_ptr: u32,
+                      path_len: u32|
+                      -> Result<(), wasmtime::Error> {
+                    // 1. Read path from guest memory.
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(Extern::into_memory)
+                        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+                    let mut path_buf = vec![0u8; path_len as usize];
+                    memory
+                        .read(&caller, path_ptr as usize, &mut path_buf)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_fs_delete: path read: {e}"))
+                        })?;
+                    let path = match std::str::from_utf8(&path_buf) {
+                        Ok(s) => s.to_owned(),
+                        Err(e) => {
+                            return Err(wasmtime::Error::msg(format!(
+                                "host_fs_delete: non-utf8 path: {e}"
+                            )));
+                        }
+                    };
+
+                    // 2. Gate through policy.
+                    let path_obj = std::path::Path::new(&path);
+                    if let Err(e) = fs_delete_policy.check_fs_delete(path_obj) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("fs.delete({path:?}): {e}")));
+                        return Err(wasmtime::Error::msg("fs.delete denied by policy"));
+                    }
+
+                    // 3. Perform the IO. remove_file matches the
+                    //    in-process Runner's behaviour: fs.delete is
+                    //    file-targeted, not recursive directory
+                    //    removal.
+                    if let Err(e) = std::fs::remove_file(path_obj) {
+                        caller.data_mut().captured_error = Some(DenyxError::Io(e));
+                        return Err(wasmtime::Error::msg("fs.delete: io error"));
+                    }
+
+                    Ok(())
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_fs_delete: {e}")))?;
+
         // Instantiate and run `_start`.
         let instance = linker
             .instantiate(&mut store, &module)
@@ -584,6 +637,65 @@ mod tests {
         assert!(
             !exists_after,
             "denied fs.write must not create the target file"
+        );
+    }
+
+    /// Phase 4.5 — allow path. A policy with the target in
+    /// `delete_allow` lets the script remove the file. Validates:
+    /// gate accepts → remove_file succeeds → file no longer exists.
+    #[test]
+    fn fs_delete_allowed_path_removes_file() {
+        let file_path = unique_tmp_path("fs_delete_ok");
+        std::fs::write(&file_path, "soon to be gone").expect("write fixture");
+        let policy_path = write_temp_policy(
+            "fs_delete_ok",
+            &format!(
+                "[filesystem]\ndelete_allow = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!("fs.delete({:?})", file_path.display().to_string());
+        runner
+            .run("test", &script, "fs_delete_ok.star")
+            .expect("runs");
+
+        let exists_after = file_path.exists();
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        assert!(!exists_after, "fs.delete should have removed the file");
+    }
+
+    /// Phase 4.5 — deny path. Empty `delete_allow` surfaces the
+    /// denial as `DenyxError::Policy`. The target file must still
+    /// exist after the run.
+    #[test]
+    fn fs_delete_denied_path_surfaces_typed_error() {
+        let file_path = unique_tmp_path("fs_delete_denied");
+        std::fs::write(&file_path, "should remain").expect("write fixture");
+        let policy_path =
+            write_temp_policy("fs_delete_denied", "[filesystem]\ndelete_allow = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!("fs.delete({:?})", file_path.display().to_string());
+        let err = runner
+            .run("test", &script, "fs_delete_denied.star")
+            .expect_err("denied delete should error");
+        let exists_after = file_path.exists();
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::Policy(_) => {}
+            other => panic!("expected DenyxError::Policy, got {other:?}"),
+        }
+        assert!(
+            exists_after,
+            "denied fs.delete must not remove the target file"
         );
     }
 }

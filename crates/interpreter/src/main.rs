@@ -95,6 +95,7 @@ const PRELUDE: &str = r#"
 fs = struct(
     read = _denyx_fs_read,
     write = _denyx_fs_write,
+    delete = _denyx_fs_delete,
 )
 "#;
 
@@ -206,6 +207,11 @@ mod host {
         /// errors trap the instance, surfacing as `DenyxError::Policy`
         /// / `DenyxError::Io` via the host's captured_error slot.
         pub fn host_fs_write(path_ptr: u32, path_len: u32, content_ptr: u32, content_len: u32);
+
+        /// Delete a file. Argument: UTF-8 path slice in guest memory.
+        /// No return value. Same trap-on-denial / trap-on-io-error
+        /// pattern as host_fs_write.
+        pub fn host_fs_delete(path_ptr: u32, path_len: u32);
     }
 }
 
@@ -254,6 +260,14 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
                 content.as_ptr() as u32,
                 content.len() as u32,
             );
+        }
+        Ok(starlark::values::none::NoneType)
+    }
+
+    /// Implementation for `fs.delete(path)`.
+    fn _denyx_fs_delete(path: &str) -> anyhow::Result<starlark::values::none::NoneType> {
+        unsafe {
+            host::host_fs_delete(path.as_ptr() as u32, path.len() as u32);
         }
         Ok(starlark::values::none::NoneType)
     }
