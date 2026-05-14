@@ -156,22 +156,50 @@ The error message body for `RuntimeLimit` differs: in-process says
 
 ### Performance characteristics
 
-Measured costs are not in this document — there is no benchmark
-suite yet (see [Open work](#open-work)). What can be said
-architecturally:
+Measured via `scripts/bench-wasm-runner.py` on Linux 6.19 / x86_64 /
+opt-level=3, 15 samples per measurement after 3 warm-up runs
+discarded. Numbers vary with CPU and disk-cache state; the
+qualitative shape is reproducible.
 
-- Per-call overhead: wasm path is `Store::new` + `Linker::new` +
-  import wiring + `_start` invocation. The `Engine` and compiled
-  `Module` are cached on the `WasmRunner` instance. Estimated
-  ~5ms steady-state.
-- Per-call overhead, in-process: starlark-rust parse + walk. Faster
-  in absolute terms; estimated ~1-2ms.
-- For most agent workloads, the dominant cost is the underlying
-  IO (file read, network call, subprocess spawn), not the
-  evaluator. The runner choice is a 1-3ms swing on each call.
-- Memory: wasmtime instances reserve a 4GB linear memory address
-  range per `Store`. On 64-bit Linux this is virtual, not
-  resident; the resident set follows actual interpreter use.
+Two costs matter and they are very different:
+
+| Cost | In-process Runner | WasmRunner | Why |
+|------|-------------------|------------|-----|
+| **Cold call** (process startup + 1 `print`) | 3.7 ms median | **481 ms median** | The wasm path pays a one-time wasmtime JIT-compile of the embedded ~5 MB Starlark interpreter. Paid **once per `WasmRunner` instance**, not per script call. |
+| **Amortized per-call** (T(1000 prints) − T(1 print)) / 999 | 0.003 ms | 0.022 ms | Marginal cost of one more script-level operation inside an already-instantiated runner. Wasm path is ~7× slower per op, but both are negligible in absolute terms. |
+
+What this means in practice:
+
+- **`denyx run --use-wasm <script>` from a fresh shell** pays the
+  cold-call cost every time — ~481 ms per invocation on top of the
+  3.7 ms the in-process runner takes. For interactive use this is
+  noticeably slower; for batch / scripted use it's negligible.
+
+- **`denyx-mcp --use-wasm` (long-lived server)** pays the
+  cold-call cost ONCE at startup. Every subsequent tool call costs
+  ~22 µs of wasm overhead — invisible next to the actual IO the
+  builtin performs.
+
+- **The runner choice does not change the IO bottleneck.** A
+  `fs.read` of a 10 KB file is ~10× more expensive than the runner
+  overhead on either path. A `net.http_post` is ~100× more
+  expensive. The wasm cold-call cost is the one place where the
+  runner choice actually shows up in wall-clock time.
+
+Optimisation paths if cold-call becomes a blocker:
+
+- `wasmtime::Module::serialize` produces an AOT-compiled `.cwasm`
+  loadable in single-digit milliseconds. Could be done at
+  `denyx-runtime-starlark` build time and shipped instead of (or
+  alongside) the raw `.wasm`. Not done yet.
+- `denyx run` could spawn a long-lived `denyx-mcp`-like helper and
+  reuse its WasmRunner across invocations. Same idea as a daemon.
+  Not done yet.
+
+Memory: wasmtime instances reserve a 4 GB linear memory address
+range per `Store`. On 64-bit Linux this is virtual, not resident;
+the resident set follows actual interpreter use (typically a few
+MB for the Starlark interpreter's working set).
 
 ### Audit log shape
 
@@ -205,8 +233,13 @@ outstanding:
    default before this would mean `cargo install denyx-cli` fails
    because the runtime-starlark dependency doesn't resolve.
 
-4. **No performance benchmarks.** Per-call overhead is estimated
-   architecturally; not measured.
+4. **Bench coverage is process-level only.** The cold-call /
+   amortized-per-call numbers in [Performance
+   characteristics](#performance-characteristics) come from
+   `scripts/bench-wasm-runner.py`. There is no `criterion` bench
+   covering the in-process steady-state per-call path on the
+   `denyx-mcp` side, and no measurement of fuel-budget headroom on
+   realistic scripts.
 
 5. **Fuel budget is hardcoded.** `DEFAULT_WASM_FUEL = 200_000_000`
    is in `crates/host/src/wasm_runner.rs`. Operators have no way
