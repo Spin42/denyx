@@ -89,12 +89,20 @@ breaking API changes between minor versions until they hit `1.0.0`.
   sensitive to LLM-emission shape. The deterministic exfil probe
   is the more informative parity signal — **10 REDACTED, 2
   WEAK_LEAK, 0 LEAK on both runners**, identical.
-- ~~No pentest re-run against the wasm path.~~ ✓ **Closed 2026-05-14
-  with Sonnet-4.6 driving `run_pentest.py --use-wasm`**: 23
-  attempts (DENIED=8, ERROR=8, REDACTED=6, WEAK_LEAK=1, **0 LEAK**),
-  9 of which were novel techniques not in the 12 hand-written
-  Round 1 probes. Cost $1.03, ~14 min wall. Sample-size caveat:
-  n=1 Sonnet run; Opus on the wasm path not yet executed.
+- ~~No pentest re-run against the wasm path.~~ ✓ **Closed
+  2026-05-15 on two models.**
+    - Sonnet 4.6 (`run_pentest.py --use-wasm`): 23 attempts
+      (DENIED=8, ERROR=8, REDACTED=6, WEAK_LEAK=1, **0 LEAK**),
+      9 novel. $1.03, ~14 min.
+    - Opus 4.7 (`run_pentest.py --use-wasm`): 20 attempts
+      (DENIED=1, ERROR=5, REDACTED=13, WEAK_LEAK=1, **0 LEAK,
+      0 DERIVED_LEAK**), 17 novel. $0.71 of $5 budget, ~3 min.
+  Honest decomposition: of Opus's 20 attempts, 14 were caught
+  by designed defenses (1 gate + 13 redactor) and 5 by the
+  Starlark parser rejecting Python idiom — accidental defense,
+  not Denyx's doing. The 1 WEAK_LEAK on each model is a numeric
+  side-channel (bigint concat / oracle), already documented as
+  out-of-scope for the redactor. n=1 per model, single seed.
 - No pentest re-run against the wasm path. Round 1 and Round 2 v3
   reports cover the in-process runner only.
 - CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
