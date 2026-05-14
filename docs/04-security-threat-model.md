@@ -27,6 +27,17 @@ to MCP-aware orchestrators. There is no plugin model and no dynamic
 policy: every effect goes through one of nine Rust functions, all in
 `crates/host/src/`.
 
+`denyx-host` ships with two interchangeable runners. The default
+in-process `Runner` evaluates Starlark via `starlark-rust` directly.
+The opt-in `WasmRunner` (`--use-wasm` on `denyx run` /
+`denyx-mcp`) loads the same `starlark-rust` interpreter compiled
+to `wasm32-wasip1` from `denyx-runtime-starlark` and runs it under
+`wasmtime`. The policy gate stays in Rust on the host side on both
+paths — every effecting call goes through the same `Policy::check_*`
+machinery. See [wasm-sandbox.md](wasm-sandbox.md) for the
+parity table and what the wasm path adds that the in-process runner
+cannot offer.
+
 ## What it defends against
 
 | Threat | How |
@@ -41,6 +52,8 @@ policy: every effect goes through one of nine Rust functions, all in
 | **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutations, line removals, and seq jumps. |
 | **MCP tool definition poisoning reaching the cloud orchestrator (local-executor deployment)** | In the `denyx-local-mcp` architecture the cloud orchestrator's MCP tool list contains only `delegate_to_local`, so other servers' tool descriptions cannot reach its context — **provided** the host is launched with `--strict-mcp-config` (or equivalent) and denyx-local-mcp is the only MCP server configured. This is a precondition on operator setup, not enforced by Denyx itself. The local executor model receives tool routing metadata only from the operator-controlled policy file. See [Round 2 pentest report](security-pentest-r2-tool-poisoning.md). |
 | **Reads of resources the policy doesn't mention** | Default-deny: `fs.read` of a path not in `read_allow` or `local_only_read` returns `PolicyError::PathDenied`; `env.read` of a name not in `allow_vars` or `local_only_vars` returns `PolicyError::EnvDenied`; `subprocess.exec` of a command not in `allow_commands` or `local_only_commands` returns `PolicyError::SubprocessDenied`. **Operator caveat:** a too-broad rooted glob in `read_allow` (e.g. `["**"]` or `["/tmp/**"]`) silently defeats the property. Narrow allow-lists are the operator's responsibility. |
+| **Pure-CPU runaway in the agent script** *(`--use-wasm` only)* | wasmtime fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`) traps `for _ in range(10**9): pass` within ~1 sec of CPU as `DenyxError::RuntimeLimit` (exit 6). The in-process runner has no equivalent — `[runtime].max_seconds` is wall-time, not instruction count, so it doesn't catch pure-CPU loops that finish before the deadline. This is a wasm-path-only addition. |
+| **Interpreter bugs reaching host memory** *(`--use-wasm` only)* | `starlark-rust` runs inside `wasmtime`'s linear-memory sandbox. A miscompilation or memory-safety bug in the interpreter stays inside the wasm boundary instead of corrupting the host. **Defence-in-depth, not a primary control** — the interpreter is a maintained dependency, not a known-hostile component. |
 
 ## What it does NOT defend against
 
@@ -199,5 +212,6 @@ files:
 | [security-audit.md](security-audit.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
 | [security-pentest-report.md](security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). Two High findings (base64, ROT-N), both remediated and closure-verified. Methodology + scope + residual risk. |
 | [06-policy-file.md](06-policy-file.md) | Policy file reference (operator-facing). |
+| [wasm-sandbox.md](wasm-sandbox.md) | What the `--use-wasm` runner adds, what it doesn't change, what's still open. |
 | [03-architecture.md](03-architecture.md) | How the runtime is structured (developer-facing). |
 | [examples/local_executor/run_exfil.py](../examples/local_executor/run_exfil.py) | The adversarial exfiltration probe — runs hand-written Starlark that *tries* to leak `local_only_var` values. Empirical version of the "what we don't defend against" list. |

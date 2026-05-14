@@ -13,6 +13,80 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in wasmtime sandbox for Starlark evaluation.** New
+  `--use-wasm` flag on `denyx run` and `denyx-mcp` routes evaluation
+  through a `wasm32-wasip1`-compiled `starlark-rust` interpreter
+  running inside `wasmtime`. The policy gate stays in Rust on the
+  host side — the wasm path is functionally equivalent to the
+  in-process runner on every security boundary documented in
+  `docs/04-security-threat-model.md`. **Not yet default.** Two
+  new crates underpin this: `denyx-interpreter` (NOT published —
+  source for the `.wasm` artefact) and `denyx-runtime-starlark`
+  (published — ships the pre-built `.wasm` as a `&[u8]`).
+- **Fuel-based preemption** *(`--use-wasm` only)*. wasmtime's
+  per-instruction fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`)
+  traps runaway pure-CPU loops within ~1 sec as
+  `DenyxError::RuntimeLimit` (exit code 6 — same as `max_seconds`
+  on the in-process runner). Closes the gap where
+  `for _ in range(10**9): pass` runs forever within
+  `[runtime].max_seconds` because wall-time deadlines don't catch
+  pure-CPU loops.
+- **`denyx_fs_read_range(path, offset, limit)` MCP tool + Starlark
+  builtin.** Bounded read at the IO layer via `File::seek` +
+  `Read::take(limit)`. Same `read_allow` gate as `fs.read`. For
+  surgical reads of large files, reduces both wire bytes (across
+  the MCP boundary) and disk-read cost.
+- **`denyx_fs_replace(path, old, new)` MCP tool.** Read-modify-write
+  with an exactly-one-match guard. Refuses if `old` occurs 0 or 2+
+  times in the file — ambiguous patches fail loudly instead of
+  applying silently. Goes through `fs.read` + `fs.write` gates;
+  **not atomic** under concurrent writes (same semantics as plain
+  `fs.write`).
+
+### Changed
+
+- `denyx-host` gains `wasmtime` and `wasmtime-wasi` as workspace
+  dependencies. The in-process `Runner` is unchanged; the new
+  `WasmRunner` lives alongside.
+- The Starlark interpreter's globals now include the same
+  `LibraryExtension` set on both paths (`Print, StructType,
+  NamespaceType, Json, Map, Filter, Debug`) — required for the
+  Wasm path's parity with the in-process runner.
+
+### Operator-facing notes
+
+- `--use-wasm` prints a one-line warning to stderr listing the
+  current deferral set. Audit log shape, exit codes, and error
+  messages are byte-identical to the in-process runner except
+  for `DenyxError::RuntimeLimit`'s reason string
+  (`"wasm fuel exhausted after N units"` vs `"wall-time deadline
+  exceeded"`).
+- The `Engine` and compiled `Module` are cached on each
+  `WasmRunner` instance; per-call wasmtime overhead is ~5ms
+  steady-state. The in-process runner is faster in absolute
+  terms (~1-2ms per call), but on real agent workloads the
+  underlying IO dominates either way.
+
+### Not yet validated (gates on promoting `--use-wasm` to default)
+
+- No multistep-eval rerun against the final wasm path. Last
+  measured run was 34/36 (after Phase 4.9 closed the taint-scrub
+  gap but before audit/confirm/outbound-taint/env-filter landed).
+  The two failing tasks at that point were predicted to pass
+  after the remaining work — prediction is empirically unverified.
+- No pentest re-run against the wasm path. Round 1 and Round 2 v3
+  reports cover the in-process runner only.
+- CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
+  before `cargo publish`. `cargo install denyx-cli` from
+  crates.io would not work until that lands.
+- Fuel budget is hardcoded; no `[runtime].max_wasm_fuel` policy
+  field yet.
+
+See [docs/wasm-sandbox.md](docs/wasm-sandbox.md) for the full
+parity table, threat-model differences, and open work.
+
 ## [0.3.0] — 2026-05-11
 
 ### Added

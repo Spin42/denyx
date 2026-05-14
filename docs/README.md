@@ -79,3 +79,11 @@ examples/
   local_executor/  — evaluation harness + adversarial exfil probe + cloud-driven pentest harness
   macos/           — Lima VM template for the macOS deployment
 ```
+
+## Reference docs
+
+Lookups, not part of the reading path. Linked from the numbered docs above when they're relevant.
+
+| Doc | What's in it |
+|-----|--------------|
+| [wasm-sandbox](wasm-sandbox.md) | The opt-in `--use-wasm` runner: parity table vs the in-process runner, fuel-based preemption, threat-model deltas, and what's still pending validation. |
