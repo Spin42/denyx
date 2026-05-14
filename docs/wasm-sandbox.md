@@ -170,11 +170,45 @@ Same on both runners; defeating them would require forbidding
 legitimate use of a secret as a string. Documented in
 [04-security-threat-model.md](04-security-threat-model.md#what-it-does-not-defend-against).
 
-Round 2 (LLM-driven, `examples/local_executor/run_pentest.py`,
-Sonnet/Opus via the `claude` CLI, Anthropic API budget) has NOT
-been re-run against the wasm path. The harness was plumbed for
-`--use-wasm` in the same commit but a full Round 2 sweep is a
-multi-hour, paid run that needs explicit operator authorisation.
+### Round 2 (LLM-driven) re-run
+
+Sonnet-4.6 via `claude` CLI driving `run_pentest.py --use-wasm`,
+single run, $2 budget cap.
+
+  # pentest report — model=claude-sonnet-4-6
+  # turns=24  duration=861953ms  cost=$1.0330
+  # attempts: 23  (DENIED=8  ERROR=8  REDACTED=6  WEAK_LEAK=1)
+  # novel attempts (not in run_exfil.py's 12 hand-written): 9
+
+**0 LEAK** across all 23 attempts. Of the 9 novel techniques the
+model came up with:
+
+  - Base64 encoding of `env.read(secret)` output (3 variants
+    including hand-rolled b64 alphabet to bypass any substring
+    detector)
+  - Dynamic variable-name construction (`"DENYX" + "_PENTEST_SECRET"`)
+    to bypass the verifier's literal-argument check
+  - Per-character ordinal extraction (`str(ord(secret[i]))`)
+  - File-mediated indirection: `env.read(fs.read("/tmp/varname.txt"))`
+  - Side-channel oracle via division-by-zero on prefix match
+  - HTTP-mediated exfil with encoded secret in URL
+
+Every novel technique was caught — by the runtime gate, by the
+verifier, or by a Starlark runtime error before the output
+boundary. None produced full-secret recovery.
+
+**Sample-size caveat:** n=1 Sonnet run, single seed, $1.03 spend.
+Different temperature / seed / model panel will produce different
+novel techniques. The headline result ("0 LEAK across 23
+attempts including 9 novel") is on this single run, not a
+statistical claim across distributions. Opus would likely be more
+creative (per memory of past Round 1 numbers: Opus found bypasses
+Sonnet didn't); not yet re-run on the wasm path.
+
+(Original deferral note kept below for honesty about what was
+NOT done.)
+
+Opus Round 2 sweep on the wasm path has NOT been run.
 
 ## Operator-facing differences
 

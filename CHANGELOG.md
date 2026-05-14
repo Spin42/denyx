@@ -80,12 +80,21 @@ breaking API changes between minor versions until they hit `1.0.0`.
 ### Not yet validated (gates on promoting `--use-wasm` to default)
 
 - ~~No multistep-eval rerun against the final wasm path.~~ ✓
-  **Closed 2026-05-14: 36/36** on `qwen2.5-coder:7b` after all
-  parity work landed (was 34/36 before the Phase 4.9 taint
-  scrubber + audit/confirm/outbound-taint/env-filter wrap-up).
-  Both `LOCAL_ONLY_*_redaction` tasks now redact correctly. 4
-  retries used, 4 rescued by retry — model-quality variance, not
-  gate regressions.
+  **Closed 2026-05-14.** Both runners reach 32-36/36 on
+  `qwen2.5-coder:7b` depending on whether the LLM emits literal-
+  argument shapes that the verifier catches statically (failing
+  the harness's success-with-redaction check) or variable-argument
+  shapes that flow through the runtime redactor. Both outcomes
+  are valid security behaviour; the harness's task definition is
+  sensitive to LLM-emission shape. The deterministic exfil probe
+  is the more informative parity signal — **10 REDACTED, 2
+  WEAK_LEAK, 0 LEAK on both runners**, identical.
+- ~~No pentest re-run against the wasm path.~~ ✓ **Closed 2026-05-14
+  with Sonnet-4.6 driving `run_pentest.py --use-wasm`**: 23
+  attempts (DENIED=8, ERROR=8, REDACTED=6, WEAK_LEAK=1, **0 LEAK**),
+  9 of which were novel techniques not in the 12 hand-written
+  Round 1 probes. Cost $1.03, ~14 min wall. Sample-size caveat:
+  n=1 Sonnet run; Opus on the wasm path not yet executed.
 - No pentest re-run against the wasm path. Round 1 and Round 2 v3
   reports cover the in-process runner only.
 - CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
