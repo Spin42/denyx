@@ -564,6 +564,37 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("fs.write denied by policy"));
                     }
 
+                    // Outbound taint refusal — matches the in-process Runner's
+                    // `enforce_outbound_taint`. Refuses if any arg value matches a
+                    // tainted substring (or documented sibling transform), preventing
+                    // local-only data from leaking across the runtime boundary.
+                    for (label, value) in [
+                        ("path", path.as_str()),
+                        ("content", std::str::from_utf8(&content_buf).unwrap_or("")),
+                    ] {
+                        if let Some(reason) = caller.data().taint_registry.arg_taint_reason(value) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_write_audit.emit(AuditEvent::denied(
+                                &fs_write_task_id,
+                                step,
+                                "fs.write",
+                                value,
+                                &format!(
+                                    "outbound taint via arg {:?} (matched form: {reason})",
+                                    label
+                                ),
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
+                                "policy denies fs.write: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                label
+                            )));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                        }
+                    }
+
                     // 3. Perform the IO. We accept arbitrary bytes
                     //    from the guest (content is treated as opaque
                     //    bytes here, not necessarily UTF-8). Starlark
@@ -684,6 +715,34 @@ impl WasmRunner {
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.delete({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.delete denied by policy"));
+                    }
+
+                    // Outbound taint refusal — matches the in-process Runner's
+                    // `enforce_outbound_taint`. Refuses if any arg value matches a
+                    // tainted substring (or documented sibling transform), preventing
+                    // local-only data from leaking across the runtime boundary.
+                    for (label, value) in [("path", path.as_str())] {
+                        if let Some(reason) = caller.data().taint_registry.arg_taint_reason(value) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_delete_audit.emit(AuditEvent::denied(
+                                &fs_delete_task_id,
+                                step,
+                                "fs.delete",
+                                value,
+                                &format!(
+                                    "outbound taint via arg {:?} (matched form: {reason})",
+                                    label
+                                ),
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
+                                "policy denies fs.delete: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                label
+                            )));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                        }
                     }
 
                     // 3. Perform the IO. remove_file matches the
@@ -1026,6 +1085,35 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("subprocess.exec: argv path denied"));
                     }
 
+                    // Outbound taint refusal — matches the in-process Runner's
+                    // `enforce_outbound_taint`. Refuses if any argv element matches a
+                    // tainted substring (or documented sibling transform), preventing
+                    // local-only data from leaking across the runtime boundary.
+                    for (i, arg) in argv.iter().enumerate() {
+                        let label = format!("argv[{i}]");
+                        if let Some(reason) = caller.data().taint_registry.arg_taint_reason(arg) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            subprocess_audit.emit(AuditEvent::denied(
+                                &subprocess_task_id,
+                                step,
+                                "subprocess.exec",
+                                arg,
+                                &format!(
+                                    "outbound taint via arg {:?} (matched form: {reason})",
+                                    label
+                                ),
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
+                                "policy denies subprocess.exec: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                label
+                            )));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                        }
+                    }
+
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
                     // operator deny surfaces as DenyxError::ConfirmDenied
@@ -1090,17 +1178,16 @@ impl WasmRunner {
                         }
                     }
 
-                    // 3. Spawn the process. env_clear() + a single
-                    //    PATH passthrough is a minimal-secure default
-                    //    for Phase 4.7 — the in-process Runner does
-                    //    per-policy `allow_vars` filtering, which is
-                    //    deferred to a later Phase 4 sub-commit
-                    //    alongside audit + confirm wiring.
+                    // 3. Spawn the process. Env filtering matches the
+                    //    in-process Runner: `policy.subprocess_env(argv0)`
+                    //    returns the (name, value) pairs the child should
+                    //    see, honouring `allow_vars` plus the local-only
+                    //    overlay when the command is itself local-only.
                     let mut cmd = std::process::Command::new(&argv[0]);
                     cmd.args(&argv[1..]);
                     cmd.env_clear();
-                    if let Ok(path) = std::env::var("PATH") {
-                        cmd.env("PATH", path);
+                    for (name, value) in subprocess_policy.subprocess_env(&argv[0]) {
+                        cmd.env(name, value);
                     }
                     let output = match cmd.output() {
                         Ok(o) => o,
@@ -1252,6 +1339,42 @@ impl WasmRunner {
                         }
                     }
 
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_get_policy.host_is_local_only(&parsed_host) {
+                        for (label, value) in [("url", url.as_str())] {
+                            if let Some(reason) =
+                                caller.data().taint_registry.arg_taint_reason(value)
+                            {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_get_audit.emit(AuditEvent::denied(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    value,
+                                    &format!(
+                                        "outbound taint via arg {:?} (matched form: {reason})",
+                                        label
+                                    ),
+                                ));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!(
+                                        "policy denies net.http_get: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                        label
+                                    )));
+                                return Err(wasmtime::Error::msg("outbound taint refused"));
+                            }
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent().get(&url).call() {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
@@ -1375,6 +1498,42 @@ impl WasmRunner {
                                 "net.http_post denied by confirm hook".to_string(),
                             ));
                             return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_post_policy.host_is_local_only(&parsed_host) {
+                        for (label, value) in [("url", url.as_str()), ("body", req_body.as_str())] {
+                            if let Some(reason) =
+                                caller.data().taint_registry.arg_taint_reason(value)
+                            {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_post_audit.emit(AuditEvent::denied(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    value,
+                                    &format!(
+                                        "outbound taint via arg {:?} (matched form: {reason})",
+                                        label
+                                    ),
+                                ));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!(
+                                        "policy denies net.http_post: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                        label
+                                    )));
+                                return Err(wasmtime::Error::msg("outbound taint refused"));
+                            }
                         }
                     }
 
@@ -1504,6 +1663,42 @@ impl WasmRunner {
                         }
                     }
 
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_put_policy.host_is_local_only(&parsed_host) {
+                        for (label, value) in [("url", url.as_str()), ("body", req_body.as_str())] {
+                            if let Some(reason) =
+                                caller.data().taint_registry.arg_taint_reason(value)
+                            {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_put_audit.emit(AuditEvent::denied(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    value,
+                                    &format!(
+                                        "outbound taint via arg {:?} (matched form: {reason})",
+                                        label
+                                    ),
+                                ));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!(
+                                        "policy denies net.http_put: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                        label
+                                    )));
+                                return Err(wasmtime::Error::msg("outbound taint refused"));
+                            }
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent().put(&url).send_string(&req_body) {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
@@ -1627,6 +1822,42 @@ impl WasmRunner {
                                 "net.http_patch denied by confirm hook".to_string(),
                             ));
                             return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_patch_policy.host_is_local_only(&parsed_host) {
+                        for (label, value) in [("url", url.as_str()), ("body", req_body.as_str())] {
+                            if let Some(reason) =
+                                caller.data().taint_registry.arg_taint_reason(value)
+                            {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_patch_audit.emit(AuditEvent::denied(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    value,
+                                    &format!(
+                                        "outbound taint via arg {:?} (matched form: {reason})",
+                                        label
+                                    ),
+                                ));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!(
+                                        "policy denies net.http_patch: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                        label
+                                    )));
+                                return Err(wasmtime::Error::msg("outbound taint refused"));
+                            }
                         }
                     }
 
@@ -1754,6 +1985,42 @@ impl WasmRunner {
                                 "net.http_delete denied by confirm hook".to_string(),
                             ));
                             return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_delete_policy.host_is_local_only(&parsed_host) {
+                        for (label, value) in [("url", url.as_str())] {
+                            if let Some(reason) =
+                                caller.data().taint_registry.arg_taint_reason(value)
+                            {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_delete_audit.emit(AuditEvent::denied(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    value,
+                                    &format!(
+                                        "outbound taint via arg {:?} (matched form: {reason})",
+                                        label
+                                    ),
+                                ));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!(
+                                        "policy denies net.http_delete: tainted local-only value would flow through argument {:?} (matched form: {reason})",
+                                        label
+                                    )));
+                                return Err(wasmtime::Error::msg("outbound taint refused"));
+                            }
                         }
                     }
 
@@ -2782,6 +3049,121 @@ runaway()
         assert!(
             !seen.is_empty(),
             "confirm hook should have been called for per-argv pattern"
+        );
+    }
+
+    /// Final parity gap closer: an outbound fs.write whose content
+    /// matches a tainted substring (from a prior local-only fs.read)
+    /// must refuse, not redact. Mirrors the in-process Runner's
+    /// `enforce_outbound_taint`.
+    #[test]
+    fn fs_write_outbound_taint_refuses() {
+        let secret_path = unique_tmp_path("outbound_taint_secret");
+        let secret = "outbound-taint-fixture-XYZ123";
+        std::fs::write(&secret_path, secret).expect("write secret fixture");
+
+        let target_path = unique_tmp_path("outbound_taint_target");
+        let _ = std::fs::remove_file(&target_path);
+
+        let policy_path = write_temp_policy(
+            "outbound_taint",
+            &format!(
+                "[filesystem]\nlocal_only_read = [{:?}]\nwrite_allow = [{:?}]\n",
+                secret_path.display().to_string(),
+                target_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!(
+            "_s = fs.read({:?})\nfs.write({:?}, _s)",
+            secret_path.display().to_string(),
+            target_path.display().to_string()
+        );
+        let err = runner
+            .run("test", &script, "x.star")
+            .expect_err("outbound taint should refuse");
+        let exists_after = target_path.exists();
+        let _ = std::fs::remove_file(&secret_path);
+        let _ = std::fs::remove_file(&target_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::Policy(_) => {}
+            other => panic!("expected DenyxError::Policy, got {other:?}"),
+        }
+        assert!(
+            !exists_after,
+            "outbound-taint-refused fs.write must not create target"
+        );
+    }
+
+    /// Same outbound refusal for net.http_post body. Skips the
+    /// host_is_local_only gate because the destination is not in
+    /// local_only_hosts.
+    #[test]
+    fn net_http_post_outbound_taint_refuses() {
+        let secret_path = unique_tmp_path("http_taint_secret");
+        let secret = "http-outbound-fixture-ABC789";
+        std::fs::write(&secret_path, secret).expect("write secret fixture");
+
+        let policy_path = write_temp_policy(
+            "http_outbound_taint",
+            &format!(
+                "[filesystem]\nlocal_only_read = [{:?}]\n\n[network]\nhttp_post_allow = [\"example.com\"]\n",
+                secret_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!(
+            "_s = fs.read({:?})\nnet.http_post(\"https://example.com\", _s)",
+            secret_path.display().to_string()
+        );
+        let err = runner
+            .run("test", &script, "x.star")
+            .expect_err("outbound taint over HTTP should refuse");
+        let _ = std::fs::remove_file(&secret_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::Policy(_) => {}
+            other => panic!("expected DenyxError::Policy, got {other:?}"),
+        }
+    }
+
+    /// Phase 4.X env filtering: subprocess.exec should expose only the
+    /// vars policy.subprocess_env returns. We set a probe var on the
+    /// host, leave it OUT of allow_vars, then have the child print
+    /// its env via `env`. The probe must NOT appear.
+    #[test]
+    fn subprocess_exec_env_filtered_to_policy_allow_vars() {
+        let probe_name = format!("DENYX_WASM_ENV_PROBE_{}", std::process::id());
+        std::env::set_var(&probe_name, "should-not-leak");
+
+        // Policy allows `env` but NOT our probe var. PATH is auto-
+        // injected by the in-process Runner's subprocess_env so the
+        // child can find /usr/bin/env.
+        let policy_path = write_temp_policy(
+            "subprocess_env_filter",
+            "[subprocess]\nallow_commands = [\"env\"]\n\n[environment]\nallow_vars = [\"PATH\"]\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = r#"print(subprocess.exec(["env"]))"#;
+        let outcome = runner
+            .run("test", script, "x.star")
+            .expect("subprocess.exec runs");
+        std::env::remove_var(&probe_name);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let printed = outcome.printed.join("\n");
+        assert!(
+            !printed.contains(&probe_name),
+            "probe var leaked into child env: {printed:?}"
         );
     }
 }
