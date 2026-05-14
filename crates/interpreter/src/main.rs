@@ -11,6 +11,9 @@
 //   stdin:  JSON `Request` (script source + metadata)
 //   stdout: JSON `Response` (verdict + result)
 //   imports: `denyx::host_*` Wasm functions, hand-wired by the host
+//   exports: `denyx_alloc` / `denyx_dealloc` — the host uses these to
+//            return byte-buffers (string payloads from gated builtins
+//            like `fs.read`) back into the interpreter's linear memory.
 //
 // The native target builds a stub that prints a usage hint and exits
 // non-zero, so `cargo build --workspace` keeps working on a regular host.
@@ -169,4 +172,66 @@ impl starlark::PrintHandler for HostPrintHandler {
         }
         Ok(())
     }
+}
+
+// ── Allocator exports the host calls ───────────────────────────────────
+//
+// Phase 4.2 — the host uses these to return byte-buffers across the
+// import boundary. Convention:
+//
+//   1. Host has a string `s` to give back (e.g. `fs.read` result).
+//   2. Host calls guest's `denyx_alloc(s.len() as u32)` and receives
+//      a pointer into the guest's linear memory.
+//   3. Host writes `s.as_bytes()` to that pointer (via wasmtime's
+//      `Memory::write`).
+//   4. Host returns the (ptr, len) pair as the import's multi-value
+//      result (or via a known out-pointer convention, TBD per import).
+//   5. Guest reads UTF-8 from (ptr, len), takes ownership, and frees
+//      via `denyx_dealloc(ptr, len)`.
+//
+// The implementation leaks a `Vec<u8>` of the requested capacity. The
+// guest is responsible for the matching `denyx_dealloc` to reclaim
+// the storage. Mismatched calls leak the buffer permanently — same
+// invariant the wasm-bindgen ABI relies on.
+
+/// Allocate a `len`-byte buffer in the interpreter's linear memory
+/// and return the pointer.
+///
+/// Returns `0` if `len == 0` (no allocation needed; reading 0 bytes
+/// at any pointer is a no-op).
+///
+/// # Safety
+///
+/// Caller must pair every successful `denyx_alloc(len)` with exactly
+/// one `denyx_dealloc(ptr, len)`. Leaked buffers stay until the
+/// instance is dropped.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn denyx_alloc(len: u32) -> u32 {
+    if len == 0 {
+        return 0;
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(len as usize);
+    let ptr = buf.as_mut_ptr() as u32;
+    std::mem::forget(buf);
+    ptr
+}
+
+/// Free a buffer previously returned by `denyx_alloc`.
+///
+/// `len` must match the `len` passed to the original `denyx_alloc`
+/// call. Mismatch is undefined behaviour (Vec::from_raw_parts
+/// invariant).
+///
+/// # Safety
+///
+/// `ptr` must be a pointer returned by a prior `denyx_alloc(len)`
+/// call on this instance, and not yet freed.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe extern "C" fn denyx_dealloc(ptr: u32, len: u32) {
+    if len == 0 {
+        return;
+    }
+    let _ = Vec::from_raw_parts(ptr as *mut u8, 0, len as usize);
 }

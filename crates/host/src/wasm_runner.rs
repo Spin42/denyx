@@ -15,8 +15,11 @@
 //!
 //! - stdin:  `{"task_id": "...", "source_path": "...", "source": "..."}`
 //! - stdout: `{"status": "ok"|"error", "result": "...", "error": {...}}`
-//! - imports under module `"denyx"`: `host_print` (Phase 4.1), the rest
+//! - imports under module `"denyx"`: `host_print` (Phase 4.1); the rest
 //!   wired one capability at a time in subsequent Phase 4 commits.
+//! - exports: `denyx_alloc(len)` / `denyx_dealloc(ptr, len)` — the host
+//!   calls these to return byte-buffer payloads (string results from
+//!   gated builtins) back into the interpreter's linear memory.
 //!
 //! ## What this commit does (and does NOT do)
 //!
@@ -274,5 +277,25 @@ mod tests {
             DenyxError::Starlark(_) => {}
             other => panic!("expected DenyxError::Starlark, got {other:?}"),
         }
+    }
+
+    /// Phase 4.2 structural check: the interpreter exposes the
+    /// `denyx_alloc` / `denyx_dealloc` export pair that Phase 4.3+
+    /// will use to return string payloads from gated builtins. This
+    /// test just asserts the exports are present; their callers come
+    /// online in subsequent Phase 4 sub-commits.
+    #[test]
+    fn interpreter_exports_allocator() {
+        let engine = Engine::new(&Config::new()).expect("wasmtime engine");
+        let module = Module::new(&engine, STARLARK_INTERPRETER_WASM).expect("wasm module loads");
+        let names: Vec<&str> = module.exports().map(|e| e.name()).collect();
+        assert!(
+            names.contains(&"denyx_alloc"),
+            "denyx_alloc missing from interpreter exports: {names:?}"
+        );
+        assert!(
+            names.contains(&"denyx_dealloc"),
+            "denyx_dealloc missing from interpreter exports: {names:?}"
+        );
     }
 }
