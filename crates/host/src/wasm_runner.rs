@@ -53,7 +53,9 @@ use denyx_policy::Policy;
 use denyx_runtime_starlark::STARLARK_INTERPRETER_WASM;
 
 use crate::taint::{redact_lines, TaintRegistry};
-use crate::{AuditSink, ConfirmHook, DenyAllConfirm, DenyxError, NullAuditSink, RunOutcome};
+use crate::{
+    AuditEvent, AuditSink, ConfirmHook, DenyAllConfirm, DenyxError, NullAuditSink, RunOutcome,
+};
 
 /// Default Wasm fuel budget per `WasmRunner::run` call. Each Wasm
 /// instruction the guest executes consumes one unit of fuel; running
@@ -144,6 +146,7 @@ impl WasmRunner {
             wasi,
             printed: Vec::new(),
             captured_error: None,
+            step_counter: std::sync::atomic::AtomicU32::new(0),
             taint_registry: TaintRegistry::default(),
         };
         let mut store = Store::new(&engine, state);
@@ -183,6 +186,8 @@ impl WasmRunner {
 
         // ── host_fs_read (Phase 4.3) ──────────────────────────────
         let fs_read_policy = self.policy.clone();
+        let fs_read_audit = self.audit.clone();
+        let fs_read_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -214,6 +219,17 @@ impl WasmRunner {
                     // 2. Gate through policy.
                     let path_obj = std::path::Path::new(&path);
                     if let Err(e) = fs_read_policy.check_fs_read(path_obj) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        fs_read_audit.emit(AuditEvent::denied(
+                            &fs_read_task_id,
+                            step,
+                            "fs.read",
+                            &path,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.read denied by policy"));
@@ -223,10 +239,34 @@ impl WasmRunner {
                     let content = match std::fs::read_to_string(path_obj) {
                         Ok(c) => c,
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_read_audit.emit(AuditEvent::fs(
+                                &fs_read_task_id,
+                                step,
+                                "fs.read",
+                                path_obj,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error = Some(DenyxError::Io(e));
                             return Err(wasmtime::Error::msg("fs.read: io error"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    fs_read_audit.emit(AuditEvent::fs(
+                        &fs_read_task_id,
+                        step,
+                        "fs.read",
+                        path_obj,
+                        true,
+                        None,
+                    ));
 
                     // 3b. Register content as tainted if the path is
                     //     declared local-only — its bytes must not
@@ -275,6 +315,8 @@ impl WasmRunner {
 
         // ── host_fs_write (Phase 4.4) ─────────────────────────────
         let fs_write_policy = self.policy.clone();
+        let fs_write_audit = self.audit.clone();
+        let fs_write_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -314,6 +356,17 @@ impl WasmRunner {
                     // 2. Gate through policy.
                     let path_obj = std::path::Path::new(&path);
                     if let Err(e) = fs_write_policy.check_fs_write(path_obj) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        fs_write_audit.emit(AuditEvent::denied(
+                            &fs_write_task_id,
+                            step,
+                            "fs.write",
+                            &path,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.write({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.write denied by policy"));
@@ -327,9 +380,33 @@ impl WasmRunner {
                     //    impose a tighter contract than the wire
                     //    protocol demands.
                     if let Err(e) = std::fs::write(path_obj, &content_buf) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        fs_write_audit.emit(AuditEvent::fs(
+                            &fs_write_task_id,
+                            step,
+                            "fs.write",
+                            path_obj,
+                            false,
+                            Some(format!("io: {e}")),
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Io(e));
                         return Err(wasmtime::Error::msg("fs.write: io error"));
                     }
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    fs_write_audit.emit(AuditEvent::fs(
+                        &fs_write_task_id,
+                        step,
+                        "fs.write",
+                        path_obj,
+                        true,
+                        None,
+                    ));
 
                     Ok(())
                 },
@@ -338,6 +415,8 @@ impl WasmRunner {
 
         // ── host_fs_delete (Phase 4.5) ────────────────────────────
         let fs_delete_policy = self.policy.clone();
+        let fs_delete_audit = self.audit.clone();
+        let fs_delete_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -369,6 +448,17 @@ impl WasmRunner {
                     // 2. Gate through policy.
                     let path_obj = std::path::Path::new(&path);
                     if let Err(e) = fs_delete_policy.check_fs_delete(path_obj) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        fs_delete_audit.emit(AuditEvent::denied(
+                            &fs_delete_task_id,
+                            step,
+                            "fs.delete",
+                            &path,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.delete({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.delete denied by policy"));
@@ -379,9 +469,33 @@ impl WasmRunner {
                     //    file-targeted, not recursive directory
                     //    removal.
                     if let Err(e) = std::fs::remove_file(path_obj) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        fs_delete_audit.emit(AuditEvent::fs(
+                            &fs_delete_task_id,
+                            step,
+                            "fs.delete",
+                            path_obj,
+                            false,
+                            Some(format!("io: {e}")),
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Io(e));
                         return Err(wasmtime::Error::msg("fs.delete: io error"));
                     }
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    fs_delete_audit.emit(AuditEvent::fs(
+                        &fs_delete_task_id,
+                        step,
+                        "fs.delete",
+                        path_obj,
+                        true,
+                        None,
+                    ));
 
                     Ok(())
                 },
@@ -390,6 +504,8 @@ impl WasmRunner {
 
         // ── host_env_read (Phase 4.6) ─────────────────────────────
         let env_read_policy = self.policy.clone();
+        let env_read_audit = self.audit.clone();
+        let env_read_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -420,6 +536,17 @@ impl WasmRunner {
 
                     // 2. Gate through policy.
                     if let Err(e) = env_read_policy.check_env_read(&name) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        env_read_audit.emit(AuditEvent::denied(
+                            &env_read_task_id,
+                            step,
+                            "env.read",
+                            &name,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("env.read({name:?}): {e}")));
                         return Err(wasmtime::Error::msg("env.read denied by policy"));
@@ -432,11 +559,33 @@ impl WasmRunner {
                     let value = match std::env::var(&name) {
                         Ok(v) => v,
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            env_read_audit.emit(AuditEvent::env(
+                                &env_read_task_id,
+                                step,
+                                &name,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("env.read({name:?}): {e}")));
                             return Err(wasmtime::Error::msg("env.read: lookup error"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    env_read_audit.emit(AuditEvent::env(
+                        &env_read_task_id,
+                        step,
+                        &name,
+                        true,
+                        None,
+                    ));
 
                     // Register tainted value if the var is declared
                     // local-only.
@@ -477,6 +626,8 @@ impl WasmRunner {
 
         // ── host_subprocess_exec (Phase 4.7) ──────────────────────
         let subprocess_policy = self.policy.clone();
+        let subprocess_audit = self.audit.clone();
+        let subprocess_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -513,6 +664,17 @@ impl WasmRunner {
                         }
                     };
                     if argv.is_empty() {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        subprocess_audit.emit(AuditEvent::denied(
+                            &subprocess_task_id,
+                            step,
+                            "subprocess.exec",
+                            "",
+                            "empty argv",
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Policy(
                             "subprocess.exec: empty argv".to_string(),
                         ));
@@ -525,6 +687,18 @@ impl WasmRunner {
                     //    resolution (catches `bash -c '/etc/passwd'`
                     //    style smuggling of unreachable paths).
                     if let Err(e) = subprocess_policy.check_subprocess_command(&argv[0]) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        subprocess_audit.emit(AuditEvent::subprocess(
+                            &subprocess_task_id,
+                            step,
+                            &argv,
+                            None,
+                            false,
+                            Some(format!("policy: {e}")),
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
                             "subprocess.exec({:?}): {e}",
                             argv[0]
@@ -532,6 +706,18 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("subprocess.exec: command denied"));
                     }
                     if let Err(e) = subprocess_policy.check_subprocess_args(&argv) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        subprocess_audit.emit(AuditEvent::subprocess(
+                            &subprocess_task_id,
+                            step,
+                            &argv,
+                            None,
+                            false,
+                            Some(format!("policy: {e}")),
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
                             "subprocess.exec({:?}): {e}",
                             argv
@@ -539,6 +725,18 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("subprocess.exec: args denied"));
                     }
                     if let Err(e) = subprocess_policy.check_subprocess_argv_paths(&argv) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        subprocess_audit.emit(AuditEvent::subprocess(
+                            &subprocess_task_id,
+                            step,
+                            &argv,
+                            None,
+                            false,
+                            Some(format!("policy: {e}")),
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
                             "subprocess.exec({:?}): {e}",
                             argv
@@ -561,6 +759,18 @@ impl WasmRunner {
                     let output = match cmd.output() {
                         Ok(o) => o,
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            subprocess_audit.emit(AuditEvent::subprocess(
+                                &subprocess_task_id,
+                                step,
+                                &argv,
+                                None,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error = Some(DenyxError::Io(e));
                             return Err(wasmtime::Error::msg("subprocess.exec: spawn / io error"));
                         }
@@ -572,12 +782,36 @@ impl WasmRunner {
                             .map(|c| c.to_string())
                             .unwrap_or_else(|| "(signalled)".to_string());
                         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        subprocess_audit.emit(AuditEvent::subprocess(
+                            &subprocess_task_id,
+                            step,
+                            &argv,
+                            output.status.code(),
+                            false,
+                            Some(format!("exit {code}: {stderr}")),
+                        ));
                         caller.data_mut().captured_error = Some(DenyxError::Other(format!(
                             "subprocess.exec({:?}) exited {code}: {stderr}",
                             argv
                         )));
                         return Err(wasmtime::Error::msg("subprocess.exec: non-zero exit"));
                     }
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    subprocess_audit.emit(AuditEvent::subprocess(
+                        &subprocess_task_id,
+                        step,
+                        &argv,
+                        output.status.code(),
+                        true,
+                        None,
+                    ));
 
                     if subprocess_policy.subprocess_is_local_only(&argv[0]) {
                         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -615,6 +849,8 @@ impl WasmRunner {
 
         // ── host_net_http_get (Phase 4.8) ─────────────────────────
         let http_get_policy = self.policy.clone();
+        let http_get_audit = self.audit.clone();
+        let http_get_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -625,6 +861,17 @@ impl WasmRunner {
                       -> Result<u64, wasmtime::Error> {
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     if let Err(e) = http_get_policy.check_http_get(&url) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        http_get_audit.emit(AuditEvent::denied(
+                            &http_get_task_id,
+                            step,
+                            "net.http_get",
+                            &url,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_get denied"));
@@ -633,17 +880,53 @@ impl WasmRunner {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_get_audit.emit(AuditEvent::http(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ));
                                 caller.data_mut().captured_error =
                                     Some(DenyxError::Other(format!("net.http_get({url:?}): {e}")));
                                 return Err(wasmtime::Error::msg("net.http_get: finalize"));
                             }
                         },
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_get_audit.emit(AuditEvent::http(
+                                &http_get_task_id,
+                                step,
+                                "net.http_get",
+                                &url,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_get({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_get: request failed"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    http_get_audit.emit(AuditEvent::http(
+                        &http_get_task_id,
+                        step,
+                        "net.http_get",
+                        &url,
+                        true,
+                        None,
+                    ));
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -659,6 +942,8 @@ impl WasmRunner {
 
         // ── host_net_http_post (Phase 4.8) ────────────────────────
         let http_post_policy = self.policy.clone();
+        let http_post_audit = self.audit.clone();
+        let http_post_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -672,6 +957,17 @@ impl WasmRunner {
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     if let Err(e) = http_post_policy.check_http_post(&url) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        http_post_audit.emit(AuditEvent::denied(
+                            &http_post_task_id,
+                            step,
+                            "net.http_post",
+                            &url,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_post denied"));
@@ -680,17 +976,53 @@ impl WasmRunner {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_post_audit.emit(AuditEvent::http(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ));
                                 caller.data_mut().captured_error =
                                     Some(DenyxError::Other(format!("net.http_post({url:?}): {e}")));
                                 return Err(wasmtime::Error::msg("net.http_post: finalize"));
                             }
                         },
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_post_audit.emit(AuditEvent::http(
+                                &http_post_task_id,
+                                step,
+                                "net.http_post",
+                                &url,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_post({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_post: request failed"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    http_post_audit.emit(AuditEvent::http(
+                        &http_post_task_id,
+                        step,
+                        "net.http_post",
+                        &url,
+                        true,
+                        None,
+                    ));
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -706,6 +1038,8 @@ impl WasmRunner {
 
         // ── host_net_http_put (Phase 4.8) ─────────────────────────
         let http_put_policy = self.policy.clone();
+        let http_put_audit = self.audit.clone();
+        let http_put_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -719,6 +1053,17 @@ impl WasmRunner {
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     if let Err(e) = http_put_policy.check_http_put(&url) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        http_put_audit.emit(AuditEvent::denied(
+                            &http_put_task_id,
+                            step,
+                            "net.http_put",
+                            &url,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_put denied"));
@@ -727,17 +1072,53 @@ impl WasmRunner {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_put_audit.emit(AuditEvent::http(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ));
                                 caller.data_mut().captured_error =
                                     Some(DenyxError::Other(format!("net.http_put({url:?}): {e}")));
                                 return Err(wasmtime::Error::msg("net.http_put: finalize"));
                             }
                         },
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_put_audit.emit(AuditEvent::http(
+                                &http_put_task_id,
+                                step,
+                                "net.http_put",
+                                &url,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_put({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_put: request failed"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    http_put_audit.emit(AuditEvent::http(
+                        &http_put_task_id,
+                        step,
+                        "net.http_put",
+                        &url,
+                        true,
+                        None,
+                    ));
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -753,6 +1134,8 @@ impl WasmRunner {
 
         // ── host_net_http_patch (Phase 4.8) ───────────────────────
         let http_patch_policy = self.policy.clone();
+        let http_patch_audit = self.audit.clone();
+        let http_patch_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -766,6 +1149,17 @@ impl WasmRunner {
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     if let Err(e) = http_patch_policy.check_http_patch(&url) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        http_patch_audit.emit(AuditEvent::denied(
+                            &http_patch_task_id,
+                            step,
+                            "net.http_patch",
+                            &url,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_patch denied"));
@@ -777,6 +1171,18 @@ impl WasmRunner {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_patch_audit.emit(AuditEvent::http(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ));
                                 caller.data_mut().captured_error = Some(DenyxError::Other(
                                     format!("net.http_patch({url:?}): {e}"),
                                 ));
@@ -784,11 +1190,35 @@ impl WasmRunner {
                             }
                         },
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_patch_audit.emit(AuditEvent::http(
+                                &http_patch_task_id,
+                                step,
+                                "net.http_patch",
+                                &url,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_patch({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_patch: request failed"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    http_patch_audit.emit(AuditEvent::http(
+                        &http_patch_task_id,
+                        step,
+                        "net.http_patch",
+                        &url,
+                        true,
+                        None,
+                    ));
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -804,6 +1234,8 @@ impl WasmRunner {
 
         // ── host_net_http_delete (Phase 4.8) ──────────────────────
         let http_delete_policy = self.policy.clone();
+        let http_delete_audit = self.audit.clone();
+        let http_delete_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
@@ -814,6 +1246,17 @@ impl WasmRunner {
                       -> Result<u64, wasmtime::Error> {
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     if let Err(e) = http_delete_policy.check_http_delete(&url) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        http_delete_audit.emit(AuditEvent::denied(
+                            &http_delete_task_id,
+                            step,
+                            "net.http_delete",
+                            &url,
+                            &format!("{e}"),
+                        ));
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_delete denied"));
@@ -822,6 +1265,18 @@ impl WasmRunner {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                http_delete_audit.emit(AuditEvent::http(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ));
                                 caller.data_mut().captured_error = Some(DenyxError::Other(
                                     format!("net.http_delete({url:?}): {e}"),
                                 ));
@@ -829,11 +1284,35 @@ impl WasmRunner {
                             }
                         },
                         Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_delete_audit.emit(AuditEvent::http(
+                                &http_delete_task_id,
+                                step,
+                                "net.http_delete",
+                                &url,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_delete({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_delete: request failed"));
                         }
                     };
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    http_delete_audit.emit(AuditEvent::http(
+                        &http_delete_task_id,
+                        step,
+                        "net.http_delete",
+                        &url,
+                        true,
+                        None,
+                    ));
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -987,6 +1466,10 @@ struct WasmState {
     wasi: WasiP1Ctx,
     printed: Vec<String>,
     captured_error: Option<DenyxError>,
+    /// Monotonically incrementing step counter stamped into each
+    /// `AuditEvent`. The in-process Runner does the same — every
+    /// gated call gets a unique sequence number per Run.
+    step_counter: std::sync::atomic::AtomicU32,
     /// Tracks values read from local-only fs paths, env vars, hosts,
     /// or subprocess output. Scrubbed at the output boundary (the
     /// printed-lines Vec, in `WasmRunner::run`'s success path) so
@@ -1558,5 +2041,127 @@ runaway()
             DenyxError::RuntimeLimit(_) => {}
             other => panic!("expected DenyxError::RuntimeLimit, got {other:?}"),
         }
+    }
+
+    /// AuditSink that captures every emitted event into a Vec, for
+    /// assertion in audit-wiring tests. Mutex-guarded so the sink
+    /// satisfies the AuditSink: Send + Sync bound.
+    #[derive(Default)]
+    struct RecordingAuditSink {
+        events: std::sync::Mutex<Vec<AuditEvent>>,
+    }
+
+    impl AuditSink for RecordingAuditSink {
+        fn emit(&self, event: AuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    /// Phase 4.10 — successful fs.read emits an `Allowed` audit event
+    /// with the right capability and a populated detail.
+    #[test]
+    fn fs_read_success_emits_audit_event() {
+        use crate::audit::AuditStatus;
+        let file_path = unique_tmp_path("fs_read_audit_ok");
+        std::fs::write(&file_path, "audit-ok").expect("write fixture");
+        let policy_path = write_temp_policy(
+            "fs_read_audit_ok",
+            &format!(
+                "[filesystem]\nread_allow = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let sink = std::sync::Arc::new(RecordingAuditSink::default());
+        let runner = WasmRunner::new(policy).with_audit(sink.clone());
+
+        let script = format!("fs.read({:?})", file_path.display().to_string());
+        runner.run("t-audit-ok", &script, "x.star").expect("runs");
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let events = sink.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| {
+                e.capability == "fs.read"
+                    && matches!(e.status, AuditStatus::Allowed)
+                    && e.task_id == "t-audit-ok"
+            }),
+            "expected an Allowed fs.read event, got {events:?}"
+        );
+    }
+
+    /// Phase 4.10 — policy-denied fs.read emits a `Denied` audit
+    /// event capturing the reason.
+    #[test]
+    fn fs_read_denied_emits_audit_event() {
+        use crate::audit::AuditStatus;
+        let file_path = unique_tmp_path("fs_read_audit_deny");
+        std::fs::write(&file_path, "audit-deny").expect("write fixture");
+        let policy_path =
+            write_temp_policy("fs_read_audit_deny", "[filesystem]\nread_allow = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let sink = std::sync::Arc::new(RecordingAuditSink::default());
+        let runner = WasmRunner::new(policy).with_audit(sink.clone());
+
+        let script = format!("fs.read({:?})", file_path.display().to_string());
+        let _ = runner
+            .run("t-audit-deny", &script, "x.star")
+            .expect_err("denied path errors");
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let events = sink.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| {
+                e.capability == "fs.read"
+                    && matches!(e.status, AuditStatus::Denied)
+                    && e.task_id == "t-audit-deny"
+            }),
+            "expected a Denied fs.read event, got {events:?}"
+        );
+    }
+
+    /// Phase 4.10 — step counter increments across calls. Two
+    /// allow-path fs.read calls produce two events with distinct
+    /// `.step` values.
+    #[test]
+    fn audit_step_counter_increments_per_call() {
+        let file_a = unique_tmp_path("step_a");
+        let file_b = unique_tmp_path("step_b");
+        std::fs::write(&file_a, "a").expect("a");
+        std::fs::write(&file_b, "b").expect("b");
+        let policy_path = write_temp_policy(
+            "audit_step",
+            &format!(
+                "[filesystem]\nread_allow = [{:?}, {:?}]\n",
+                file_a.display().to_string(),
+                file_b.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let sink = std::sync::Arc::new(RecordingAuditSink::default());
+        let runner = WasmRunner::new(policy).with_audit(sink.clone());
+
+        let script = format!(
+            "fs.read({:?}); fs.read({:?})",
+            file_a.display().to_string(),
+            file_b.display().to_string()
+        );
+        runner.run("t-step", &script, "x.star").expect("runs");
+        let _ = std::fs::remove_file(&file_a);
+        let _ = std::fs::remove_file(&file_b);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let events = sink.events.lock().unwrap();
+        let fs_steps: Vec<u32> = events
+            .iter()
+            .filter(|e| e.capability == "fs.read")
+            .map(|e| e.step)
+            .collect();
+        assert!(
+            fs_steps.len() >= 2 && fs_steps[0] != fs_steps[1],
+            "expected distinct step values for two fs.read events, got {fs_steps:?}"
+        );
     }
 }
