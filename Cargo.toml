@@ -45,6 +45,9 @@ starlark_syntax = "0.13"
 allocative = "0.3"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.10"
+wasmtime = "44"
+wasmtime-wasi = "44"
+denyx-runtime-starlark = { path = "crates/runtime-starlark", version = "0.3.0" }
 
 [profile.release]
 lto = "thin"

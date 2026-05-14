@@ -33,6 +33,7 @@ pub mod project_diagnosis;
 pub mod startup_block;
 pub mod taint;
 pub mod verifier;
+pub mod wasm_runner;
 
 /// Shared `ureq` agent with auto-redirect disabled. ureq's default
 /// agent follows up to 5 redirects without re-checking the new URL
@@ -74,6 +75,7 @@ pub use audit::{
 };
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
 pub use taint::{redact, redact_lines, TaintRegistry, REDACTED};
+pub use wasm_runner::WasmRunner;
 
 /// A capability the runtime knows how to enforce.
 ///
