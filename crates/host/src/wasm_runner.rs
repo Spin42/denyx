@@ -52,6 +52,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use denyx_policy::Policy;
 use denyx_runtime_starlark::STARLARK_INTERPRETER_WASM;
 
+use crate::taint::{redact_lines, TaintRegistry};
 use crate::{AuditSink, ConfirmHook, DenyAllConfirm, DenyxError, NullAuditSink, RunOutcome};
 
 /// Default Wasm fuel budget per `WasmRunner::run` call. Each Wasm
@@ -143,6 +144,7 @@ impl WasmRunner {
             wasi,
             printed: Vec::new(),
             captured_error: None,
+            taint_registry: TaintRegistry::default(),
         };
         let mut store = Store::new(&engine, state);
         store
@@ -225,6 +227,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("fs.read: io error"));
                         }
                     };
+
+                    // 3b. Register content as tainted if the path is
+                    //     declared local-only — its bytes must not
+                    //     leak out via print/network at output time.
+                    if fs_read_policy.fs_read_is_local_only(path_obj) {
+                        caller.data().taint_registry.add(&content);
+                    }
+
                     let content_bytes = content.into_bytes();
 
                     // 4. Empty-content fast path. Convention: (0, 0).
@@ -427,6 +437,13 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("env.read: lookup error"));
                         }
                     };
+
+                    // Register tainted value if the var is declared
+                    // local-only.
+                    if env_read_policy.env_is_local_only(&name) {
+                        caller.data().taint_registry.add(&value);
+                    }
+
                     let value_bytes = value.into_bytes();
 
                     // 4. Empty fast path.
@@ -562,6 +579,11 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("subprocess.exec: non-zero exit"));
                     }
 
+                    if subprocess_policy.subprocess_is_local_only(&argv[0]) {
+                        let stdout_str = String::from_utf8_lossy(&output.stdout);
+                        caller.data().taint_registry.add(stdout_str.as_ref());
+                    }
+
                     let stdout_bytes = output.stdout;
                     if stdout_bytes.is_empty() {
                         return Ok(0);
@@ -622,6 +644,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_get: request failed"));
                         }
                     };
+                    if let Some(host) = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                    {
+                        if http_get_policy.host_is_local_only(&host) {
+                            caller.data().taint_registry.add(&body);
+                        }
+                    }
                     write_string_to_guest(&mut caller, &body)
                 },
             )
@@ -661,6 +691,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_post: request failed"));
                         }
                     };
+                    if let Some(host) = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                    {
+                        if http_post_policy.host_is_local_only(&host) {
+                            caller.data().taint_registry.add(&body);
+                        }
+                    }
                     write_string_to_guest(&mut caller, &body)
                 },
             )
@@ -700,6 +738,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_put: request failed"));
                         }
                     };
+                    if let Some(host) = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                    {
+                        if http_put_policy.host_is_local_only(&host) {
+                            caller.data().taint_registry.add(&body);
+                        }
+                    }
                     write_string_to_guest(&mut caller, &body)
                 },
             )
@@ -743,6 +789,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_patch: request failed"));
                         }
                     };
+                    if let Some(host) = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                    {
+                        if http_patch_policy.host_is_local_only(&host) {
+                            caller.data().taint_registry.add(&body);
+                        }
+                    }
                     write_string_to_guest(&mut caller, &body)
                 },
             )
@@ -780,6 +834,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_delete: request failed"));
                         }
                     };
+                    if let Some(host) = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                    {
+                        if http_delete_policy.host_is_local_only(&host) {
+                            caller.data().taint_registry.add(&body);
+                        }
+                    }
                     write_string_to_guest(&mut caller, &body)
                 },
             )
@@ -829,9 +891,16 @@ impl WasmRunner {
             })?;
 
         match response.status.as_str() {
-            "ok" => Ok(RunOutcome {
-                printed: store.into_data().printed,
-            }),
+            "ok" => {
+                // Scrub printed lines against the taint registry before
+                // surfacing to the caller. Matches the in-process
+                // Runner's IFC behaviour: secrets sourced from local-
+                // only fs/env/hosts/subprocess never reach print's
+                // output buffer untouched.
+                let state = store.into_data();
+                let printed = redact_lines(state.printed, &state.taint_registry);
+                Ok(RunOutcome { printed })
+            }
             "error" => {
                 let (kind, message) = match response.error {
                     Some(e) => (e.kind, e.message),
@@ -918,6 +987,16 @@ struct WasmState {
     wasi: WasiP1Ctx,
     printed: Vec<String>,
     captured_error: Option<DenyxError>,
+    /// Tracks values read from local-only fs paths, env vars, hosts,
+    /// or subprocess output. Scrubbed at the output boundary (the
+    /// printed-lines Vec, in `WasmRunner::run`'s success path) so
+    /// secrets sourced from local-only declarations never leave the
+    /// runtime untouched.
+    ///
+    /// `TaintRegistry` uses interior mutability, so import closures
+    /// can register through `&caller.data().taint_registry` without
+    /// needing `&mut`.
+    taint_registry: TaintRegistry,
 }
 
 #[derive(serde::Deserialize)]
@@ -1376,6 +1455,76 @@ mod tests {
             .expect_err("denied URL should error");
         let _ = std::fs::remove_file(&policy_path);
         assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
+    }
+
+    /// Phase 4.9 — local-only fs.read content is scrubbed from the
+    /// printed output. The script reads a secret file and prints it;
+    /// after the run, the printed line must contain `[REDACTED]` and
+    /// NOT contain the raw secret. Mirrors the
+    /// `LOCAL_ONLY_fs_redaction` task in the multistep eval.
+    #[test]
+    fn fs_read_local_only_is_scrubbed_from_print() {
+        let file_path = unique_tmp_path("fs_read_local_only");
+        let secret = "sk-fixture-secret-XYZ123";
+        std::fs::write(&file_path, secret).expect("write fixture");
+        let policy_path = write_temp_policy(
+            "fs_read_local_only",
+            &format!(
+                "[filesystem]\nlocal_only_read = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!(
+            "print(\"token=\" + fs.read({:?}))",
+            file_path.display().to_string()
+        );
+        let outcome = runner
+            .run("test", &script, "fs_local.star")
+            .expect("local-only read succeeds");
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let printed = outcome.printed.join("\n");
+        assert!(!printed.contains(secret), "raw secret leaked: {printed:?}");
+        assert!(
+            printed.contains("[REDACTED]"),
+            "expected [REDACTED] in output, got {printed:?}"
+        );
+    }
+
+    /// Phase 4.9 — local-only env.read value is scrubbed at output.
+    /// Mirrors the `LOCAL_ONLY_env_redaction` eval task.
+    #[test]
+    fn env_read_local_only_is_scrubbed_from_print() {
+        let var_name = format!("DENYX_WASM_RUNNER_TEST_LOCAL_ONLY_{}", std::process::id());
+        let secret = "sk-fixture-env-secret-ABC456";
+        std::env::set_var(&var_name, secret);
+        let policy_path = write_temp_policy(
+            "env_read_local_only",
+            &format!("[environment]\nlocal_only_vars = [{var_name:?}]\n"),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!("print(\"auth=Bearer \" + env.read({var_name:?}))");
+        let outcome = runner
+            .run("test", &script, "env_local.star")
+            .expect("local-only env read succeeds");
+        std::env::remove_var(&var_name);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let printed = outcome.printed.join("\n");
+        assert!(
+            !printed.contains(secret),
+            "raw env secret leaked: {printed:?}"
+        );
+        assert!(
+            printed.contains("[REDACTED]"),
+            "expected [REDACTED] in output, got {printed:?}"
+        );
     }
 
     /// Phase 5 acceptance criterion #4: a script with a runaway loop
