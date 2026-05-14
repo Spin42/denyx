@@ -140,6 +140,7 @@ pub const CAPABILITIES: &[Capability] = &[
 const PRELUDE: &str = "\
 fs = struct(\n\
     read = _denyx_fs_read,\n\
+    read_range = _denyx_fs_read_range,\n\
     write = _denyx_fs_write,\n\
     delete = _denyx_fs_delete,\n\
 )\n\
@@ -565,6 +566,62 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
             Ok(resolved) => {
                 ctx.require_confirm("fs.read", format!("read {}", resolved.display()))?;
                 let result = std::fs::read_to_string(&resolved);
+                if let Ok(content) = result.as_ref() {
+                    if ctx.policy.fs_read_is_local_only(&resolved) {
+                        ctx.taint.add(content);
+                    }
+                }
+                ctx.emit(AuditEvent::fs(
+                    &ctx.task_id,
+                    step,
+                    "fs.read",
+                    &resolved,
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                Ok(result?)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "fs.read",
+                    &format!("path={path}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Bounded read at the IO layer: open file, seek to `offset`,
+    /// read at most `limit` bytes. Avoids loading the whole file into
+    /// memory for surgical reads of large files. Same policy gate as
+    /// fs.read (read_allow); same taint registration if local-only.
+    fn _denyx_fs_read_range<'v>(
+        path: &str,
+        offset: u64,
+        limit: u64,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.begin_call("fs.read")?;
+        match ctx.policy.check_fs_read(Path::new(path)) {
+            Ok(resolved) => {
+                ctx.require_confirm(
+                    "fs.read",
+                    format!("read_range {} [{offset}..+{limit}]", resolved.display()),
+                )?;
+                let result: std::io::Result<String> = (|| {
+                    let mut file = std::fs::File::open(&resolved)?;
+                    file.seek(SeekFrom::Start(offset))?;
+                    let mut buf = String::new();
+                    file.take(limit).read_to_string(&mut buf)?;
+                    Ok(buf)
+                })();
                 if let Ok(content) = result.as_ref() {
                     if ctx.policy.fs_read_is_local_only(&resolved) {
                         ctx.taint.add(content);

@@ -94,6 +94,7 @@ fn wasm_main() {
 const PRELUDE: &str = r#"
 fs = struct(
     read = _denyx_fs_read,
+    read_range = _denyx_fs_read_range,
     write = _denyx_fs_write,
     delete = _denyx_fs_delete,
 )
@@ -190,6 +191,11 @@ mod host {
     extern "C" {
         pub fn host_print(ptr: u32, len: u32);
         pub fn host_fs_read(path_ptr: u32, path_len: u32) -> u64;
+
+        /// Bounded read: open file, seek to `offset`, read at most
+        /// `limit` bytes. Returned via the same packed-u64 alloc
+        /// convention as host_fs_read.
+        pub fn host_fs_read_range(path_ptr: u32, path_len: u32, offset: u64, limit: u64) -> u64;
         pub fn host_fs_write(path_ptr: u32, path_len: u32, content_ptr: u32, content_len: u32);
         pub fn host_fs_delete(path_ptr: u32, path_len: u32);
         pub fn host_env_read(name_ptr: u32, name_len: u32) -> u64;
@@ -223,6 +229,16 @@ impl starlark::PrintHandler for HostPrintHandler {
 fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
     fn _denyx_fs_read(path: &str) -> anyhow::Result<String> {
         let packed = unsafe { host::host_fs_read(path.as_ptr() as u32, path.len() as u32) };
+        unpack_string(packed)
+    }
+
+    /// `fs.read_range(path, offset, limit)` — bounded read at the IO
+    /// layer. Same gate as fs.read; smaller wire payload AND smaller
+    /// disk read for surgical reads of large files.
+    fn _denyx_fs_read_range(path: &str, offset: u64, limit: u64) -> anyhow::Result<String> {
+        let packed = unsafe {
+            host::host_fs_read_range(path.as_ptr() as u32, path.len() as u32, offset, limit)
+        };
         unpack_string(packed)
     }
 

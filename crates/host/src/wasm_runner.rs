@@ -359,6 +359,151 @@ impl WasmRunner {
             )
             .map_err(|e| DenyxError::Other(format!("link host_fs_read: {e}")))?;
 
+        // ── host_fs_read_range (perf — bounded read at IO layer) ─
+        let fs_read_range_policy = self.policy.clone();
+        let fs_read_range_audit = self.audit.clone();
+        let fs_read_range_task_id = task_id.to_owned();
+        let fs_read_range_confirm = self.confirm.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_fs_read_range",
+                move |mut caller: Caller<'_, WasmState>,
+                      path_ptr: u32,
+                      path_len: u32,
+                      offset: u64,
+                      limit: u64|
+                      -> Result<u64, wasmtime::Error> {
+                    use std::io::{Read, Seek, SeekFrom};
+                    // 1. Read path from guest memory.
+                    let path = read_string_from_guest(&mut caller, path_ptr, path_len, "path")?;
+
+                    // 2. Gate through policy (same as fs.read).
+                    let path_obj = std::path::Path::new(&path);
+                    if let Err(e) = fs_read_range_policy.check_fs_read(path_obj) {
+                        let step = caller
+                            .data()
+                            .step_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        fs_read_range_audit.emit(AuditEvent::denied(
+                            &fs_read_range_task_id,
+                            step,
+                            "fs.read",
+                            &path,
+                            &format!("{e}"),
+                        ));
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
+                        return Err(wasmtime::Error::msg("fs.read denied by policy"));
+                    }
+
+                    // 3. Capability-level confirm gate.
+                    if fs_read_range_policy.requires_approval("fs.read") {
+                        let decision = fs_read_range_confirm.confirm(&ConfirmRequest {
+                            task_id: fs_read_range_task_id.clone(),
+                            capability: "fs.read".to_string(),
+                            summary: format!("fs.read_range: {path} [{offset}..+{limit}]"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_read_range_audit.emit(AuditEvent::denied(
+                                &fs_read_range_task_id,
+                                step,
+                                "fs.read",
+                                &path,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "fs.read denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
+                    // 4. Perform the bounded IO. File::open + seek +
+                    //    take(limit). Avoids loading the whole file
+                    //    into memory for surgical reads.
+                    let content_bytes: Vec<u8> = match (|| -> std::io::Result<Vec<u8>> {
+                        let mut file = std::fs::File::open(path_obj)?;
+                        file.seek(SeekFrom::Start(offset))?;
+                        let mut buf = Vec::new();
+                        file.take(limit).read_to_end(&mut buf)?;
+                        Ok(buf)
+                    })() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_read_range_audit.emit(AuditEvent::fs(
+                                &fs_read_range_task_id,
+                                step,
+                                "fs.read",
+                                path_obj,
+                                false,
+                                Some(format!("io: {e}")),
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::Io(e));
+                            return Err(wasmtime::Error::msg("fs.read_range: io error"));
+                        }
+                    };
+
+                    // 5. Success audit.
+                    let step = caller
+                        .data()
+                        .step_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    fs_read_range_audit.emit(AuditEvent::fs(
+                        &fs_read_range_task_id,
+                        step,
+                        "fs.read",
+                        path_obj,
+                        true,
+                        None,
+                    ));
+
+                    // 6. Taint registration if path is local-only.
+                    if fs_read_range_policy.fs_read_is_local_only(path_obj) {
+                        if let Ok(s) = std::str::from_utf8(&content_bytes) {
+                            caller.data().taint_registry.add(s);
+                        }
+                    }
+
+                    if content_bytes.is_empty() {
+                        return Ok(0);
+                    }
+
+                    // 7. Allocate buffer in guest memory + write.
+                    let alloc = caller
+                        .get_export("denyx_alloc")
+                        .and_then(Extern::into_func)
+                        .ok_or_else(|| {
+                            wasmtime::Error::msg("guest missing `denyx_alloc` export")
+                        })?;
+                    let typed_alloc = alloc.typed::<u32, u32>(&caller).map_err(|e| {
+                        wasmtime::Error::msg(format!("denyx_alloc signature mismatch: {e}"))
+                    })?;
+                    let dest_ptr = typed_alloc
+                        .call(&mut caller, content_bytes.len() as u32)
+                        .map_err(|e| wasmtime::Error::msg(format!("denyx_alloc call: {e}")))?;
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(Extern::into_memory)
+                        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+                    memory
+                        .write(&mut caller, dest_ptr as usize, &content_bytes)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_fs_read_range: write content: {e}"))
+                        })?;
+                    Ok(((dest_ptr as u64) << 32) | (content_bytes.len() as u64))
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_fs_read_range: {e}")))?;
+
         // ── host_fs_write (Phase 4.4) ─────────────────────────────
         let fs_write_policy = self.policy.clone();
         let fs_write_audit = self.audit.clone();

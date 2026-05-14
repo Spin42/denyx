@@ -1083,9 +1083,8 @@ fn dispatch(name: &str, args: &Value, task_id: &str) -> Result<ScriptCall, Strin
             let offset = require_u64(args, "offset")?;
             let limit = require_u64(args, "limit")?;
             Ok(synth(format!(
-                "print(fs.read({})[{}:{}+{}])",
+                "print(fs.read_range({}, {}, {}))",
                 starlark_str(path),
-                offset,
                 offset,
                 limit,
             )))
