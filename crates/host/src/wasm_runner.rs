@@ -54,7 +54,8 @@ use denyx_runtime_starlark::STARLARK_INTERPRETER_WASM;
 
 use crate::taint::{redact_lines, TaintRegistry};
 use crate::{
-    AuditEvent, AuditSink, ConfirmHook, DenyAllConfirm, DenyxError, NullAuditSink, RunOutcome,
+    AuditEvent, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm,
+    DenyxError, NullAuditSink, RunOutcome,
 };
 
 /// Default Wasm fuel budget per `WasmRunner::run` call. Each Wasm
@@ -202,6 +203,7 @@ impl WasmRunner {
         // ── host_fs_read (Phase 4.3) ──────────────────────────────
         let fs_read_policy = self.policy.clone();
         let fs_read_audit = self.audit.clone();
+        let fs_read_confirm = self.confirm.clone();
         let fs_read_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -248,6 +250,35 @@ impl WasmRunner {
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.read denied by policy"));
+                    }
+
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if fs_read_policy.requires_approval("fs.read") {
+                        let decision = fs_read_confirm.confirm(&ConfirmRequest {
+                            task_id: fs_read_task_id.clone(),
+                            capability: "fs.read".to_string(),
+                            summary: format!("fs.read: {path}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_read_audit.emit(AuditEvent::denied(
+                                &fs_read_task_id,
+                                step,
+                                "fs.read",
+                                &path,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "fs.read denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
                     }
 
                     // 3. Perform the IO.
@@ -331,6 +362,7 @@ impl WasmRunner {
         // ── host_fs_write (Phase 4.4) ─────────────────────────────
         let fs_write_policy = self.policy.clone();
         let fs_write_audit = self.audit.clone();
+        let fs_write_confirm = self.confirm.clone();
         let fs_write_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -394,6 +426,35 @@ impl WasmRunner {
                     //    well-typed input, but the host shouldn't
                     //    impose a tighter contract than the wire
                     //    protocol demands.
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if fs_write_policy.requires_approval("fs.write") {
+                        let decision = fs_write_confirm.confirm(&ConfirmRequest {
+                            task_id: fs_write_task_id.clone(),
+                            capability: "fs.write".to_string(),
+                            summary: format!("fs.write: {path} ({} bytes)", content_buf.len()),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_write_audit.emit(AuditEvent::denied(
+                                &fs_write_task_id,
+                                step,
+                                "fs.write",
+                                &path,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "fs.write denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     if let Err(e) = std::fs::write(path_obj, &content_buf) {
                         let step = caller
                             .data()
@@ -431,6 +492,7 @@ impl WasmRunner {
         // ── host_fs_delete (Phase 4.5) ────────────────────────────
         let fs_delete_policy = self.policy.clone();
         let fs_delete_audit = self.audit.clone();
+        let fs_delete_confirm = self.confirm.clone();
         let fs_delete_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -483,6 +545,35 @@ impl WasmRunner {
                     //    in-process Runner's behaviour: fs.delete is
                     //    file-targeted, not recursive directory
                     //    removal.
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if fs_delete_policy.requires_approval("fs.delete") {
+                        let decision = fs_delete_confirm.confirm(&ConfirmRequest {
+                            task_id: fs_delete_task_id.clone(),
+                            capability: "fs.delete".to_string(),
+                            summary: format!("fs.delete: {path}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            fs_delete_audit.emit(AuditEvent::denied(
+                                &fs_delete_task_id,
+                                step,
+                                "fs.delete",
+                                &path,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "fs.delete denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     if let Err(e) = std::fs::remove_file(path_obj) {
                         let step = caller
                             .data()
@@ -520,6 +611,7 @@ impl WasmRunner {
         // ── host_env_read (Phase 4.6) ─────────────────────────────
         let env_read_policy = self.policy.clone();
         let env_read_audit = self.audit.clone();
+        let env_read_confirm = self.confirm.clone();
         let env_read_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -571,6 +663,35 @@ impl WasmRunner {
                     //    DenyxError::Other — matches the in-process
                     //    Runner, which raises a Starlark error rather
                     //    than returning an empty string.
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if env_read_policy.requires_approval("env.read") {
+                        let decision = env_read_confirm.confirm(&ConfirmRequest {
+                            task_id: env_read_task_id.clone(),
+                            capability: "env.read".to_string(),
+                            summary: format!("env.read: {name}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            env_read_audit.emit(AuditEvent::denied(
+                                &env_read_task_id,
+                                step,
+                                "env.read",
+                                &name,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "env.read denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     let value = match std::env::var(&name) {
                         Ok(v) => v,
                         Err(e) => {
@@ -642,6 +763,7 @@ impl WasmRunner {
         // ── host_subprocess_exec (Phase 4.7) ──────────────────────
         let subprocess_policy = self.policy.clone();
         let subprocess_audit = self.audit.clone();
+        let subprocess_confirm = self.confirm.clone();
         let subprocess_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -759,6 +881,70 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("subprocess.exec: argv path denied"));
                     }
 
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if subprocess_policy.requires_approval("subprocess.exec") {
+                        let decision = subprocess_confirm.confirm(&ConfirmRequest {
+                            task_id: subprocess_task_id.clone(),
+                            capability: "subprocess.exec".to_string(),
+                            summary: format!("subprocess.exec: {}", argv.join(" ")),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            subprocess_audit.emit(AuditEvent::denied(
+                                &subprocess_task_id,
+                                step,
+                                "subprocess.exec",
+                                &argv.join(" "),
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "subprocess.exec denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
+                    // Per-argv requires_approval_args gate. Even if
+                    // subprocess.exec is broadly allowed, specific argv
+                    // patterns (e.g. `git push`) may still need approval.
+                    // Returns Some(matched_pattern) if any pattern matches.
+                    if let Some(matched) =
+                        subprocess_policy.subprocess_argv_requires_approval(&argv)
+                    {
+                        let decision = subprocess_confirm.confirm(&ConfirmRequest {
+                            task_id: subprocess_task_id.clone(),
+                            capability: "subprocess.exec".to_string(),
+                            summary: format!(
+                                "{} (matched requires_approval pattern: {matched})",
+                                argv.join(" ")
+                            ),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            subprocess_audit.emit(AuditEvent::denied(
+                                &subprocess_task_id,
+                                step,
+                                "subprocess.exec",
+                                &argv.join(" "),
+                                &format!("confirm hook denied (pattern: {matched})"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::ConfirmDenied(format!(
+                                    "subprocess.exec denied by confirm hook (pattern: {matched})"
+                                )));
+                            return Err(wasmtime::Error::msg("confirm denied (per-argv)"));
+                        }
+                    }
+
                     // 3. Spawn the process. env_clear() + a single
                     //    PATH passthrough is a minimal-secure default
                     //    for Phase 4.7 — the in-process Runner does
@@ -865,6 +1051,7 @@ impl WasmRunner {
         // ── host_net_http_get (Phase 4.8) ─────────────────────────
         let http_get_policy = self.policy.clone();
         let http_get_audit = self.audit.clone();
+        let http_get_confirm = self.confirm.clone();
         let http_get_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -891,6 +1078,35 @@ impl WasmRunner {
                             Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_get denied"));
                     }
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if http_get_policy.requires_approval("net.http_get") {
+                        let decision = http_get_confirm.confirm(&ConfirmRequest {
+                            task_id: http_get_task_id.clone(),
+                            capability: "net.http_get".to_string(),
+                            summary: format!("net.http_get: {url}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_get_audit.emit(AuditEvent::denied(
+                                &http_get_task_id,
+                                step,
+                                "net.http_get",
+                                &url,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "net.http_get denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent().get(&url).call() {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
@@ -958,6 +1174,7 @@ impl WasmRunner {
         // ── host_net_http_post (Phase 4.8) ────────────────────────
         let http_post_policy = self.policy.clone();
         let http_post_audit = self.audit.clone();
+        let http_post_confirm = self.confirm.clone();
         let http_post_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -987,6 +1204,35 @@ impl WasmRunner {
                             Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_post denied"));
                     }
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if http_post_policy.requires_approval("net.http_post") {
+                        let decision = http_post_confirm.confirm(&ConfirmRequest {
+                            task_id: http_post_task_id.clone(),
+                            capability: "net.http_post".to_string(),
+                            summary: format!("net.http_post: {url}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_post_audit.emit(AuditEvent::denied(
+                                &http_post_task_id,
+                                step,
+                                "net.http_post",
+                                &url,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "net.http_post denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent().post(&url).send_string(&req_body) {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
@@ -1054,6 +1300,7 @@ impl WasmRunner {
         // ── host_net_http_put (Phase 4.8) ─────────────────────────
         let http_put_policy = self.policy.clone();
         let http_put_audit = self.audit.clone();
+        let http_put_confirm = self.confirm.clone();
         let http_put_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -1083,6 +1330,35 @@ impl WasmRunner {
                             Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_put denied"));
                     }
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if http_put_policy.requires_approval("net.http_put") {
+                        let decision = http_put_confirm.confirm(&ConfirmRequest {
+                            task_id: http_put_task_id.clone(),
+                            capability: "net.http_put".to_string(),
+                            summary: format!("net.http_put: {url}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_put_audit.emit(AuditEvent::denied(
+                                &http_put_task_id,
+                                step,
+                                "net.http_put",
+                                &url,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "net.http_put denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent().put(&url).send_string(&req_body) {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
@@ -1150,6 +1426,7 @@ impl WasmRunner {
         // ── host_net_http_patch (Phase 4.8) ───────────────────────
         let http_patch_policy = self.policy.clone();
         let http_patch_audit = self.audit.clone();
+        let http_patch_confirm = self.confirm.clone();
         let http_patch_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -1179,6 +1456,35 @@ impl WasmRunner {
                             Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_patch denied"));
                     }
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if http_patch_policy.requires_approval("net.http_patch") {
+                        let decision = http_patch_confirm.confirm(&ConfirmRequest {
+                            task_id: http_patch_task_id.clone(),
+                            capability: "net.http_patch".to_string(),
+                            summary: format!("net.http_patch: {url}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_patch_audit.emit(AuditEvent::denied(
+                                &http_patch_task_id,
+                                step,
+                                "net.http_patch",
+                                &url,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "net.http_patch denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent()
                         .request("PATCH", &url)
                         .send_string(&req_body)
@@ -1250,6 +1556,7 @@ impl WasmRunner {
         // ── host_net_http_delete (Phase 4.8) ──────────────────────
         let http_delete_policy = self.policy.clone();
         let http_delete_audit = self.audit.clone();
+        let http_delete_confirm = self.confirm.clone();
         let http_delete_task_id = task_id.to_owned();
         linker
             .func_wrap(
@@ -1276,6 +1583,35 @@ impl WasmRunner {
                             Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
                         return Err(wasmtime::Error::msg("net.http_delete denied"));
                     }
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if http_delete_policy.requires_approval("net.http_delete") {
+                        let decision = http_delete_confirm.confirm(&ConfirmRequest {
+                            task_id: http_delete_task_id.clone(),
+                            capability: "net.http_delete".to_string(),
+                            summary: format!("net.http_delete: {url}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_delete_audit.emit(AuditEvent::denied(
+                                &http_delete_task_id,
+                                step,
+                                "net.http_delete",
+                                &url,
+                                "confirm hook denied",
+                            ));
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "net.http_delete denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     let body = match crate::no_redirect_agent().delete(&url).call() {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
@@ -2177,6 +2513,130 @@ runaway()
         assert!(
             fs_steps.len() >= 2 && fs_steps[0] != fs_steps[1],
             "expected distinct step values for two fs.read events, got {fs_steps:?}"
+        );
+    }
+
+    /// Recording ConfirmHook for use in Phase 4.11 tests. Captures the
+    /// most recent ConfirmRequest the hook was asked about and lets
+    /// the test choose Allow / Deny per-call.
+    struct RecordingConfirm {
+        decision: ConfirmDecision,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ConfirmHook for RecordingConfirm {
+        fn confirm(&self, req: &ConfirmRequest) -> ConfirmDecision {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{}: {}", req.capability, req.summary));
+            self.decision
+        }
+    }
+
+    /// Phase 4.11 — capability listed in requires_approval triggers
+    /// the confirm hook; an Allow decision lets the operation proceed.
+    #[test]
+    fn fs_read_requires_approval_calls_confirm_hook() {
+        let file_path = unique_tmp_path("fs_read_confirm_ok");
+        std::fs::write(&file_path, "confirmed").expect("write fixture");
+        let policy_path = write_temp_policy(
+            "fs_read_confirm_ok",
+            &format!(
+                "requires_approval = [\"fs.read\"]\n\n[filesystem]\nread_allow = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let confirm = std::sync::Arc::new(RecordingConfirm {
+            decision: ConfirmDecision::Allow,
+            seen: std::sync::Mutex::new(vec![]),
+        });
+        let runner = WasmRunner::new(policy).with_confirm_hook(confirm.clone());
+
+        let script = format!("print(fs.read({:?}))", file_path.display().to_string());
+        let outcome = runner.run("test", &script, "x.star").expect("runs");
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        let seen = confirm.seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|s| s.starts_with("fs.read: fs.read:")),
+            "confirm hook should have been called with fs.read summary; got {seen:?}"
+        );
+        assert_eq!(outcome.printed, vec!["confirmed".to_string()]);
+    }
+
+    /// Phase 4.11 — confirm Deny surfaces as DenyxError::ConfirmDenied.
+    #[test]
+    fn fs_write_confirm_deny_surfaces_typed_error() {
+        let file_path = unique_tmp_path("fs_write_confirm_deny");
+        let _ = std::fs::remove_file(&file_path);
+        let policy_path = write_temp_policy(
+            "fs_write_confirm_deny",
+            &format!(
+                "requires_approval = [\"fs.write\"]\n\n[filesystem]\nwrite_allow = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let confirm = std::sync::Arc::new(RecordingConfirm {
+            decision: ConfirmDecision::Deny,
+            seen: std::sync::Mutex::new(vec![]),
+        });
+        let runner = WasmRunner::new(policy).with_confirm_hook(confirm);
+
+        let script = format!(
+            "fs.write({:?}, \"should not appear\")",
+            file_path.display().to_string()
+        );
+        let err = runner
+            .run("test", &script, "x.star")
+            .expect_err("confirm deny should error");
+        let exists_after = file_path.exists();
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::ConfirmDenied(_) => {}
+            other => panic!("expected DenyxError::ConfirmDenied, got {other:?}"),
+        }
+        assert!(
+            !exists_after,
+            "confirm-denied fs.write must not create the target file"
+        );
+    }
+
+    /// Phase 4.11 — subprocess.exec per-argv requires_approval_args
+    /// fires the confirm hook even when subprocess.exec is broadly
+    /// allowed. Deny → DenyxError::ConfirmDenied.
+    #[test]
+    fn subprocess_exec_argv_requires_approval_calls_confirm_hook() {
+        let policy_path = write_temp_policy(
+            "subprocess_argv_confirm",
+            "[subprocess]\nallow_commands = [\"echo\"]\n\n[subprocess.requires_approval_args]\necho = [\"sensitive\"]\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let confirm = std::sync::Arc::new(RecordingConfirm {
+            decision: ConfirmDecision::Deny,
+            seen: std::sync::Mutex::new(vec![]),
+        });
+        let runner = WasmRunner::new(policy).with_confirm_hook(confirm.clone());
+
+        let script = r#"subprocess.exec(["echo", "sensitive", "payload"])"#;
+        let err = runner
+            .run("test", script, "x.star")
+            .expect_err("argv-pattern confirm deny should error");
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::ConfirmDenied(_) => {}
+            other => panic!("expected DenyxError::ConfirmDenied, got {other:?}"),
+        }
+        let seen = confirm.seen.lock().unwrap();
+        assert!(
+            !seen.is_empty(),
+            "confirm hook should have been called for per-argv pattern"
         );
     }
 }
