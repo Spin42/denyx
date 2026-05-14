@@ -122,6 +122,60 @@ read host memory it wasn't explicitly given access to via the
   in the threat model applies. Wasm doesn't add value-level taint
   propagation through Starlark.
 
+## New attack surface
+
+The wasm path is functionally equivalent to the in-process runner
+on every security boundary it shares — but `wasmtime` itself is
+real new attack surface. Honest accounting of what changes:
+
+| Surface | Notes |
+|---------|-------|
+| **wasmtime as a runtime dependency** | ~60 transitive crates that didn't exist in the in-process build. wasmtime is widely used, security-audited, and the BCA bug-bounty surface, but it is not bug-free — past CVEs have hit SIMD bounds checks, JIT codegen, and the WASI implementation. denyx pins to the published `wasmtime = "44"` major and updates explicitly. |
+| **AOT `.cwasm` loaded via `unsafe Module::deserialize`** | The cwasm bytes are produced at build time by `denyx-runtime-starlark`'s `build.rs` from the in-tree `.wasm`. Trust model: same as `include_bytes!` of any other artifact built from our own source. NOT loaded from external sources at runtime, NOT cached in a writable path. The `unsafe` reflects wasmtime's API contract — it trusts the producer of the bytes to be wasmtime itself — not a runtime trust decision about external input. |
+| **JSON wire-protocol parsing** | `WasmRunner::run` parses the interpreter's stdout as JSON to get the `Response` (status / result / error). A bug in serde_json's deserialization of attacker-controlled bytes is a known class of CVE, though serde_json has held up well in practice. The response shape is small and well-defined; the guest produces it from a controlled emitter, not from user input. |
+| **Linear memory boundary handling** | Every host import that crosses the wasm boundary uses `(ptr, len)` pairs into the guest's linear memory. The wasmtime `Memory::read` / `Memory::write` API does bounds-checking, so a malformed `len` from the guest gets a typed error rather than a host out-of-bounds read. Off-by-one bugs in host closures would still surface as wasmtime errors, not silent memory corruption. |
+| **Re-entry from host imports into guest** | `host_fs_read` and friends call back into the guest via `denyx_alloc` to obtain a buffer for the response. wasmtime supports this and bounds the recursion via the Store's `wasm_stack` setting, but the extra round-trip is more code paths than the in-process runner's direct return. |
+| **Fuel does not bound memory growth** | A script could grow linear memory faster than it consumes Wasm instructions and exhaust the Store before fuel runs out. wasmtime's default memory limit is the protection here; not yet exposed as a denyx policy field. |
+| **Build-time wasmtime dependency** | `denyx-runtime-starlark`'s `build.rs` invokes wasmtime to produce the cwasm. End users pay this in build time when installing the crate, but the runtime denyx-host's wasmtime is the consumer's, not the build script's. A bug in build-time wasmtime would surface as a crate build failure, not a runtime exploit. |
+
+## Pentest result on the wasm path (Round 1 re-run)
+
+`examples/local_executor/run_exfil.py --use-wasm` against the same
+12-technique probe set: **10 REDACTED, 2 WEAK_LEAK, 0 LEAK** —
+identical to the in-process baseline on the same probe.
+
+Two regressions found and fixed in the process (commit `97641c2`):
+
+1. The pre-execution verifier (`crates/host/src/verifier.rs`) was
+   not being called on the wasm path. `print(len(secret))` and
+   similar shapes that the verifier catches statically slipped
+   through; the runtime redactor masked the literal bytes but
+   length / position side-channels were exposed. Fixed by adding
+   the same `verifier::verify(source, &self.policy)` call the
+   in-process runner has at `crates/host/src/lib.rs:248`.
+
+2. Error messages weren't scrubbed against the taint registry on
+   the wasm path. `fail(secret)` produces a Starlark error whose
+   message contains the literal bytes — surfaced unscrubbed
+   through `DenyxError::Starlark(...)`. Before fix: 2 critical
+   LEAKs (`fail_raw`, `fail_reversed`). Fixed by routing error
+   messages through `crate::taint::redact` at the response-
+   decoding boundary.
+
+The two WEAK_LEAKs that remain (`comparison_oracle`,
+`substring_guess`) are inherent side-channels — single-bit or
+substring-presence oracles that reveal O(log L) bits per query.
+Same on both runners; defeating them would require forbidding
+`len()`, comparison, and `in` on tainted values, breaking every
+legitimate use of a secret as a string. Documented in
+[04-security-threat-model.md](04-security-threat-model.md#what-it-does-not-defend-against).
+
+Round 2 (LLM-driven, `examples/local_executor/run_pentest.py`,
+Sonnet/Opus via the `claude` CLI, Anthropic API budget) has NOT
+been re-run against the wasm path. The harness was plumbed for
+`--use-wasm` in the same commit but a full Round 2 sweep is a
+multi-hour, paid run that needs explicit operator authorisation.
+
 ## Operator-facing differences
 
 ### Activation

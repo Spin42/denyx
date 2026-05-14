@@ -132,6 +132,15 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   written by Claude. The architectural decisions are human; the
   implementation is not. This is the single biggest reason for
   this doc — please read with hostile eyes.
+- **wasmtime bugs on the `--use-wasm` path.** The wasm runner
+  introduces wasmtime as a dependency. wasmtime is widely-used and
+  security-audited, but past CVEs have hit its SIMD bounds checks,
+  JIT codegen, and WASI implementation. A wasmtime exploit
+  defeats the sandbox boundary the `WasmRunner` relies on for
+  interpreter-bug containment — though the Policy gate stays in
+  Rust on the host side, so the gate itself is unaffected.
+  See [wasm-sandbox.md](wasm-sandbox.md#new-attack-surface) for
+  the full surface accounting.
 
 ## Trust boundaries
 
