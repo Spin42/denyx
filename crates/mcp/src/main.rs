@@ -51,8 +51,39 @@ use std::time::Duration;
 use clap::Parser;
 use denyx_host::{
     AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm,
-    DenyxError, HttpAuditSink, JsonlAuditSink, Runner,
+    DenyxError, HttpAuditSink, JsonlAuditSink, RunOutcome, Runner, WasmRunner,
 };
+
+/// Either runner — the legacy in-process [`Runner`] or the Phase 5
+/// wasmtime-sandboxed [`WasmRunner`]. denyx-mcp picks one at startup
+/// based on `--use-wasm` and proxies the small surface every dispatch
+/// site uses (`.run()` + `.policy()`). Kept local to this binary
+/// until `denyx_host` grows a `ScriptRunner` trait.
+enum AnyRunner {
+    InProcess(Runner),
+    Wasm(WasmRunner),
+}
+
+impl AnyRunner {
+    fn run(
+        &self,
+        task_id: &str,
+        source: &str,
+        script_name: &str,
+    ) -> Result<RunOutcome, DenyxError> {
+        match self {
+            AnyRunner::InProcess(r) => r.run(task_id, source, script_name),
+            AnyRunner::Wasm(r) => r.run(task_id, source, script_name),
+        }
+    }
+
+    fn policy(&self) -> &denyx_policy::Policy {
+        match self {
+            AnyRunner::InProcess(r) => r.policy(),
+            AnyRunner::Wasm(r) => r.policy(),
+        }
+    }
+}
 use denyx_policy::{Policy, PolicyFile};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -174,6 +205,15 @@ struct Cli {
     /// honest deployment guidance.
     #[arg(long, default_value = "auto")]
     confirm_mode: ConfirmModeArg,
+
+    /// Evaluate scripts inside a wasmtime sandbox (Phase 5 migration
+    /// path) instead of the in-process Starlark interpreter. Opt-in:
+    /// the Wasm path enforces the same Policy gate but does NOT yet
+    /// emit audit events or fire the confirm hook (deferred to a
+    /// Phase 4 wrap-up commit). Useful for the multistep eval
+    /// validation; not yet recommended as the default.
+    #[arg(long)]
+    use_wasm: bool,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -338,11 +378,22 @@ every tool call will fail until you launch with --policy <project.toml> or \
     // never dispatch a real tool call, so there's no point owning
     // a `Runner` we can't use.
     let runner = if blocked_state.is_none() {
-        Some(
-            Runner::new(policy)
-                .with_audit(audit)
-                .with_confirm_hook(confirm_hook),
-        )
+        if cli.use_wasm {
+            eprintln!(
+                "denyx-mcp: --use-wasm enabled (Phase 5 wasmtime runner). The Policy gate is enforced; audit events and confirm prompts are NOT yet emitted from this path."
+            );
+            Some(AnyRunner::Wasm(
+                WasmRunner::new(policy)
+                    .with_audit(audit)
+                    .with_confirm_hook(confirm_hook),
+            ))
+        } else {
+            Some(AnyRunner::InProcess(
+                Runner::new(policy)
+                    .with_audit(audit)
+                    .with_confirm_hook(confirm_hook),
+            ))
+        }
     } else {
         // Audit + confirm machinery isn't reachable in blocked mode;
         // explicitly drop them so any background threads or open
@@ -685,7 +736,7 @@ impl Response {
 }
 
 fn handle(
-    runner: &Runner,
+    runner: &AnyRunner,
     counter: &mut u64,
     elicit_supported: &Arc<AtomicBool>,
     req: Request,
@@ -740,7 +791,7 @@ fn handle(
     }
 }
 
-fn handle_tools_call(runner: &Runner, counter: &mut u64, id: Value, params: Value) -> Response {
+fn handle_tools_call(runner: &AnyRunner, counter: &mut u64, id: Value, params: Value) -> Response {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -798,7 +849,7 @@ fn tool_error_response(id: Value, err: &DenyxError) -> Response {
     )
 }
 
-fn handle_tool_routing(runner: &Runner, id: Value, args: &Value) -> Response {
+fn handle_tool_routing(runner: &AnyRunner, id: Value, args: &Value) -> Response {
     let policy = runner.policy();
     let name = args.get("name").and_then(|v| v.as_str());
 

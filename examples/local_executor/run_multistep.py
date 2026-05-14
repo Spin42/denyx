@@ -246,7 +246,7 @@ def strip_fences(text: str) -> str:
 
 
 class McpClient:
-    def __init__(self, mcp_bin: Path, policy: Path) -> None:
+    def __init__(self, mcp_bin: Path, policy: Path, use_wasm: bool = False) -> None:
         if not mcp_bin.exists():
             raise FileNotFoundError(
                 f"denyx-mcp binary not found at {mcp_bin}. "
@@ -257,7 +257,12 @@ class McpClient:
         # blanket-denied by the new default `auto` mode. The harness
         # doesn't simulate a human-in-the-loop.
         self.proc = subprocess.Popen(
-            [str(mcp_bin), "--policy", str(policy), "--confirm-mode", "auto-allow"],
+            [
+                *(
+                    [str(mcp_bin), "--policy", str(policy), "--confirm-mode", "auto-allow"]
+                    + (["--use-wasm"] if use_wasm else [])
+                )
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1326,6 +1331,11 @@ def evaluate_one(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--use-wasm",
+        action="store_true",
+        help="Evaluate scripts inside the wasmtime sandbox (Phase 5 migration path).",
+    )
     parser.add_argument("--ollama", default=DEFAULT_OLLAMA)
     parser.add_argument("--mcp-bin", default=str(DEFAULT_MCP_BIN), type=Path)
     parser.add_argument("--policy", default=str(DEFAULT_POLICY), type=Path)
@@ -1352,7 +1362,7 @@ def main() -> int:
     if routing_block:
         n = routing_block.count("- ")
         print(f"# surfaced {n} declared tools to the local model")
-    client = McpClient(args.mcp_bin, args.policy)
+    client = McpClient(args.mcp_bin, args.policy, use_wasm=args.use_wasm)
     tasks = TASKS
     if args.only:
         tasks = [t for t in TASKS if t.name == args.only]
