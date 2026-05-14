@@ -1073,6 +1073,46 @@ fn dispatch(name: &str, args: &Value, task_id: &str) -> Result<ScriptCall, Strin
                 starlark_str(content)
             )))
         }
+        "denyx_fs_read_range" => {
+            // Read a bounded slice of a file. Goes through fs.read's
+            // policy gate. Starlark string slicing is bounds-tolerant
+            // so out-of-range offsets/limits clip to "" rather than
+            // failing. Saves wire bytes for large-file surgical reads;
+            // the host still pays the full file-read cost.
+            let path = require_str(args, "path")?;
+            let offset = require_u64(args, "offset")?;
+            let limit = require_u64(args, "limit")?;
+            Ok(synth(format!(
+                "print(fs.read({})[{}:{}+{}])",
+                starlark_str(path),
+                offset,
+                offset,
+                limit,
+            )))
+        }
+        "denyx_fs_replace" => {
+            // Read-modify-write with an exactly-one-match guard, so
+            // ambiguous patches refuse rather than apply silently.
+            // Goes through fs.read + fs.write gates. NOT atomic under
+            // concurrent writes (same semantics as the in-process
+            // Runner's plain fs.write).
+            let path = require_str(args, "path")?;
+            let old = require_str(args, "old")?;
+            let new_ = require_str(args, "new")?;
+            Ok(synth(format!(
+                "def _fs_replace():\n\
+                 \x20   _content = fs.read({path})\n\
+                 \x20   _count = _content.count({old})\n\
+                 \x20   if _count != 1:\n\
+                 \x20       fail(\"fs.replace: expected exactly 1 occurrence of `old`, found \" + str(_count))\n\
+                 \x20   fs.write({path}, _content.replace({old}, {new}))\n\
+                 _fs_replace()\n\
+                 print(\"ok\")",
+                path = starlark_str(path),
+                old = starlark_str(old),
+                new = starlark_str(new_),
+            )))
+        }
         "denyx_fs_delete" => {
             let path = require_str(args, "path")?;
             Ok(synth(format!(
@@ -1119,6 +1159,12 @@ fn synth(body: String) -> ScriptCall {
         script: body,
         script_name: "mcp_call.star".into(),
     }
+}
+
+fn require_u64(args: &Value, key: &str) -> Result<u64, String> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing or invalid (non-integer) arg `{key}`"))
 }
 
 fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -1185,6 +1231,32 @@ fn tool_definitions() -> Value {
                     "content": { "type": "string" }
                 },
                 "required": ["path", "content"]
+            }
+        },
+        {
+            "name": "denyx_fs_read_range",
+            "description": "Read a bounded slice of a file (offset, limit). Path is gated through the same read_allow as denyx_fs_read; the slice is taken after the gate fires. Out-of-range offset/limit clip to empty string rather than failing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start reading at (0 = file start)." },
+                    "limit": { "type": "integer", "minimum": 0, "description": "Maximum bytes to return. If offset+limit > file size, the slice is truncated." }
+                },
+                "required": ["path", "offset", "limit"]
+            }
+        },
+        {
+            "name": "denyx_fs_replace",
+            "description": "Read-modify-write a file, replacing exactly one occurrence of `old` with `new`. Refuses if `old` appears zero or multiple times. Goes through fs.read + fs.write gates; not atomic under concurrent writes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old": { "type": "string", "description": "Substring to find. Must appear exactly once in the file." },
+                    "new": { "type": "string", "description": "Replacement text." }
+                },
+                "required": ["path", "old", "new"]
             }
         },
         {
