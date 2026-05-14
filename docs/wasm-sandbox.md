@@ -215,12 +215,16 @@ unchanged.
 The wasm path is not yet promoted to default. Items still
 outstanding:
 
-1. **No end-to-end multistep eval since the final parity commit.**
-   The last measured run was 34/36 (after Phase 4.9 closed the
-   taint-scrub gap but before audit/confirm/outbound-taint/env-filter
-   landed). The two failing tasks at that point were
-   `LOCAL_ONLY_*_redaction`, both predicted to pass after taint
-   scrubbing. The prediction is unverified.
+1. ~~No end-to-end multistep eval since the final parity commit.~~
+   **Closed 2026-05-14.** Re-ran
+   `examples/local_executor/run_multistep.py --use-wasm` against
+   `qwen2.5-coder:7b` after all parity work landed: **36/36 PASS**
+   (cross 5/5, deny 8/8, file 6/6, http 6/6, local_only 2/2,
+   report 4/4, subprocess 5/5). 4 tasks needed a retry (model-
+   quality variance, not gate behaviour); all 4 were rescued.
+   Both `LOCAL_ONLY_*_redaction` tasks now pass: `auth=Bearer
+   [REDACTED]` and `token=[REDACTED]` are the output the harness
+   verifies against.
 
 2. **No pentest re-run against the wasm path.** Round 1 and Round
    2 v3 pentest reports cover the in-process runner only. The

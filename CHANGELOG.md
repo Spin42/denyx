@@ -74,11 +74,13 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ### Not yet validated (gates on promoting `--use-wasm` to default)
 
-- No multistep-eval rerun against the final wasm path. Last
-  measured run was 34/36 (after Phase 4.9 closed the taint-scrub
-  gap but before audit/confirm/outbound-taint/env-filter landed).
-  The two failing tasks at that point were predicted to pass
-  after the remaining work — prediction is empirically unverified.
+- ~~No multistep-eval rerun against the final wasm path.~~ ✓
+  **Closed 2026-05-14: 36/36** on `qwen2.5-coder:7b` after all
+  parity work landed (was 34/36 before the Phase 4.9 taint
+  scrubber + audit/confirm/outbound-taint/env-filter wrap-up).
+  Both `LOCAL_ONLY_*_redaction` tasks now redact correctly. 4
+  retries used, 4 rescued by retry — model-quality variance, not
+  gate regressions.
 - No pentest re-run against the wasm path. Round 1 and Round 2 v3
   reports cover the in-process runner only.
 - CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
