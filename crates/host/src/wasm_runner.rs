@@ -154,6 +154,15 @@ impl WasmRunner {
         source: &str,
         script_name: &str,
     ) -> Result<RunOutcome, DenyxError> {
+        // Pre-execution verifier — same Rust code, same Policy, as
+        // the in-process Runner (crates/host/src/lib.rs:248). Rejects
+        // scripts whose static AST pairs a literal-argument local-
+        // only read with an output-producing call. The IFC defence-
+        // in-depth layer that catches `print(len(secret))` and
+        // similar before any evaluator runs.
+        crate::verifier::verify(source, &self.policy)
+            .map_err(|e| DenyxError::Verifier(e.to_string()))?;
+
         let request = serde_json::json!({
             "task_id": task_id,
             "source_path": script_name,
@@ -2165,6 +2174,13 @@ impl WasmRunner {
                 } else {
                     format!("{kind}: {message}")
                 };
+                // Scrub the error message against tainted values gathered
+                // during this run. Without this, `fail(secret)` (or any
+                // Starlark error whose message echoes a local-only value)
+                // leaks the bytes through the error boundary. The
+                // in-process Runner does the same scrubbing.
+                let taints = store.data().taint_registry.redaction_snapshot();
+                let formatted = crate::taint::redact(&formatted, &taints);
                 let mapped = match kind.as_str() {
                     "starlark-parse" | "starlark-eval" | "starlark-prelude" | "io" | "protocol" => {
                         DenyxError::Starlark(formatted)
@@ -2379,7 +2395,10 @@ mod tests {
         let file_path = unique_tmp_path("fs_read_denied");
         std::fs::write(&file_path, "should-not-be-read").expect("write fixture");
         // No read_allow entry covers this path.
-        let policy_path = write_temp_policy("fs_read_denied", "[filesystem]\nread_allow = []\n");
+        let policy_path = write_temp_policy(
+            "fs_read_denied",
+            "[filesystem]\nread_allow = [\"/dev/null\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
 
@@ -2441,7 +2460,10 @@ mod tests {
     fn fs_write_denied_path_surfaces_typed_error() {
         let file_path = unique_tmp_path("fs_write_denied");
         let _ = std::fs::remove_file(&file_path);
-        let policy_path = write_temp_policy("fs_write_denied", "[filesystem]\nwrite_allow = []\n");
+        let policy_path = write_temp_policy(
+            "fs_write_denied",
+            "[filesystem]\nwrite_allow = [\"/dev/null\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
 
@@ -2502,8 +2524,10 @@ mod tests {
     fn fs_delete_denied_path_surfaces_typed_error() {
         let file_path = unique_tmp_path("fs_delete_denied");
         std::fs::write(&file_path, "should remain").expect("write fixture");
-        let policy_path =
-            write_temp_policy("fs_delete_denied", "[filesystem]\ndelete_allow = []\n");
+        let policy_path = write_temp_policy(
+            "fs_delete_denied",
+            "[filesystem]\ndelete_allow = [\"/dev/null\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
 
@@ -2560,7 +2584,10 @@ mod tests {
     fn env_read_denied_var_surfaces_typed_error() {
         let var_name = format!("DENYX_WASM_RUNNER_TEST_DENIED_{}", std::process::id());
         std::env::set_var(&var_name, "should-not-be-read");
-        let policy_path = write_temp_policy("env_read_denied", "[environment]\nallow_vars = []\n");
+        let policy_path = write_temp_policy(
+            "env_read_denied",
+            "[environment]\nallow_vars = [\"DENYX_UNRELATED_NEVER_SET\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
 
@@ -2611,7 +2638,7 @@ mod tests {
     fn subprocess_exec_denied_command_surfaces_typed_error() {
         let policy_path = write_temp_policy(
             "subprocess_exec_denied",
-            "[subprocess]\nallow_commands = []\n",
+            "[subprocess]\nallow_commands = [\"true\"]\n",
         );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
@@ -2636,8 +2663,10 @@ mod tests {
     /// read_string_from_guest / write_string_to_guest helpers.
     #[test]
     fn net_http_get_denied_url_surfaces_typed_error() {
-        let policy_path =
-            write_temp_policy("net_http_get_denied", "[network]\nhttp_get_allow = []\n");
+        let policy_path = write_temp_policy(
+            "net_http_get_denied",
+            "[network]\nhttp_get_allow = [\"never-allowed.invalid\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
         let err = runner
@@ -2649,8 +2678,10 @@ mod tests {
 
     #[test]
     fn net_http_post_denied_url_surfaces_typed_error() {
-        let policy_path =
-            write_temp_policy("net_http_post_denied", "[network]\nhttp_post_allow = []\n");
+        let policy_path = write_temp_policy(
+            "net_http_post_denied",
+            "[network]\nhttp_post_allow = [\"never-allowed.invalid\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
         let err = runner
@@ -2666,8 +2697,10 @@ mod tests {
 
     #[test]
     fn net_http_put_denied_url_surfaces_typed_error() {
-        let policy_path =
-            write_temp_policy("net_http_put_denied", "[network]\nhttp_put_allow = []\n");
+        let policy_path = write_temp_policy(
+            "net_http_put_denied",
+            "[network]\nhttp_put_allow = [\"never-allowed.invalid\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
         let err = runner
@@ -2685,7 +2718,7 @@ mod tests {
     fn net_http_patch_denied_url_surfaces_typed_error() {
         let policy_path = write_temp_policy(
             "net_http_patch_denied",
-            "[network]\nhttp_patch_allow = []\n",
+            "[network]\nhttp_patch_allow = [\"never-allowed.invalid\"]\n",
         );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
@@ -2704,7 +2737,7 @@ mod tests {
     fn net_http_delete_denied_url_surfaces_typed_error() {
         let policy_path = write_temp_policy(
             "net_http_delete_denied",
-            "[network]\nhttp_delete_allow = []\n",
+            "[network]\nhttp_delete_allow = [\"never-allowed.invalid\"]\n",
         );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
@@ -2739,18 +2772,31 @@ mod tests {
             "print(\"token=\" + fs.read({:?}))",
             file_path.display().to_string()
         );
-        let outcome = runner
+        // The verifier (Phase 4.9 wired statically into WasmRunner)
+        // rejects `local-only read + print` shapes BEFORE the
+        // interpreter runs. The runtime redactor remains as a
+        // defence-in-depth for shapes the verifier doesn't catch —
+        // see `examples/local_executor/run_exfil.py` for empirical
+        // validation of both layers composing on the wasm path.
+        let err = runner
             .run("test", &script, "fs_local.star")
-            .expect("local-only read succeeds");
+            .expect_err("verifier should reject local-only + print");
         let _ = std::fs::remove_file(&file_path);
         let _ = std::fs::remove_file(&policy_path);
 
-        let printed = outcome.printed.join("\n");
-        assert!(!printed.contains(secret), "raw secret leaked: {printed:?}");
-        assert!(
-            printed.contains("[REDACTED]"),
-            "expected [REDACTED] in output, got {printed:?}"
-        );
+        match err {
+            DenyxError::Verifier(msg) => {
+                assert!(
+                    msg.contains("tainted-output-flow"),
+                    "verifier error should name the tainted-output-flow rule, got {msg:?}"
+                );
+                assert!(
+                    !msg.contains(secret),
+                    "verifier error message must not contain raw secret, got {msg:?}"
+                );
+            }
+            other => panic!("expected DenyxError::Verifier, got {other:?}"),
+        }
     }
 
     /// Phase 4.9 — local-only env.read value is scrubbed at output.
@@ -2768,21 +2814,27 @@ mod tests {
         let runner = WasmRunner::new(policy);
 
         let script = format!("print(\"auth=Bearer \" + env.read({var_name:?}))");
-        let outcome = runner
+        // Same verifier-rejected shape as the fs.read case above —
+        // env.read of a local-only var + print is statically refused.
+        let err = runner
             .run("test", &script, "env_local.star")
-            .expect("local-only env read succeeds");
+            .expect_err("verifier should reject local-only env + print");
         std::env::remove_var(&var_name);
         let _ = std::fs::remove_file(&policy_path);
 
-        let printed = outcome.printed.join("\n");
-        assert!(
-            !printed.contains(secret),
-            "raw env secret leaked: {printed:?}"
-        );
-        assert!(
-            printed.contains("[REDACTED]"),
-            "expected [REDACTED] in output, got {printed:?}"
-        );
+        match err {
+            DenyxError::Verifier(msg) => {
+                assert!(
+                    msg.contains("tainted-output-flow"),
+                    "verifier error should name the tainted-output-flow rule, got {msg:?}"
+                );
+                assert!(
+                    !msg.contains(secret),
+                    "verifier error message must not contain raw env secret, got {msg:?}"
+                );
+            }
+            other => panic!("expected DenyxError::Verifier, got {other:?}"),
+        }
     }
 
     /// Phase 5 acceptance criterion #4: a script with a runaway loop
@@ -2873,8 +2925,10 @@ runaway()
         use crate::audit::AuditStatus;
         let file_path = unique_tmp_path("fs_read_audit_deny");
         std::fs::write(&file_path, "audit-deny").expect("write fixture");
-        let policy_path =
-            write_temp_policy("fs_read_audit_deny", "[filesystem]\nread_allow = []\n");
+        let policy_path = write_temp_policy(
+            "fs_read_audit_deny",
+            "[filesystem]\nread_allow = [\"/dev/null\"]\n",
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let sink = std::sync::Arc::new(RecordingAuditSink::default());
         let runner = WasmRunner::new(policy).with_audit(sink.clone());
@@ -3101,9 +3155,14 @@ runaway()
         let _ = std::fs::remove_file(&target_path);
         let _ = std::fs::remove_file(&policy_path);
 
+        // Either the static verifier catches the read+write pattern,
+        // or the runtime outbound-taint check catches the bytes
+        // flowing through the host closure — both are valid
+        // denials of the same threat (local-only data flowing
+        // outbound). Accept either.
         match err {
-            DenyxError::Policy(_) => {}
-            other => panic!("expected DenyxError::Policy, got {other:?}"),
+            DenyxError::Policy(_) | DenyxError::Verifier(_) => {}
+            other => panic!("expected Policy or Verifier denial, got {other:?}"),
         }
         assert!(
             !exists_after,
@@ -3140,9 +3199,12 @@ runaway()
         let _ = std::fs::remove_file(&secret_path);
         let _ = std::fs::remove_file(&policy_path);
 
+        // Same as fs.write above — verifier may catch this statically
+        // before the runtime outbound-taint check runs. Both are
+        // valid denials of local-only-data-flowing-outbound.
         match err {
-            DenyxError::Policy(_) => {}
-            other => panic!("expected DenyxError::Policy, got {other:?}"),
+            DenyxError::Policy(_) | DenyxError::Verifier(_) => {}
+            other => panic!("expected Policy or Verifier denial, got {other:?}"),
         }
     }
 
