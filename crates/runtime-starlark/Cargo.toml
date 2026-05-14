@@ -1,0 +1,29 @@
+[package]
+name = "denyx-runtime-starlark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Pre-built wasm32-wasip1 Starlark interpreter for the denyx runtime. Embeds the .wasm artefact as a byte slice; consumers load it into wasmtime."
+readme = "README.md"
+keywords = ["security", "ai-agent", "starlark", "wasm", "wasmtime"]
+categories = ["development-tools"]
+
+# Files cargo packages into the published tarball. The .wasm is built
+# from crates/interpreter (a non-published workspace member) and staged
+# here by `scripts/build-runtime-starlark.sh` (locally) or by CI before
+# `cargo publish`. It is gitignored locally — see README.md for the
+# reproducibility recipe.
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "starlark_interpreter.wasm",
+    "Cargo.toml",
+    "README.md",
+]
+build = "build.rs"
+
+[dependencies]
