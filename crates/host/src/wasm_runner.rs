@@ -54,6 +54,18 @@ use denyx_runtime_starlark::STARLARK_INTERPRETER_WASM;
 
 use crate::{AuditSink, ConfirmHook, DenyAllConfirm, DenyxError, NullAuditSink, RunOutcome};
 
+/// Default Wasm fuel budget per `WasmRunner::run` call. Each Wasm
+/// instruction the guest executes consumes one unit of fuel; running
+/// out causes a `Trap::OutOfFuel` which `run()` maps to
+/// [`DenyxError::RuntimeLimit`]. The number is picked so a runaway
+/// Starlark loop like `for _ in range(10**9): pass` trips within ~1
+/// second of CPU on contemporary hardware (the Starlark interpreter
+/// emits many Wasm ops per Starlark op, so this is an upper bound on
+/// legitimate-script cost rather than a tight fit). Operators can
+/// tune via a future policy `runtime.max_wasm_fuel` field; for now
+/// the default is hardcoded.
+const DEFAULT_WASM_FUEL: u64 = 200_000_000;
+
 /// A Starlark runner that evaluates inside a wasmtime sandbox.
 ///
 /// Mirrors [`Runner`](crate::Runner)'s builder API so the swap in
@@ -113,6 +125,7 @@ impl WasmRunner {
 
         let mut config = Config::new();
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
+        config.consume_fuel(true);
         let engine =
             Engine::new(&config).map_err(|e| DenyxError::Other(format!("wasmtime engine: {e}")))?;
         let module = Module::new(&engine, STARLARK_INTERPRETER_WASM)
@@ -132,6 +145,9 @@ impl WasmRunner {
             captured_error: None,
         };
         let mut store = Store::new(&engine, state);
+        store
+            .set_fuel(DEFAULT_WASM_FUEL)
+            .map_err(|e| DenyxError::Other(format!("set wasm fuel: {e}")))?;
 
         let mut linker: Linker<WasmState> = Linker::new(&engine);
         add_to_linker_sync(&mut linker, |s: &mut WasmState| &mut s.wasi)
@@ -783,9 +799,21 @@ impl WasmRunner {
         if let Err(wasm_err) = start.call(&mut store, ()) {
             // An import closure may have set captured_error before
             // returning a wasmtime::Error. If so, surface the typed
-            // DenyxError variant; otherwise this is a real Wasm trap.
+            // DenyxError variant first.
             if let Some(captured) = store.data_mut().captured_error.take() {
                 return Err(captured);
+            }
+            // Fuel exhaustion is the gap-closing case from the
+            // migration plan: a runaway Starlark loop traps cleanly
+            // rather than running forever. Map it to RuntimeLimit so
+            // denyx-cli exits with code 6 (the same code the in-
+            // process Runner uses for wall-time deadline overruns).
+            if let Some(wasmtime::Trap::OutOfFuel) =
+                wasm_err.downcast_ref::<wasmtime::Trap>().copied()
+            {
+                return Err(DenyxError::RuntimeLimit(format!(
+                    "wasm fuel exhausted after {DEFAULT_WASM_FUEL} units"
+                )));
             }
             return Err(DenyxError::Other(format!("wasm trap: {wasm_err}")));
         }
@@ -1351,5 +1379,38 @@ mod tests {
             .expect_err("denied URL should error");
         let _ = std::fs::remove_file(&policy_path);
         assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
+    }
+
+    /// Phase 5 acceptance criterion #4: a script with a runaway loop
+    /// traps on Wasm fuel exhaustion rather than running forever. The
+    /// trap surfaces as `DenyxError::RuntimeLimit`, mapping to exit
+    /// code 6 in the CLI (parity with the in-process Runner's
+    /// wall-time deadline behaviour).
+    ///
+    /// Note: the assertion is on the typed error, not on wall-clock
+    /// time — flaky wall-clock assertions in unit tests are a known
+    /// pain point and we have no way to confirm "within 1 second" on
+    /// arbitrary CI hardware. The fact that the test completes at
+    /// all (rather than hanging) is the structural proof; CI's
+    /// per-test timeout catches the regression case.
+    #[test]
+    fn fuel_exhaustion_traps_runaway_loop() {
+        let runner = WasmRunner::new(secure_defaults_policy());
+        // 10**9 iterations would consume hundreds of millions of Wasm
+        // ops in the Starlark interpreter; well past DEFAULT_WASM_FUEL.
+        let script = r#"
+def runaway():
+    for _ in range(1000000000):
+        pass
+
+runaway()
+"#;
+        let err = runner
+            .run("test", script, "runaway.star")
+            .expect_err("runaway loop should trip the fuel limit");
+        match err {
+            DenyxError::RuntimeLimit(_) => {}
+            other => panic!("expected DenyxError::RuntimeLimit, got {other:?}"),
+        }
     }
 }
