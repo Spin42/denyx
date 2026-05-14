@@ -128,10 +128,17 @@ fn evaluate(req: &Request) -> Response {
         Ok(a) => a,
         Err(e) => return err_response("starlark-parse", e.to_string()),
     };
-    let globals =
-        GlobalsBuilder::extended_by(&[LibraryExtension::Print, LibraryExtension::StructType])
-            .with(denyx_builtins)
-            .build();
+    let globals = GlobalsBuilder::extended_by(&[
+        LibraryExtension::Print,
+        LibraryExtension::StructType,
+        LibraryExtension::NamespaceType,
+        LibraryExtension::Json,
+        LibraryExtension::Map,
+        LibraryExtension::Filter,
+        LibraryExtension::Debug,
+    ])
+    .with(denyx_builtins)
+    .build();
     let module = Module::new();
     let print_handler = HostPrintHandler;
     let mut eval = Evaluator::new(&module);
