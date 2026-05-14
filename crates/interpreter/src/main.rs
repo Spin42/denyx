@@ -97,6 +97,10 @@ fs = struct(
     write = _denyx_fs_write,
     delete = _denyx_fs_delete,
 )
+
+env = struct(
+    read = _denyx_env_read,
+)
 "#;
 
 #[cfg(target_arch = "wasm32")]
@@ -212,6 +216,12 @@ mod host {
         /// No return value. Same trap-on-denial / trap-on-io-error
         /// pattern as host_fs_write.
         pub fn host_fs_delete(path_ptr: u32, path_len: u32);
+
+        /// Read an environment variable. Argument: UTF-8 var-name
+        /// slice in guest memory. Returns the value via the same
+        /// packed-u64 alloc convention as host_fs_read. Policy
+        /// denials and missing-var errors trap the instance.
+        pub fn host_env_read(name_ptr: u32, name_len: u32) -> u64;
     }
 }
 
@@ -270,6 +280,12 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
             host::host_fs_delete(path.as_ptr() as u32, path.len() as u32);
         }
         Ok(starlark::values::none::NoneType)
+    }
+
+    /// Implementation for `env.read(name)`.
+    fn _denyx_env_read(name: &str) -> anyhow::Result<String> {
+        let packed = unsafe { host::host_env_read(name.as_ptr() as u32, name.len() as u32) };
+        unpack_string(packed)
     }
 }
 

@@ -16,8 +16,8 @@
 //! - stdin:  `{"task_id": "...", "source_path": "...", "source": "..."}`
 //! - stdout: `{"status": "ok"|"error", "result": "...", "error": {...}}`
 //! - imports under module `"denyx"`: `host_print` (4.1), `host_fs_read`
-//!   (4.3), `host_fs_write` (4.4), `host_fs_delete` (4.5); the rest
-//!   wired one capability at a
+//!   (4.3), `host_fs_write` (4.4), `host_fs_delete` (4.5),
+//!   `host_env_read` (4.6); the rest wired one capability at a
 //!   time in subsequent Phase 4 commits.
 //! - exports: `denyx_alloc(len)` / `denyx_dealloc(ptr, len)` — the host
 //!   calls these to return byte-buffer payloads (string results from
@@ -361,6 +361,86 @@ impl WasmRunner {
             )
             .map_err(|e| DenyxError::Other(format!("link host_fs_delete: {e}")))?;
 
+        // ── host_env_read (Phase 4.6) ─────────────────────────────
+        let env_read_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_env_read",
+                move |mut caller: Caller<'_, WasmState>,
+                      name_ptr: u32,
+                      name_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    // 1. Read name from guest memory.
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(Extern::into_memory)
+                        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+                    let mut name_buf = vec![0u8; name_len as usize];
+                    memory
+                        .read(&caller, name_ptr as usize, &mut name_buf)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_env_read: name read: {e}"))
+                        })?;
+                    let name = match std::str::from_utf8(&name_buf) {
+                        Ok(s) => s.to_owned(),
+                        Err(e) => {
+                            return Err(wasmtime::Error::msg(format!(
+                                "host_env_read: non-utf8 name: {e}"
+                            )));
+                        }
+                    };
+
+                    // 2. Gate through policy.
+                    if let Err(e) = env_read_policy.check_env_read(&name) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("env.read({name:?}): {e}")));
+                        return Err(wasmtime::Error::msg("env.read denied by policy"));
+                    }
+
+                    // 3. Read the env var. Missing var surfaces as
+                    //    DenyxError::Other — matches the in-process
+                    //    Runner, which raises a Starlark error rather
+                    //    than returning an empty string.
+                    let value = match std::env::var(&name) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Other(format!("env.read({name:?}): {e}")));
+                            return Err(wasmtime::Error::msg("env.read: lookup error"));
+                        }
+                    };
+                    let value_bytes = value.into_bytes();
+
+                    // 4. Empty fast path.
+                    if value_bytes.is_empty() {
+                        return Ok(0);
+                    }
+
+                    // 5. Allocate buffer in guest memory + write.
+                    let alloc = caller
+                        .get_export("denyx_alloc")
+                        .and_then(Extern::into_func)
+                        .ok_or_else(|| {
+                            wasmtime::Error::msg("guest missing `denyx_alloc` export")
+                        })?;
+                    let typed_alloc = alloc.typed::<u32, u32>(&caller).map_err(|e| {
+                        wasmtime::Error::msg(format!("denyx_alloc signature mismatch: {e}"))
+                    })?;
+                    let dest_ptr = typed_alloc
+                        .call(&mut caller, value_bytes.len() as u32)
+                        .map_err(|e| wasmtime::Error::msg(format!("denyx_alloc call: {e}")))?;
+                    memory
+                        .write(&mut caller, dest_ptr as usize, &value_bytes)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_env_read: write value: {e}"))
+                        })?;
+                    let packed = ((dest_ptr as u64) << 32) | (value_bytes.len() as u64);
+                    Ok(packed)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_env_read: {e}")))?;
+
         // Instantiate and run `_start`.
         let instance = linker
             .instantiate(&mut store, &module)
@@ -697,5 +777,57 @@ mod tests {
             exists_after,
             "denied fs.delete must not remove the target file"
         );
+    }
+
+    /// Phase 4.6 — allow path. Setting the env var on the test
+    /// process, listing it in `[environment].allow_vars`, and reading
+    /// from a script should return the value.
+    #[test]
+    fn env_read_allowed_var_returns_value() {
+        // SAFETY: unsynchronised env mutation is racy across threads
+        // in general, but this test sets a variable that no other
+        // test reads, and reads it back within the same test.
+        // unsafe { std::env::set_var(...) } is required as of Rust
+        // 2024 edition; we're on 2021 so the safe form works.
+        let var_name = format!("DENYX_WASM_RUNNER_TEST_VAR_{}", std::process::id());
+        std::env::set_var(&var_name, "phase-4.6 value");
+        let policy_path = write_temp_policy(
+            "env_read_ok",
+            &format!("[environment]\nallow_vars = [{var_name:?}]\n"),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!("print(env.read({var_name:?}))");
+        let outcome = runner
+            .run("test", &script, "env_read_ok.star")
+            .expect("runs");
+        std::env::remove_var(&var_name);
+        let _ = std::fs::remove_file(&policy_path);
+
+        assert_eq!(outcome.printed, vec!["phase-4.6 value".to_string()]);
+    }
+
+    /// Phase 4.6 — deny path. Empty allow_vars surfaces denial as
+    /// DenyxError::Policy.
+    #[test]
+    fn env_read_denied_var_surfaces_typed_error() {
+        let var_name = format!("DENYX_WASM_RUNNER_TEST_DENIED_{}", std::process::id());
+        std::env::set_var(&var_name, "should-not-be-read");
+        let policy_path = write_temp_policy("env_read_denied", "[environment]\nallow_vars = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!("print(env.read({var_name:?}))");
+        let err = runner
+            .run("test", &script, "env_read_denied.star")
+            .expect_err("denied env.read should error");
+        std::env::remove_var(&var_name);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::Policy(_) => {}
+            other => panic!("expected DenyxError::Policy, got {other:?}"),
+        }
     }
 }
