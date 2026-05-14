@@ -409,6 +409,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "denyx-interpreter"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "starlark",
+]
+
+[[package]]
 name = "denyx-local-mcp"
 version = "0.3.0"
 dependencies = [

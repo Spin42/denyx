@@ -1,0 +1,22 @@
+[package]
+name = "denyx-interpreter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "wasm32-wasip1 Starlark evaluator for denyx. Source crate for the .wasm artefact embedded in denyx-runtime-starlark — not published."
+# This crate is the *source* for the Wasm artefact. Only the compiled
+# .wasm ships, inside the published denyx-runtime-starlark crate.
+publish = false
+
+[[bin]]
+name = "denyx-interpreter"
+path = "src/main.rs"
+
+[dependencies]
+starlark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
