@@ -79,7 +79,7 @@ fn wasm_main() {
 
 #[cfg(target_arch = "wasm32")]
 fn evaluate(req: &Request) -> Response {
-    use starlark::environment::{Globals, Module};
+    use starlark::environment::{Globals, LibraryExtension, Module};
     use starlark::eval::Evaluator;
     use starlark::syntax::{AstModule, Dialect};
 
@@ -89,7 +89,13 @@ fn evaluate(req: &Request) -> Response {
         Ok(a) => a,
         Err(e) => return err_response("starlark-parse", e.to_string()),
     };
-    let globals = Globals::standard();
+    // `Globals::standard()` is the Starlark spec — no `print`. denyx
+    // scripts use `print` (it's the canonical observable side-effect),
+    // so add the Print extension. The list is explicit rather than
+    // using `Globals::extended()` so any future Bazel-flavored
+    // extensions we want to expose are an explicit decision, not a
+    // silent inheritance.
+    let globals = Globals::extended_by(&[LibraryExtension::Print]);
     let module = Module::new();
     // Declare the print handler before the Evaluator so it outlives the
     // borrow set_print_handler() takes. Rust drops locals in reverse
