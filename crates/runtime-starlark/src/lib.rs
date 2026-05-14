@@ -6,6 +6,15 @@
 //! wasmtime, instantiate with their import set, and run gated
 //! Starlark scripts inside the sandbox.
 //!
+//! Also exposes a pre-compiled `.cwasm` (wasmtime serialized module)
+//! produced at build time by `build.rs` on the host architecture.
+//! Loading the cwasm via `Module::deserialize` is single-digit
+//! milliseconds; loading the raw `.wasm` via `Module::new` is
+//! several hundred milliseconds (wasmtime JIT-compiling the 5 MB
+//! interpreter). Consumers should prefer the cwasm with a JIT
+//! fallback for cross-architecture or cross-version safety —
+//! see `denyx_host::WasmRunner` for the canonical pattern.
+//!
 //! This crate is the distribution form of the Starlark interpreter.
 //! End users do not need the `wasm32-wasip1` Rust target installed —
 //! the .wasm ships pre-built in this crate.
@@ -20,6 +29,21 @@
 ///
 /// Hand this to `wasmtime::Module::new(&engine, STARLARK_INTERPRETER_WASM)`.
 pub const STARLARK_INTERPRETER_WASM: &[u8] = include_bytes!("../starlark_interpreter.wasm");
+
+/// AOT-compiled module bytes produced by `build.rs` from
+/// [`STARLARK_INTERPRETER_WASM`] at build time. Architecture- and
+/// wasmtime-version-specific; load with
+/// `unsafe { wasmtime::Module::deserialize(&engine, STARLARK_INTERPRETER_CWASM) }`
+/// and fall back to `Module::new(&engine, STARLARK_INTERPRETER_WASM)`
+/// if deserialize fails (mismatched wasmtime version, different
+/// Config flags, different target architecture).
+///
+/// Safety / trust: this is built from the in-tree `.wasm` at the
+/// time this crate is compiled. It is NOT loaded from any external
+/// source at runtime. The `unsafe` on `deserialize` reflects
+/// wasmtime's API contract — it trusts the producer of the bytes —
+/// not a runtime trust decision.
+pub const STARLARK_INTERPRETER_CWASM: &[u8] = include_bytes!(env!("STARLARK_CWASM_PATH"));
 
 /// Version of the upstream `starlark` crate the interpreter was built
 /// against. Set by `build.rs` from the `STARLARK_VERSION` env var;
@@ -43,6 +67,14 @@ mod tests {
             &STARLARK_INTERPRETER_WASM[..8],
             &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
             "wasm magic bytes missing — artefact is not a valid Wasm module"
+        );
+    }
+
+    #[test]
+    fn cwasm_byte_slice_is_non_empty() {
+        assert!(
+            !STARLARK_INTERPRETER_CWASM.is_empty(),
+            "cwasm slice is empty — build.rs may have skipped AOT compile"
         );
     }
 }

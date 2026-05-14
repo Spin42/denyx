@@ -165,36 +165,32 @@ Two costs matter and they are very different:
 
 | Cost | In-process Runner | WasmRunner | Why |
 |------|-------------------|------------|-----|
-| **Cold call** (process startup + 1 `print`) | 3.7 ms median | **481 ms median** | The wasm path pays a one-time wasmtime JIT-compile of the embedded ~5 MB Starlark interpreter. Paid **once per `WasmRunner` instance**, not per script call. |
-| **Amortized per-call** (T(1000 prints) − T(1 print)) / 999 | 0.003 ms | 0.022 ms | Marginal cost of one more script-level operation inside an already-instantiated runner. Wasm path is ~7× slower per op, but both are negligible in absolute terms. |
+| **Cold call** (process startup + 1 `print`) | 3.8 ms median | **16.5 ms median** | The wasm path loads the AOT-precompiled `.cwasm` shipped by `denyx-runtime-starlark` via `Module::deserialize`. The cwasm is produced at `denyx-runtime-starlark`'s build time on the host architecture (see its `build.rs`). If deserialize fails (different wasmtime version, different Config flags, different target arch), the WasmRunner falls back to JIT-compiling the raw `.wasm` — ~480 ms — same as before AOT existed. |
+| **Amortized per-call** (T(1000 prints) − T(1 print)) / 999 | 0.003 ms | 0.004 ms | Marginal cost of one more script-level operation inside an already-instantiated runner. Statistically indistinguishable between the two runners. |
 
 What this means in practice:
 
-- **`denyx run --use-wasm <script>` from a fresh shell** pays the
-  cold-call cost every time — ~481 ms per invocation on top of the
-  3.7 ms the in-process runner takes. For interactive use this is
-  noticeably slower; for batch / scripted use it's negligible.
+- **`denyx run --use-wasm <script>` from a fresh shell** pays
+  ~13 ms more than the in-process runner per invocation — wasmtime
+  instantiation, store setup, linker wiring. Imperceptible for
+  interactive use; matched closely enough by the in-process runner
+  that the cost is no longer a blocker for promoting `--use-wasm`
+  to default.
 
-- **`denyx-mcp --use-wasm` (long-lived server)** pays the
-  cold-call cost ONCE at startup. Every subsequent tool call costs
-  ~22 µs of wasm overhead — invisible next to the actual IO the
-  builtin performs.
+- **`denyx-mcp --use-wasm` (long-lived server)** pays the cold-call
+  cost once at startup. Every subsequent tool call costs ~4 µs of
+  wasm overhead, invisible next to the underlying IO.
 
 - **The runner choice does not change the IO bottleneck.** A
   `fs.read` of a 10 KB file is ~10× more expensive than the runner
   overhead on either path. A `net.http_post` is ~100× more
-  expensive. The wasm cold-call cost is the one place where the
-  runner choice actually shows up in wall-clock time.
+  expensive.
 
-Optimisation paths if cold-call becomes a blocker:
-
-- `wasmtime::Module::serialize` produces an AOT-compiled `.cwasm`
-  loadable in single-digit milliseconds. Could be done at
-  `denyx-runtime-starlark` build time and shipped instead of (or
-  alongside) the raw `.wasm`. Not done yet.
-- `denyx run` could spawn a long-lived `denyx-mcp`-like helper and
-  reuse its WasmRunner across invocations. Same idea as a daemon.
-  Not done yet.
+If the `.cwasm` deserialize fails at runtime (uncommon but possible
+on a host with a different wasmtime patch version than the build,
+or a different microarchitecture), the WasmRunner transparently
+falls back to JIT-compiling the raw `.wasm` — ~480 ms slower but
+always correct. No user action is needed.
 
 Memory: wasmtime instances reserve a 4 GB linear memory address
 range per `Store`. On 64-bit Linux this is virtual, not resident;

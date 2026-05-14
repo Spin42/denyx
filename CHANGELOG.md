@@ -63,14 +63,19 @@ breaking API changes between minor versions until they hit `1.0.0`.
   for `DenyxError::RuntimeLimit`'s reason string
   (`"wasm fuel exhausted after N units"` vs `"wall-time deadline
   exceeded"`).
-- Cold-call cost on the wasm path is ~481 ms median per
-  `WasmRunner` instance (wasmtime JIT-compiles the embedded
-  Starlark interpreter — ~5 MB of wasm → native). Paid once per
-  instance: every `denyx run --use-wasm` invocation pays it;
-  `denyx-mcp --use-wasm` pays it only at startup. Amortized
-  per-call cost inside an already-instantiated runner is ~22 µs
-  vs ~3 µs for the in-process runner — both are negligible next
-  to the underlying IO. Measured by `scripts/bench-wasm-runner.py`.
+- Cold-call cost on the wasm path is ~16.5 ms median per
+  `WasmRunner` instance — down from ~481 ms in earlier builds.
+  `denyx-runtime-starlark`'s `build.rs` AOT-precompiles the
+  embedded `.wasm` to a wasmtime serialized module (`.cwasm`) on
+  the host architecture; `WasmRunner` loads it via
+  `Module::deserialize` (single-digit ms) instead of JIT-compiling
+  the raw `.wasm` (~480 ms). If deserialize fails (different
+  wasmtime version, different Config flags, target-architecture
+  mismatch), the runner falls back transparently to JIT-compiling
+  the raw `.wasm` — same behaviour as before AOT existed.
+  Amortized per-call cost inside an already-instantiated runner is
+  ~4 µs vs ~3 µs for the in-process runner — statistically
+  indistinguishable. Measured by `scripts/bench-wasm-runner.py`.
 
 ### Not yet validated (gates on promoting `--use-wasm` to default)
 

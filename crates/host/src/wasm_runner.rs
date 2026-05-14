@@ -50,7 +50,7 @@ use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::WasiCtxBuilder;
 
 use denyx_policy::Policy;
-use denyx_runtime_starlark::STARLARK_INTERPRETER_WASM;
+use denyx_runtime_starlark::{STARLARK_INTERPRETER_CWASM, STARLARK_INTERPRETER_WASM};
 
 use crate::taint::{redact_lines, TaintRegistry};
 use crate::{
@@ -106,8 +106,20 @@ impl WasmRunner {
         config.consume_fuel(true);
         let engine = Engine::new(&config)
             .expect("wasmtime engine: embedded .wasm build config is known-good");
-        let module = Module::new(&engine, STARLARK_INTERPRETER_WASM)
-            .expect("wasmtime module: embedded .wasm is known-good (see denyx-runtime-starlark)");
+        // Prefer the AOT-compiled `.cwasm` shipped by denyx-runtime-
+        // starlark — single-digit ms to load. If deserialize fails
+        // (different wasmtime version, mismatched Config flags,
+        // target-architecture mismatch), fall back to JIT-compiling
+        // the raw `.wasm` — same behaviour as before AOT existed,
+        // ~470ms slower but always correct. Safety: the cwasm bytes
+        // come from our own build.rs of the in-tree .wasm; they are
+        // not loaded from any external source.
+        let module = match unsafe { Module::deserialize(&engine, STARLARK_INTERPRETER_CWASM) } {
+            Ok(m) => m,
+            Err(_) => Module::new(&engine, STARLARK_INTERPRETER_WASM).expect(
+                "wasmtime module: embedded .wasm is known-good (see denyx-runtime-starlark)",
+            ),
+        };
         Self {
             policy: Arc::new(policy),
             audit: Arc::new(NullAuditSink),

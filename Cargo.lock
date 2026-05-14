@@ -788,6 +788,9 @@ dependencies = [
 [[package]]
 name = "denyx-runtime-starlark"
 version = "0.3.0"
+dependencies = [
+ "wasmtime",
+]
 
 [[package]]
 name = "derivative"

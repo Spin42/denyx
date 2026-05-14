@@ -27,3 +27,11 @@ include = [
 build = "build.rs"
 
 [dependencies]
+
+# Build-time dependency used to AOT-compile the .wasm into a .cwasm
+# (wasmtime's serialized-module format) on the host architecture.
+# Saves ~470ms of cold-start at every `WasmRunner::new()` call site.
+# End users do not pay the JIT-compile cost at runtime; the build of
+# this crate pays it once.
+[build-dependencies]
+wasmtime.workspace = true
