@@ -94,6 +94,7 @@ fn wasm_main() {
 const PRELUDE: &str = r#"
 fs = struct(
     read = _denyx_fs_read,
+    write = _denyx_fs_write,
 )
 "#;
 
@@ -179,6 +180,7 @@ fn print_response(resp: &Response) {
 // String values cross via (ptr: u32, len: u32) pairs into the
 // interpreter's linear memory. Imports that return strings pack the
 // result `(ptr, len)` into a single `u64`: `(ptr as u64) << 32 | len`.
+// Imports that produce no return value are plain `extern "C"` functions.
 
 #[cfg(target_arch = "wasm32")]
 mod host {
@@ -198,6 +200,12 @@ mod host {
         /// Policy denials trap the instance — host catches the trap
         /// and surfaces `DenyxError::Policy`.
         pub fn host_fs_read(path_ptr: u32, path_len: u32) -> u64;
+
+        /// Write a file. Arguments: UTF-8 path and content slices in
+        /// guest memory. No return value. Policy denials and IO
+        /// errors trap the instance, surfacing as `DenyxError::Policy`
+        /// / `DenyxError::Io` via the host's captured_error slot.
+        pub fn host_fs_write(path_ptr: u32, path_len: u32, content_ptr: u32, content_len: u32);
     }
 }
 
@@ -232,6 +240,22 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
     fn _denyx_fs_read(path: &str) -> anyhow::Result<String> {
         let packed = unsafe { host::host_fs_read(path.as_ptr() as u32, path.len() as u32) };
         unpack_string(packed)
+    }
+
+    /// Implementation for `fs.write(path, content)`.
+    fn _denyx_fs_write(
+        path: &str,
+        content: &str,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        unsafe {
+            host::host_fs_write(
+                path.as_ptr() as u32,
+                path.len() as u32,
+                content.as_ptr() as u32,
+                content.len() as u32,
+            );
+        }
+        Ok(starlark::values::none::NoneType)
     }
 }
 

@@ -16,8 +16,8 @@
 //! - stdin:  `{"task_id": "...", "source_path": "...", "source": "..."}`
 //! - stdout: `{"status": "ok"|"error", "result": "...", "error": {...}}`
 //! - imports under module `"denyx"`: `host_print` (4.1), `host_fs_read`
-//!   (4.3); the rest wired one capability at a time in subsequent
-//!   Phase 4 commits.
+//!   (4.3), `host_fs_write` (4.4); the rest wired one capability at a
+//!   time in subsequent Phase 4 commits.
 //! - exports: `denyx_alloc(len)` / `denyx_dealloc(ptr, len)` — the host
 //!   calls these to return byte-buffer payloads (string results from
 //!   gated builtins) back into the interpreter's linear memory.
@@ -28,6 +28,8 @@
 //! `(ptr as u64) << 32 | (len as u64)`. The guest unpacks, copies the
 //! UTF-8 payload into an owned `String`, and frees the host-allocated
 //! buffer via `denyx_dealloc`. `(0, 0)` represents the empty string.
+//! Imports that produce no result (e.g. `fs.write`) are plain void
+//! functions; failure surfaces as a trap.
 //!
 //! ## Error mapping
 //!
@@ -243,6 +245,69 @@ impl WasmRunner {
             )
             .map_err(|e| DenyxError::Other(format!("link host_fs_read: {e}")))?;
 
+        // ── host_fs_write (Phase 4.4) ─────────────────────────────
+        let fs_write_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_fs_write",
+                move |mut caller: Caller<'_, WasmState>,
+                      path_ptr: u32,
+                      path_len: u32,
+                      content_ptr: u32,
+                      content_len: u32|
+                      -> Result<(), wasmtime::Error> {
+                    // 1. Read path and content from guest memory.
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(Extern::into_memory)
+                        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+                    let mut path_buf = vec![0u8; path_len as usize];
+                    memory
+                        .read(&caller, path_ptr as usize, &mut path_buf)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_fs_write: path read: {e}"))
+                        })?;
+                    let path = match std::str::from_utf8(&path_buf) {
+                        Ok(s) => s.to_owned(),
+                        Err(e) => {
+                            return Err(wasmtime::Error::msg(format!(
+                                "host_fs_write: non-utf8 path: {e}"
+                            )));
+                        }
+                    };
+                    let mut content_buf = vec![0u8; content_len as usize];
+                    memory
+                        .read(&caller, content_ptr as usize, &mut content_buf)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_fs_write: content read: {e}"))
+                        })?;
+
+                    // 2. Gate through policy.
+                    let path_obj = std::path::Path::new(&path);
+                    if let Err(e) = fs_write_policy.check_fs_write(path_obj) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("fs.write({path:?}): {e}")));
+                        return Err(wasmtime::Error::msg("fs.write denied by policy"));
+                    }
+
+                    // 3. Perform the IO. We accept arbitrary bytes
+                    //    from the guest (content is treated as opaque
+                    //    bytes here, not necessarily UTF-8). Starlark
+                    //    strings are UTF-8 so this is a no-op for
+                    //    well-typed input, but the host shouldn't
+                    //    impose a tighter contract than the wire
+                    //    protocol demands.
+                    if let Err(e) = std::fs::write(path_obj, &content_buf) {
+                        caller.data_mut().captured_error = Some(DenyxError::Io(e));
+                        return Err(wasmtime::Error::msg("fs.write: io error"));
+                    }
+
+                    Ok(())
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_fs_write: {e}")))?;
+
         // Instantiate and run `_start`.
         let instance = linker
             .instantiate(&mut store, &module)
@@ -335,11 +400,23 @@ mod tests {
         Policy::secure_defaults_at(std::env::current_dir().unwrap()).expect("secure-defaults loads")
     }
 
-    fn write_temp_policy(toml_body: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "denyx_wasm_runner_test_{}.toml",
-            std::process::id()
-        ));
+    /// Allocate a unique scratch path under /tmp so parallel test runs
+    /// don't collide. Using just `std::process::id()` was insufficient:
+    /// `cargo test` runs every test in the same process by default, and
+    /// every helper call would have returned the same path, letting one
+    /// test overwrite another's fixture mid-run.
+    fn unique_tmp_path(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "denyx_wasm_runner_{prefix}_{pid}_{n}",
+            pid = std::process::id()
+        ))
+    }
+
+    fn write_temp_policy(tag: &str, toml_body: &str) -> std::path::PathBuf {
+        let path = unique_tmp_path(&format!("policy_{tag}"));
         std::fs::write(&path, toml_body).expect("write temp policy");
         path
     }
@@ -393,15 +470,15 @@ mod tests {
     /// crosses the allocator → guest reads + prints.
     #[test]
     fn fs_read_allowed_path_returns_content() {
-        let file_path = std::env::temp_dir().join(format!(
-            "denyx_wasm_runner_fs_read_ok_{}.txt",
-            std::process::id()
-        ));
+        let file_path = unique_tmp_path("fs_read_ok");
         std::fs::write(&file_path, "phase-4.3 content").expect("write fixture");
-        let policy_path = write_temp_policy(&format!(
-            "[filesystem]\nread_allow = [{:?}]\n",
-            file_path.display().to_string()
-        ));
+        let policy_path = write_temp_policy(
+            "fs_read_ok",
+            &format!(
+                "[filesystem]\nread_allow = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
 
@@ -420,13 +497,10 @@ mod tests {
     /// wasm trap), validating the captured_error round-trip.
     #[test]
     fn fs_read_denied_path_surfaces_typed_error() {
-        let file_path = std::env::temp_dir().join(format!(
-            "denyx_wasm_runner_fs_read_denied_{}.txt",
-            std::process::id()
-        ));
+        let file_path = unique_tmp_path("fs_read_denied");
         std::fs::write(&file_path, "should-not-be-read").expect("write fixture");
         // No read_allow entry covers this path.
-        let policy_path = write_temp_policy("[filesystem]\nread_allow = []\n");
+        let policy_path = write_temp_policy("fs_read_denied", "[filesystem]\nread_allow = []\n");
         let policy = Policy::load(&policy_path).expect("policy loads");
         let runner = WasmRunner::new(policy);
 
@@ -441,5 +515,75 @@ mod tests {
             DenyxError::Policy(_) => {}
             other => panic!("expected DenyxError::Policy, got {other:?}"),
         }
+    }
+
+    /// Phase 4.4 — allow path. A policy with the target in
+    /// `write_allow` lets the script create the file with the
+    /// supplied content. Validates: gate accepts → IO succeeds →
+    /// file contents match.
+    #[test]
+    fn fs_write_allowed_path_creates_file() {
+        let file_path = unique_tmp_path("fs_write_ok");
+        let _ = std::fs::remove_file(&file_path);
+        let policy_path = write_temp_policy(
+            "fs_write_ok",
+            &format!(
+                "[filesystem]\nwrite_allow = [{:?}]\n",
+                file_path.display().to_string()
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!(
+            "fs.write({:?}, \"phase-4.4 content\")",
+            file_path.display().to_string()
+        );
+        let outcome = runner
+            .run("test", &script, "fs_write_ok.star")
+            .expect("runs");
+
+        let written = std::fs::read_to_string(&file_path).expect("file was written");
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        assert_eq!(written, "phase-4.4 content");
+        assert!(
+            outcome.printed.is_empty(),
+            "fs.write should not produce printed output, got {:?}",
+            outcome.printed
+        );
+    }
+
+    /// Phase 4.4 — deny path. A policy with empty `write_allow`
+    /// surfaces the denial as `DenyxError::Policy`. The target file
+    /// must not exist after the run.
+    #[test]
+    fn fs_write_denied_path_surfaces_typed_error() {
+        let file_path = unique_tmp_path("fs_write_denied");
+        let _ = std::fs::remove_file(&file_path);
+        let policy_path = write_temp_policy("fs_write_denied", "[filesystem]\nwrite_allow = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = format!(
+            "fs.write({:?}, \"should not appear\")",
+            file_path.display().to_string()
+        );
+        let err = runner
+            .run("test", &script, "fs_write_denied.star")
+            .expect_err("denied write should error");
+        let exists_after = file_path.exists();
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::Policy(_) => {}
+            other => panic!("expected DenyxError::Policy, got {other:?}"),
+        }
+        assert!(
+            !exists_after,
+            "denied fs.write must not create the target file"
+        );
     }
 }
