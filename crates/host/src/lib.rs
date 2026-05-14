@@ -42,7 +42,7 @@ pub mod wasm_runner;
 /// auto-follow and surface 3xx responses as a clear error so
 /// scripts must call net.http_* again on the new URL (which goes
 /// through the policy gate).
-fn no_redirect_agent() -> &'static ureq::Agent {
+pub(crate) fn no_redirect_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| ureq::AgentBuilder::new().redirects(0).build())
 }

@@ -105,6 +105,14 @@ env = struct(
 subprocess = struct(
     exec = _denyx_subprocess_exec,
 )
+
+net = struct(
+    http_get = _denyx_net_http_get,
+    http_post = _denyx_net_http_post,
+    http_put = _denyx_net_http_put,
+    http_patch = _denyx_net_http_patch,
+    http_delete = _denyx_net_http_delete,
+)
 "#;
 
 #[cfg(target_arch = "wasm32")]
@@ -120,26 +128,15 @@ fn evaluate(req: &Request) -> Response {
         Ok(a) => a,
         Err(e) => return err_response("starlark-parse", e.to_string()),
     };
-    // Globals = Starlark standard library + Bazel-flavored extensions
-    // PRELUDE relies on (Print for `print()`, StructType for `struct(…)`)
-    // + denyx's gated builtins. Extensions are listed explicitly rather
-    // than using `Globals::extended()` so any future surface change is
-    // a deliberate decision rather than a silent inheritance.
     let globals =
         GlobalsBuilder::extended_by(&[LibraryExtension::Print, LibraryExtension::StructType])
             .with(denyx_builtins)
             .build();
     let module = Module::new();
-    // Declare the print handler before the Evaluator so it outlives the
-    // borrow set_print_handler() takes. Rust drops locals in reverse
-    // declaration order; getting this wrong is an E0597 at build time.
     let print_handler = HostPrintHandler;
     let mut eval = Evaluator::new(&module);
     eval.set_print_handler(&print_handler);
 
-    // Evaluate the prelude into the module's namespace. PRELUDE is a
-    // hardcoded constant — failure here means the interpreter is
-    // broken, not the user's script.
     let prelude_ast =
         AstModule::parse("denyx_prelude.star", PRELUDE.to_owned(), &Dialect::Standard)
             .expect("PRELUDE is a hardcoded constant; should always parse");
@@ -179,60 +176,23 @@ fn print_response(resp: &Response) {
 }
 
 // ── Wasm imports the host provides ─────────────────────────────────────
-//
-// Each function corresponds to a denyx capability; the host (Phase 4)
-// implements them via wasmtime Linker::func_wrap, gating each call
-// through the existing policy enforcement before performing the
-// operation. From inside the interpreter we declare them as plain
-// `extern "C"` imports and call them directly.
-//
-// String values cross via (ptr: u32, len: u32) pairs into the
-// interpreter's linear memory. Imports that return strings pack the
-// result `(ptr, len)` into a single `u64`: `(ptr as u64) << 32 | len`.
-// Imports that produce no return value are plain `extern "C"` functions.
 
 #[cfg(target_arch = "wasm32")]
 mod host {
     #[link(wasm_import_module = "denyx")]
     extern "C" {
-        /// Receive a `print()` output line. The host buffers these in the
-        /// run-result; depending on host policy it may also stream them
-        /// to its own stdout.
         pub fn host_print(ptr: u32, len: u32);
-
-        /// Read a file. Argument: UTF-8 path slice at `(path_ptr,
-        /// path_len)` in guest memory. Returns the file contents as a
-        /// packed `(ptr: u64<<32, len: u64 & 0xFFFFFFFF)` u64 pointing
-        /// into a freshly `denyx_alloc`-allocated guest buffer the
-        /// caller must free with `denyx_dealloc`.
-        ///
-        /// Policy denials trap the instance — host catches the trap
-        /// and surfaces `DenyxError::Policy`.
         pub fn host_fs_read(path_ptr: u32, path_len: u32) -> u64;
-
-        /// Write a file. Arguments: UTF-8 path and content slices in
-        /// guest memory. No return value. Policy denials and IO
-        /// errors trap the instance, surfacing as `DenyxError::Policy`
-        /// / `DenyxError::Io` via the host's captured_error slot.
         pub fn host_fs_write(path_ptr: u32, path_len: u32, content_ptr: u32, content_len: u32);
-
-        /// Delete a file. Argument: UTF-8 path slice in guest memory.
-        /// No return value. Same trap-on-denial / trap-on-io-error
-        /// pattern as host_fs_write.
         pub fn host_fs_delete(path_ptr: u32, path_len: u32);
-
-        /// Read an environment variable. Argument: UTF-8 var-name
-        /// slice in guest memory. Returns the value via the same
-        /// packed-u64 alloc convention as host_fs_read. Policy
-        /// denials and missing-var errors trap the instance.
         pub fn host_env_read(name_ptr: u32, name_len: u32) -> u64;
-
-        /// Spawn a subprocess. Argument: JSON-encoded `Vec<String>`
-        /// argv at `(argv_json_ptr, argv_json_len)` in guest memory.
-        /// Returns stdout as a packed-u64 alloc. Three policy checks
-        /// gate the call: argv[0] basename, argv args, argv path
-        /// substrings. Non-zero exit + io errors trap.
         pub fn host_subprocess_exec(argv_json_ptr: u32, argv_json_len: u32) -> u64;
+        pub fn host_net_http_get(url_ptr: u32, url_len: u32) -> u64;
+        pub fn host_net_http_post(url_ptr: u32, url_len: u32, body_ptr: u32, body_len: u32) -> u64;
+        pub fn host_net_http_put(url_ptr: u32, url_len: u32, body_ptr: u32, body_len: u32) -> u64;
+        pub fn host_net_http_patch(url_ptr: u32, url_len: u32, body_ptr: u32, body_len: u32)
+            -> u64;
+        pub fn host_net_http_delete(url_ptr: u32, url_len: u32) -> u64;
     }
 }
 
@@ -250,26 +210,15 @@ impl starlark::PrintHandler for HostPrintHandler {
 }
 
 // ── Gated builtins (Starlark globals) ──────────────────────────────────
-//
-// These functions are visible in Starlark as `_denyx_fs_read`, etc.
-// PRELUDE re-binds them under capability-grouped structs so scripts
-// use the public `fs.read`, `net.http_get`, … forms.
-//
-// Each function unpacks the host's packed-u64 return, copies the
-// payload into an owned `String`, frees the host-allocated buffer via
-// `denyx_dealloc`, and returns. Host-side denials surface here as
-// Starlark errors propagated from the wasmtime trap.
 
 #[cfg(target_arch = "wasm32")]
 #[starlark::starlark_module]
 fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
-    /// Implementation for `fs.read(path)`.
     fn _denyx_fs_read(path: &str) -> anyhow::Result<String> {
         let packed = unsafe { host::host_fs_read(path.as_ptr() as u32, path.len() as u32) };
         unpack_string(packed)
     }
 
-    /// Implementation for `fs.write(path, content)`.
     fn _denyx_fs_write(
         path: &str,
         content: &str,
@@ -285,7 +234,6 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
         Ok(starlark::values::none::NoneType)
     }
 
-    /// Implementation for `fs.delete(path)`.
     fn _denyx_fs_delete(path: &str) -> anyhow::Result<starlark::values::none::NoneType> {
         unsafe {
             host::host_fs_delete(path.as_ptr() as u32, path.len() as u32);
@@ -293,16 +241,11 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
         Ok(starlark::values::none::NoneType)
     }
 
-    /// Implementation for `env.read(name)`.
     fn _denyx_env_read(name: &str) -> anyhow::Result<String> {
         let packed = unsafe { host::host_env_read(name.as_ptr() as u32, name.len() as u32) };
         unpack_string(packed)
     }
 
-    /// Implementation for `subprocess.exec(argv)`. The argv list is
-    /// JSON-serialized for the wire — multi-string lists don't fit the
-    /// (ptr, len) convention used for single strings. Host parses,
-    /// gates, spawns the process, returns stdout.
     fn _denyx_subprocess_exec(
         argv: starlark::values::list::UnpackList<String>,
     ) -> anyhow::Result<String> {
@@ -312,6 +255,52 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
         let packed = unsafe {
             host::host_subprocess_exec(argv_json.as_ptr() as u32, argv_json.len() as u32)
         };
+        unpack_string(packed)
+    }
+
+    fn _denyx_net_http_get(url: &str) -> anyhow::Result<String> {
+        let packed = unsafe { host::host_net_http_get(url.as_ptr() as u32, url.len() as u32) };
+        unpack_string(packed)
+    }
+
+    fn _denyx_net_http_post(url: &str, body: &str) -> anyhow::Result<String> {
+        let packed = unsafe {
+            host::host_net_http_post(
+                url.as_ptr() as u32,
+                url.len() as u32,
+                body.as_ptr() as u32,
+                body.len() as u32,
+            )
+        };
+        unpack_string(packed)
+    }
+
+    fn _denyx_net_http_put(url: &str, body: &str) -> anyhow::Result<String> {
+        let packed = unsafe {
+            host::host_net_http_put(
+                url.as_ptr() as u32,
+                url.len() as u32,
+                body.as_ptr() as u32,
+                body.len() as u32,
+            )
+        };
+        unpack_string(packed)
+    }
+
+    fn _denyx_net_http_patch(url: &str, body: &str) -> anyhow::Result<String> {
+        let packed = unsafe {
+            host::host_net_http_patch(
+                url.as_ptr() as u32,
+                url.len() as u32,
+                body.as_ptr() as u32,
+                body.len() as u32,
+            )
+        };
+        unpack_string(packed)
+    }
+
+    fn _denyx_net_http_delete(url: &str) -> anyhow::Result<String> {
+        let packed = unsafe { host::host_net_http_delete(url.as_ptr() as u32, url.len() as u32) };
         unpack_string(packed)
     }
 }
@@ -325,48 +314,18 @@ fn unpack_string(packed: u64) -> anyhow::Result<String> {
     if ptr == 0 || len == 0 {
         return Ok(String::new());
     }
-    // SAFETY: host wrote `len` bytes at `ptr` via denyx_alloc; we own
-    // this buffer until we call denyx_dealloc below.
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let result = std::str::from_utf8(bytes)
         .map(|s| s.to_owned())
         .map_err(|e| anyhow::anyhow!("host-returned string is not valid UTF-8: {e}"));
-    // SAFETY: pairing the denyx_alloc(len) call the host made for us.
     unsafe { denyx_dealloc(ptr, len) };
     result
 }
 
 // ── Allocator exports the host calls ───────────────────────────────────
-//
-// Phase 4.2 — the host uses these to return byte-buffers across the
-// import boundary. Convention:
-//
-//   1. Host has a string `s` to give back (e.g. `fs.read` result).
-//   2. Host calls guest's `denyx_alloc(s.len() as u32)` and receives
-//      a pointer into the guest's linear memory.
-//   3. Host writes `s.as_bytes()` to that pointer (via wasmtime's
-//      `Memory::write`).
-//   4. Host returns the (ptr, len) pair as the import's multi-value
-//      result (or via a known out-pointer convention, TBD per import).
-//   5. Guest reads UTF-8 from (ptr, len), takes ownership, and frees
-//      via `denyx_dealloc(ptr, len)`.
-//
-// The implementation leaks a `Vec<u8>` of the requested capacity. The
-// guest is responsible for the matching `denyx_dealloc` to reclaim
-// the storage. Mismatched calls leak the buffer permanently — same
-// invariant the wasm-bindgen ABI relies on.
 
-/// Allocate a `len`-byte buffer in the interpreter's linear memory
-/// and return the pointer.
-///
-/// Returns `0` if `len == 0` (no allocation needed; reading 0 bytes
-/// at any pointer is a no-op).
-///
-/// # Safety
-///
-/// Caller must pair every successful `denyx_alloc(len)` with exactly
-/// one `denyx_dealloc(ptr, len)`. Leaked buffers stay until the
-/// instance is dropped.
+/// Allocate a `len`-byte buffer in the interpreter's linear memory.
+/// Pair every successful `denyx_alloc(len)` with one `denyx_dealloc(ptr, len)`.
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn denyx_alloc(len: u32) -> u32 {
@@ -381,14 +340,10 @@ pub extern "C" fn denyx_alloc(len: u32) -> u32 {
 
 /// Free a buffer previously returned by `denyx_alloc`.
 ///
-/// `len` must match the `len` passed to the original `denyx_alloc`
-/// call. Mismatch is undefined behaviour (Vec::from_raw_parts
-/// invariant).
-///
 /// # Safety
 ///
 /// `ptr` must be a pointer returned by a prior `denyx_alloc(len)`
-/// call on this instance, and not yet freed.
+/// call on this instance, and `len` must match.
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub unsafe extern "C" fn denyx_dealloc(ptr: u32, len: u32) {

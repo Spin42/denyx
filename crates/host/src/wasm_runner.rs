@@ -17,9 +17,9 @@
 //! - stdout: `{"status": "ok"|"error", "result": "...", "error": {...}}`
 //! - imports under module `"denyx"`: `host_print` (4.1), `host_fs_read`
 //!   (4.3), `host_fs_write` (4.4), `host_fs_delete` (4.5),
-//!   `host_env_read` (4.6), `host_subprocess_exec` (4.7); the rest
-//!   wired one capability at a
-//!   time in subsequent Phase 4 commits.
+//!   `host_env_read` (4.6), `host_subprocess_exec` (4.7),
+//!   `host_net_http_{get,post,put,patch,delete}` (4.8). Phase 4
+//!   wrap-up wires audit + confirm hooks across the set.
 //! - exports: `denyx_alloc(len)` / `denyx_dealloc(ptr, len)` — the host
 //!   calls these to return byte-buffer payloads (string results from
 //!   gated builtins) back into the interpreter's linear memory.
@@ -575,6 +575,203 @@ impl WasmRunner {
             )
             .map_err(|e| DenyxError::Other(format!("link host_subprocess_exec: {e}")))?;
 
+        // ── host_net_http_get (Phase 4.8) ─────────────────────────
+        let http_get_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_net_http_get",
+                move |mut caller: Caller<'_, WasmState>,
+                      url_ptr: u32,
+                      url_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
+                    if let Err(e) = http_get_policy.check_http_get(&url) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
+                        return Err(wasmtime::Error::msg("net.http_get denied"));
+                    }
+                    let body = match crate::no_redirect_agent().get(&url).call() {
+                        Ok(resp) => match resp.into_string() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                caller.data_mut().captured_error = Some(DenyxError::Other(
+                                    format!("net.http_get({url:?}): body read: {e}"),
+                                ));
+                                return Err(wasmtime::Error::msg("net.http_get: body read"));
+                            }
+                        },
+                        Err(e) => {
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Other(format!("net.http_get({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_get: request failed"));
+                        }
+                    };
+                    write_string_to_guest(&mut caller, &body)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_net_http_get: {e}")))?;
+
+        // ── host_net_http_post (Phase 4.8) ────────────────────────
+        let http_post_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_net_http_post",
+                move |mut caller: Caller<'_, WasmState>,
+                      url_ptr: u32,
+                      url_len: u32,
+                      body_ptr: u32,
+                      body_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
+                    let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
+                    if let Err(e) = http_post_policy.check_http_post(&url) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
+                        return Err(wasmtime::Error::msg("net.http_post denied"));
+                    }
+                    let body = match crate::no_redirect_agent().post(&url).send_string(&req_body) {
+                        Ok(resp) => match resp.into_string() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                caller.data_mut().captured_error = Some(DenyxError::Other(
+                                    format!("net.http_post({url:?}): body read: {e}"),
+                                ));
+                                return Err(wasmtime::Error::msg("net.http_post: body read"));
+                            }
+                        },
+                        Err(e) => {
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Other(format!("net.http_post({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_post: request failed"));
+                        }
+                    };
+                    write_string_to_guest(&mut caller, &body)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_net_http_post: {e}")))?;
+
+        // ── host_net_http_put (Phase 4.8) ─────────────────────────
+        let http_put_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_net_http_put",
+                move |mut caller: Caller<'_, WasmState>,
+                      url_ptr: u32,
+                      url_len: u32,
+                      body_ptr: u32,
+                      body_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
+                    let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
+                    if let Err(e) = http_put_policy.check_http_put(&url) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
+                        return Err(wasmtime::Error::msg("net.http_put denied"));
+                    }
+                    let body = match crate::no_redirect_agent().put(&url).send_string(&req_body) {
+                        Ok(resp) => match resp.into_string() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                caller.data_mut().captured_error = Some(DenyxError::Other(
+                                    format!("net.http_put({url:?}): body read: {e}"),
+                                ));
+                                return Err(wasmtime::Error::msg("net.http_put: body read"));
+                            }
+                        },
+                        Err(e) => {
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Other(format!("net.http_put({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_put: request failed"));
+                        }
+                    };
+                    write_string_to_guest(&mut caller, &body)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_net_http_put: {e}")))?;
+
+        // ── host_net_http_patch (Phase 4.8) ───────────────────────
+        let http_patch_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_net_http_patch",
+                move |mut caller: Caller<'_, WasmState>,
+                      url_ptr: u32,
+                      url_len: u32,
+                      body_ptr: u32,
+                      body_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
+                    let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
+                    if let Err(e) = http_patch_policy.check_http_patch(&url) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
+                        return Err(wasmtime::Error::msg("net.http_patch denied"));
+                    }
+                    let body = match crate::no_redirect_agent()
+                        .request("PATCH", &url)
+                        .send_string(&req_body)
+                    {
+                        Ok(resp) => match resp.into_string() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                caller.data_mut().captured_error = Some(DenyxError::Other(
+                                    format!("net.http_patch({url:?}): body read: {e}"),
+                                ));
+                                return Err(wasmtime::Error::msg("net.http_patch: body read"));
+                            }
+                        },
+                        Err(e) => {
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Other(format!("net.http_patch({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_patch: request failed"));
+                        }
+                    };
+                    write_string_to_guest(&mut caller, &body)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_net_http_patch: {e}")))?;
+
+        // ── host_net_http_delete (Phase 4.8) ──────────────────────
+        let http_delete_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_net_http_delete",
+                move |mut caller: Caller<'_, WasmState>,
+                      url_ptr: u32,
+                      url_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
+                    if let Err(e) = http_delete_policy.check_http_delete(&url) {
+                        caller.data_mut().captured_error =
+                            Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
+                        return Err(wasmtime::Error::msg("net.http_delete denied"));
+                    }
+                    let body = match crate::no_redirect_agent().delete(&url).call() {
+                        Ok(resp) => match resp.into_string() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                caller.data_mut().captured_error = Some(DenyxError::Other(
+                                    format!("net.http_delete({url:?}): body read: {e}"),
+                                ));
+                                return Err(wasmtime::Error::msg("net.http_delete: body read"));
+                            }
+                        },
+                        Err(e) => {
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Other(format!("net.http_delete({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_delete: request failed"));
+                        }
+                    };
+                    write_string_to_guest(&mut caller, &body)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_net_http_delete: {e}")))?;
+
         // Instantiate and run `_start`.
         let instance = linker
             .instantiate(&mut store, &module)
@@ -639,6 +836,59 @@ impl WasmRunner {
 /// imports can find it, plus the print accumulator the `host_print`
 /// import writes into, plus a slot for import closures to surface a
 /// typed [`DenyxError`] across the trap boundary.
+/// Read a UTF-8 string from guest linear memory at `(ptr, len)`.
+/// Used by every import that takes a string arg. The `tag` is for
+/// the error message — "url", "path", "body" etc.
+fn read_string_from_guest(
+    caller: &mut Caller<'_, WasmState>,
+    ptr: u32,
+    len: u32,
+    tag: &str,
+) -> Result<String, wasmtime::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(Extern::into_memory)
+        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+    let mut buf = vec![0u8; len as usize];
+    memory
+        .read(&*caller, ptr as usize, &mut buf)
+        .map_err(|e| wasmtime::Error::msg(format!("read {tag}: {e}")))?;
+    std::str::from_utf8(&buf)
+        .map(|s| s.to_owned())
+        .map_err(|e| wasmtime::Error::msg(format!("non-utf8 {tag}: {e}")))
+}
+
+/// Write a UTF-8 string into guest linear memory via `denyx_alloc`,
+/// returning the packed `(ptr << 32) | len` u64 the guest expects.
+/// Empty string short-circuits to 0.
+fn write_string_to_guest(
+    caller: &mut Caller<'_, WasmState>,
+    s: &str,
+) -> Result<u64, wasmtime::Error> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let alloc = caller
+        .get_export("denyx_alloc")
+        .and_then(Extern::into_func)
+        .ok_or_else(|| wasmtime::Error::msg("guest missing `denyx_alloc` export"))?;
+    let typed_alloc = alloc
+        .typed::<u32, u32>(&*caller)
+        .map_err(|e| wasmtime::Error::msg(format!("denyx_alloc signature mismatch: {e}")))?;
+    let dest_ptr = typed_alloc
+        .call(&mut *caller, bytes.len() as u32)
+        .map_err(|e| wasmtime::Error::msg(format!("denyx_alloc call: {e}")))?;
+    let memory = caller
+        .get_export("memory")
+        .and_then(Extern::into_memory)
+        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+    memory
+        .write(&mut *caller, dest_ptr as usize, bytes)
+        .map_err(|e| wasmtime::Error::msg(format!("write string: {e}")))?;
+    Ok(((dest_ptr as u64) << 32) | (bytes.len() as u64))
+}
+
 struct WasmState {
     wasi: WasiP1Ctx,
     printed: Vec<String>,
@@ -1014,5 +1264,92 @@ mod tests {
             DenyxError::Policy(_) => {}
             other => panic!("expected DenyxError::Policy, got {other:?}"),
         }
+    }
+
+    /// Phase 4.8 — deny paths for all 5 net.http_* verbs. We don't
+    /// run an HTTP server in this unit-test crate, so only the deny
+    /// path (which doesn't touch the network) is asserted here.
+    /// Allow-path correctness is structural-equivalent to the fs.read
+    /// and subprocess.exec tests — same packed-u64 return + same
+    /// read_string_from_guest / write_string_to_guest helpers.
+    #[test]
+    fn net_http_get_denied_url_surfaces_typed_error() {
+        let policy_path =
+            write_temp_policy("net_http_get_denied", "[network]\nhttp_get_allow = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let err = runner
+            .run("t", "net.http_get(\"https://example.com\")", "x.star")
+            .expect_err("denied URL should error");
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn net_http_post_denied_url_surfaces_typed_error() {
+        let policy_path =
+            write_temp_policy("net_http_post_denied", "[network]\nhttp_post_allow = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let err = runner
+            .run(
+                "t",
+                "net.http_post(\"https://example.com\", \"body\")",
+                "x.star",
+            )
+            .expect_err("denied URL should error");
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn net_http_put_denied_url_surfaces_typed_error() {
+        let policy_path =
+            write_temp_policy("net_http_put_denied", "[network]\nhttp_put_allow = []\n");
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let err = runner
+            .run(
+                "t",
+                "net.http_put(\"https://example.com\", \"body\")",
+                "x.star",
+            )
+            .expect_err("denied URL should error");
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn net_http_patch_denied_url_surfaces_typed_error() {
+        let policy_path = write_temp_policy(
+            "net_http_patch_denied",
+            "[network]\nhttp_patch_allow = []\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let err = runner
+            .run(
+                "t",
+                "net.http_patch(\"https://example.com\", \"body\")",
+                "x.star",
+            )
+            .expect_err("denied URL should error");
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn net_http_delete_denied_url_surfaces_typed_error() {
+        let policy_path = write_temp_policy(
+            "net_http_delete_denied",
+            "[network]\nhttp_delete_allow = []\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let err = runner
+            .run("t", "net.http_delete(\"https://example.com\")", "x.star")
+            .expect_err("denied URL should error");
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(matches!(err, DenyxError::Policy(_)), "got {err:?}");
     }
 }
