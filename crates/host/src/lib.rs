@@ -52,7 +52,7 @@ pub(crate) fn no_redirect_agent() -> &'static ureq::Agent {
 /// The redirected URL must be checked separately by the script
 /// via another net.http_* call so the policy gate fires on the
 /// new host.
-fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
+pub(crate) fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
     let status = resp.status();
     if (300..400).contains(&status) {
         let location = resp

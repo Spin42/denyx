@@ -608,13 +608,12 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("net.http_get denied"));
                     }
                     let body = match crate::no_redirect_agent().get(&url).call() {
-                        Ok(resp) => match resp.into_string() {
+                        Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
-                                caller.data_mut().captured_error = Some(DenyxError::Other(
-                                    format!("net.http_get({url:?}): body read: {e}"),
-                                ));
-                                return Err(wasmtime::Error::msg("net.http_get: body read"));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Other(format!("net.http_get({url:?}): {e}")));
+                                return Err(wasmtime::Error::msg("net.http_get: finalize"));
                             }
                         },
                         Err(e) => {
@@ -648,13 +647,12 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("net.http_post denied"));
                     }
                     let body = match crate::no_redirect_agent().post(&url).send_string(&req_body) {
-                        Ok(resp) => match resp.into_string() {
+                        Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
-                                caller.data_mut().captured_error = Some(DenyxError::Other(
-                                    format!("net.http_post({url:?}): body read: {e}"),
-                                ));
-                                return Err(wasmtime::Error::msg("net.http_post: body read"));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Other(format!("net.http_post({url:?}): {e}")));
+                                return Err(wasmtime::Error::msg("net.http_post: finalize"));
                             }
                         },
                         Err(e) => {
@@ -688,13 +686,12 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("net.http_put denied"));
                     }
                     let body = match crate::no_redirect_agent().put(&url).send_string(&req_body) {
-                        Ok(resp) => match resp.into_string() {
+                        Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
-                                caller.data_mut().captured_error = Some(DenyxError::Other(
-                                    format!("net.http_put({url:?}): body read: {e}"),
-                                ));
-                                return Err(wasmtime::Error::msg("net.http_put: body read"));
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Other(format!("net.http_put({url:?}): {e}")));
+                                return Err(wasmtime::Error::msg("net.http_put: finalize"));
                             }
                         },
                         Err(e) => {
@@ -731,13 +728,13 @@ impl WasmRunner {
                         .request("PATCH", &url)
                         .send_string(&req_body)
                     {
-                        Ok(resp) => match resp.into_string() {
+                        Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
                                 caller.data_mut().captured_error = Some(DenyxError::Other(
-                                    format!("net.http_patch({url:?}): body read: {e}"),
+                                    format!("net.http_patch({url:?}): {e}"),
                                 ));
-                                return Err(wasmtime::Error::msg("net.http_patch: body read"));
+                                return Err(wasmtime::Error::msg("net.http_patch: finalize"));
                             }
                         },
                         Err(e) => {
@@ -768,13 +765,13 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("net.http_delete denied"));
                     }
                     let body = match crate::no_redirect_agent().delete(&url).call() {
-                        Ok(resp) => match resp.into_string() {
+                        Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
                                 caller.data_mut().captured_error = Some(DenyxError::Other(
-                                    format!("net.http_delete({url:?}): body read: {e}"),
+                                    format!("net.http_delete({url:?}): {e}"),
                                 ));
-                                return Err(wasmtime::Error::msg("net.http_delete: body read"));
+                                return Err(wasmtime::Error::msg("net.http_delete: finalize"));
                             }
                         },
                         Err(e) => {
