@@ -77,6 +77,15 @@ pub struct WasmRunner {
     policy: Arc<Policy>,
     audit: Arc<dyn AuditSink>,
     confirm: Arc<dyn ConfirmHook>,
+    /// Cached wasmtime engine. Reused across every `run()` call so
+    /// the JIT-compile cost is paid once per WasmRunner instance,
+    /// not once per script. `Engine` is `Clone`-cheap (internally
+    /// Arc-shared) so storing by value is fine.
+    engine: Engine,
+    /// Cached compiled module — same logic as `engine`. The Starlark
+    /// interpreter compiles in ~50-100ms; caching avoids paying that
+    /// on every gated MCP tool call.
+    module: Module,
 }
 
 impl WasmRunner {
@@ -86,10 +95,24 @@ impl WasmRunner {
     /// and [`with_confirm_hook`](Self::with_confirm_hook) in any non-
     /// test context.
     pub fn new(policy: Policy) -> Self {
+        // The embedded .wasm is build-time-known-good (see
+        // denyx-runtime-starlark's build.rs + tests). Engine + Module
+        // construction failures here would mean the .wasm is corrupt
+        // — a programmer error, not a runtime condition. expect()'ing
+        // keeps the constructor infallible at the API surface.
+        let mut config = Config::new();
+        config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)
+            .expect("wasmtime engine: embedded .wasm build config is known-good");
+        let module = Module::new(&engine, STARLARK_INTERPRETER_WASM)
+            .expect("wasmtime module: embedded .wasm is known-good (see denyx-runtime-starlark)");
         Self {
             policy: Arc::new(policy),
             audit: Arc::new(NullAuditSink),
             confirm: Arc::new(DenyAllConfirm),
+            engine,
+            module,
         }
     }
 
@@ -126,14 +149,6 @@ impl WasmRunner {
         let request_bytes = serde_json::to_vec(&request)
             .map_err(|e| DenyxError::Other(format!("serialize wasm request: {e}")))?;
 
-        let mut config = Config::new();
-        config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
-        config.consume_fuel(true);
-        let engine =
-            Engine::new(&config).map_err(|e| DenyxError::Other(format!("wasmtime engine: {e}")))?;
-        let module = Module::new(&engine, STARLARK_INTERPRETER_WASM)
-            .map_err(|e| DenyxError::Other(format!("wasmtime module load: {e}")))?;
-
         let stdout_pipe = MemoryOutputPipe::new(64 * 1024);
         let stdin_pipe = MemoryInputPipe::new(request_bytes);
         let wasi = WasiCtxBuilder::new()
@@ -149,12 +164,12 @@ impl WasmRunner {
             step_counter: std::sync::atomic::AtomicU32::new(0),
             taint_registry: TaintRegistry::default(),
         };
-        let mut store = Store::new(&engine, state);
+        let mut store = Store::new(&self.engine, state);
         store
             .set_fuel(DEFAULT_WASM_FUEL)
             .map_err(|e| DenyxError::Other(format!("set wasm fuel: {e}")))?;
 
-        let mut linker: Linker<WasmState> = Linker::new(&engine);
+        let mut linker: Linker<WasmState> = Linker::new(&self.engine);
         add_to_linker_sync(&mut linker, |s: &mut WasmState| &mut s.wasi)
             .map_err(|e| DenyxError::Other(format!("wasi linker: {e}")))?;
 
@@ -1328,7 +1343,7 @@ impl WasmRunner {
 
         // Instantiate and run `_start`.
         let instance = linker
-            .instantiate(&mut store, &module)
+            .instantiate(&mut store, &self.module)
             .map_err(|e| DenyxError::Other(format!("wasm instantiate: {e}")))?;
         let start = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
