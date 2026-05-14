@@ -17,7 +17,8 @@
 //! - stdout: `{"status": "ok"|"error", "result": "...", "error": {...}}`
 //! - imports under module `"denyx"`: `host_print` (4.1), `host_fs_read`
 //!   (4.3), `host_fs_write` (4.4), `host_fs_delete` (4.5),
-//!   `host_env_read` (4.6); the rest wired one capability at a
+//!   `host_env_read` (4.6), `host_subprocess_exec` (4.7); the rest
+//!   wired one capability at a
 //!   time in subsequent Phase 4 commits.
 //! - exports: `denyx_alloc(len)` / `denyx_dealloc(ptr, len)` — the host
 //!   calls these to return byte-buffer payloads (string results from
@@ -441,6 +442,139 @@ impl WasmRunner {
             )
             .map_err(|e| DenyxError::Other(format!("link host_env_read: {e}")))?;
 
+        // ── host_subprocess_exec (Phase 4.7) ──────────────────────
+        let subprocess_policy = self.policy.clone();
+        linker
+            .func_wrap(
+                "denyx",
+                "host_subprocess_exec",
+                move |mut caller: Caller<'_, WasmState>,
+                      argv_json_ptr: u32,
+                      argv_json_len: u32|
+                      -> Result<u64, wasmtime::Error> {
+                    // 1. Read argv JSON from guest memory.
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(Extern::into_memory)
+                        .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
+                    let mut argv_buf = vec![0u8; argv_json_len as usize];
+                    memory
+                        .read(&caller, argv_json_ptr as usize, &mut argv_buf)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_subprocess_exec: argv read: {e}"))
+                        })?;
+                    let argv_json = match std::str::from_utf8(&argv_buf) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Err(wasmtime::Error::msg(format!(
+                                "host_subprocess_exec: non-utf8 argv json: {e}"
+                            )));
+                        }
+                    };
+                    let argv: Vec<String> = match serde_json::from_str(argv_json) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(wasmtime::Error::msg(format!(
+                                "host_subprocess_exec: parse argv json: {e}"
+                            )));
+                        }
+                    };
+                    if argv.is_empty() {
+                        caller.data_mut().captured_error = Some(DenyxError::Policy(
+                            "subprocess.exec: empty argv".to_string(),
+                        ));
+                        return Err(wasmtime::Error::msg("subprocess.exec: empty argv"));
+                    }
+
+                    // 2. Gate through policy. Three checks mirror the
+                    //    in-process Runner: command (argv[0] basename),
+                    //    arg-substring deny patterns, and argv path
+                    //    resolution (catches `bash -c '/etc/passwd'`
+                    //    style smuggling of unreachable paths).
+                    if let Err(e) = subprocess_policy.check_subprocess_command(&argv[0]) {
+                        caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
+                            "subprocess.exec({:?}): {e}",
+                            argv[0]
+                        )));
+                        return Err(wasmtime::Error::msg("subprocess.exec: command denied"));
+                    }
+                    if let Err(e) = subprocess_policy.check_subprocess_args(&argv) {
+                        caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
+                            "subprocess.exec({:?}): {e}",
+                            argv
+                        )));
+                        return Err(wasmtime::Error::msg("subprocess.exec: args denied"));
+                    }
+                    if let Err(e) = subprocess_policy.check_subprocess_argv_paths(&argv) {
+                        caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
+                            "subprocess.exec({:?}): {e}",
+                            argv
+                        )));
+                        return Err(wasmtime::Error::msg("subprocess.exec: argv path denied"));
+                    }
+
+                    // 3. Spawn the process. env_clear() + a single
+                    //    PATH passthrough is a minimal-secure default
+                    //    for Phase 4.7 — the in-process Runner does
+                    //    per-policy `allow_vars` filtering, which is
+                    //    deferred to a later Phase 4 sub-commit
+                    //    alongside audit + confirm wiring.
+                    let mut cmd = std::process::Command::new(&argv[0]);
+                    cmd.args(&argv[1..]);
+                    cmd.env_clear();
+                    if let Ok(path) = std::env::var("PATH") {
+                        cmd.env("PATH", path);
+                    }
+                    let output = match cmd.output() {
+                        Ok(o) => o,
+                        Err(e) => {
+                            caller.data_mut().captured_error = Some(DenyxError::Io(e));
+                            return Err(wasmtime::Error::msg("subprocess.exec: spawn / io error"));
+                        }
+                    };
+                    if !output.status.success() {
+                        let code = output
+                            .status
+                            .code()
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "(signalled)".to_string());
+                        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                        caller.data_mut().captured_error = Some(DenyxError::Other(format!(
+                            "subprocess.exec({:?}) exited {code}: {stderr}",
+                            argv
+                        )));
+                        return Err(wasmtime::Error::msg("subprocess.exec: non-zero exit"));
+                    }
+
+                    let stdout_bytes = output.stdout;
+                    if stdout_bytes.is_empty() {
+                        return Ok(0);
+                    }
+
+                    // 4. Allocate + write stdout into guest memory.
+                    let alloc = caller
+                        .get_export("denyx_alloc")
+                        .and_then(Extern::into_func)
+                        .ok_or_else(|| {
+                            wasmtime::Error::msg("guest missing `denyx_alloc` export")
+                        })?;
+                    let typed_alloc = alloc.typed::<u32, u32>(&caller).map_err(|e| {
+                        wasmtime::Error::msg(format!("denyx_alloc signature mismatch: {e}"))
+                    })?;
+                    let dest_ptr = typed_alloc
+                        .call(&mut caller, stdout_bytes.len() as u32)
+                        .map_err(|e| wasmtime::Error::msg(format!("denyx_alloc call: {e}")))?;
+                    memory
+                        .write(&mut caller, dest_ptr as usize, &stdout_bytes)
+                        .map_err(|e| {
+                            wasmtime::Error::msg(format!("host_subprocess_exec: write stdout: {e}"))
+                        })?;
+                    let packed = ((dest_ptr as u64) << 32) | (stdout_bytes.len() as u64);
+                    Ok(packed)
+                },
+            )
+            .map_err(|e| DenyxError::Other(format!("link host_subprocess_exec: {e}")))?;
+
         // Instantiate and run `_start`.
         let instance = linker
             .instantiate(&mut store, &module)
@@ -823,6 +957,57 @@ mod tests {
             .run("test", &script, "env_read_denied.star")
             .expect_err("denied env.read should error");
         std::env::remove_var(&var_name);
+        let _ = std::fs::remove_file(&policy_path);
+
+        match err {
+            DenyxError::Policy(_) => {}
+            other => panic!("expected DenyxError::Policy, got {other:?}"),
+        }
+    }
+
+    /// Phase 4.7 — allow path. A policy that lists `echo` in
+    /// subprocess.allow_commands lets the script spawn /bin/echo and
+    /// receive its stdout. The deny-deny order matters: empty
+    /// allow_commands by itself would let everything through under
+    /// some Policy variants, so we list `echo` explicitly.
+    #[test]
+    fn subprocess_exec_allowed_command_returns_stdout() {
+        let policy_path = write_temp_policy(
+            "subprocess_exec_ok",
+            "[subprocess]\nallow_commands = [\"echo\"]\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = r#"print(subprocess.exec(["echo", "phase-4.7"]))"#;
+        let outcome = runner
+            .run("test", script, "subprocess_exec_ok.star")
+            .expect("runs");
+        let _ = std::fs::remove_file(&policy_path);
+
+        // /bin/echo appends a newline; trim it for the assertion.
+        assert_eq!(
+            outcome.printed,
+            vec!["phase-4.7\n".to_string()],
+            "subprocess.exec stdout (raw) should reach print"
+        );
+    }
+
+    /// Phase 4.7 — deny path. A policy that does NOT list the command
+    /// surfaces the denial as DenyxError::Policy.
+    #[test]
+    fn subprocess_exec_denied_command_surfaces_typed_error() {
+        let policy_path = write_temp_policy(
+            "subprocess_exec_denied",
+            "[subprocess]\nallow_commands = []\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+
+        let script = r#"print(subprocess.exec(["echo", "should not run"]))"#;
+        let err = runner
+            .run("test", script, "subprocess_exec_denied.star")
+            .expect_err("denied command should error");
         let _ = std::fs::remove_file(&policy_path);
 
         match err {

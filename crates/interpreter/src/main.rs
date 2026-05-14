@@ -101,6 +101,10 @@ fs = struct(
 env = struct(
     read = _denyx_env_read,
 )
+
+subprocess = struct(
+    exec = _denyx_subprocess_exec,
+)
 "#;
 
 #[cfg(target_arch = "wasm32")]
@@ -222,6 +226,13 @@ mod host {
         /// packed-u64 alloc convention as host_fs_read. Policy
         /// denials and missing-var errors trap the instance.
         pub fn host_env_read(name_ptr: u32, name_len: u32) -> u64;
+
+        /// Spawn a subprocess. Argument: JSON-encoded `Vec<String>`
+        /// argv at `(argv_json_ptr, argv_json_len)` in guest memory.
+        /// Returns stdout as a packed-u64 alloc. Three policy checks
+        /// gate the call: argv[0] basename, argv args, argv path
+        /// substrings. Non-zero exit + io errors trap.
+        pub fn host_subprocess_exec(argv_json_ptr: u32, argv_json_len: u32) -> u64;
     }
 }
 
@@ -285,6 +296,22 @@ fn denyx_builtins(builder: &mut starlark::environment::GlobalsBuilder) {
     /// Implementation for `env.read(name)`.
     fn _denyx_env_read(name: &str) -> anyhow::Result<String> {
         let packed = unsafe { host::host_env_read(name.as_ptr() as u32, name.len() as u32) };
+        unpack_string(packed)
+    }
+
+    /// Implementation for `subprocess.exec(argv)`. The argv list is
+    /// JSON-serialized for the wire — multi-string lists don't fit the
+    /// (ptr, len) convention used for single strings. Host parses,
+    /// gates, spawns the process, returns stdout.
+    fn _denyx_subprocess_exec(
+        argv: starlark::values::list::UnpackList<String>,
+    ) -> anyhow::Result<String> {
+        let argv_vec: Vec<String> = argv.items;
+        let argv_json = serde_json::to_string(&argv_vec)
+            .map_err(|e| anyhow::anyhow!("subprocess.exec: serialize argv: {e}"))?;
+        let packed = unsafe {
+            host::host_subprocess_exec(argv_json.as_ptr() as u32, argv_json.len() as u32)
+        };
         unpack_string(packed)
     }
 }
