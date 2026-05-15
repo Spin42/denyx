@@ -237,7 +237,7 @@ exercised in [`crates/host/tests/sandbox_bwrap.rs`](../crates/host/tests/sandbox
 (13 tests, including 6 added in the recent mutation-testing
 triage round).
 
-**Optional fourth layer (`--use-wasm`):** the Starlark interpreter
+**Fourth layer (default in v0.4.0+; opt out with `--no-wasm`):** the Starlark interpreter
 itself runs inside a `wasmtime` linear-memory sandbox. A
 miscompilation or memory-safety bug in `starlark-rust` stays
 contained at the wasm boundary instead of corrupting the host

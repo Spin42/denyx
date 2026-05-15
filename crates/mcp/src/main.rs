@@ -206,12 +206,20 @@ struct Cli {
     #[arg(long, default_value = "auto")]
     confirm_mode: ConfirmModeArg,
 
-    /// Evaluate scripts inside a wasmtime sandbox (Phase 5 migration
-    /// path) instead of the in-process Starlark interpreter. Opt-in:
-    /// the Wasm path enforces the same Policy gate but does NOT yet
-    /// emit audit events or fire the confirm hook (deferred to a
-    /// Phase 4 wrap-up commit). Useful for the multistep eval
-    /// validation; not yet recommended as the default.
+    /// Select the legacy in-process Starlark interpreter
+    /// instead of the wasmtime-sandboxed runner. The wasm sandbox
+    /// is the default in v0.4.0+; pass --no-wasm to opt out. The
+    /// wasm path enforces the same Policy gate as the in-process
+    /// runner and also enforces [runtime].max_seconds + wasmtime
+    /// fuel-based preemption (see docs/wasm-sandbox.md).
+    #[arg(long)]
+    no_wasm: bool,
+
+    /// Deprecated alias: the wasm sandbox is the default in v0.4.0+,
+    /// so this flag is a no-op kept for backward compatibility with
+    /// host-config entries that pass it explicitly. Emits a one-line
+    /// stderr reminder when present; will be removed in a future
+    /// release.
     #[arg(long)]
     use_wasm: bool,
 }
@@ -377,19 +385,21 @@ every tool call will fail until you launch with --policy <project.toml> or \
     // Build the runner only when not blocked. In blocked mode we
     // never dispatch a real tool call, so there's no point owning
     // a `Runner` we can't use.
+    if cli.use_wasm {
+        eprintln!(
+            "denyx-mcp: --use-wasm is a no-op as of v0.4.0; the wasm sandbox is the default. Pass --no-wasm to select the legacy in-process runner."
+        );
+    }
     let runner = if blocked_state.is_none() {
-        if cli.use_wasm {
-            eprintln!(
-                "denyx-mcp: --use-wasm enabled (Phase 5 wasmtime runner). The Policy gate is enforced; audit events and confirm prompts are NOT yet emitted from this path."
-            );
-            Some(AnyRunner::Wasm(
-                WasmRunner::new(policy)
+        if cli.no_wasm {
+            Some(AnyRunner::InProcess(
+                Runner::new(policy)
                     .with_audit(audit)
                     .with_confirm_hook(confirm_hook),
             ))
         } else {
-            Some(AnyRunner::InProcess(
-                Runner::new(policy)
+            Some(AnyRunner::Wasm(
+                WasmRunner::new(policy)
                     .with_audit(audit)
                     .with_confirm_hook(confirm_hook),
             ))

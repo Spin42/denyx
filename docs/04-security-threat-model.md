@@ -27,22 +27,20 @@ to MCP-aware orchestrators. There is no plugin model and no dynamic
 policy: every effect goes through one of nine Rust functions, all in
 `crates/host/src/`.
 
-`denyx-host` ships with two interchangeable runners. The recommended
-`WasmRunner` (`--use-wasm` on `denyx run` / `denyx-mcp`) loads the
-`starlark-rust` interpreter compiled to `wasm32-wasip1` from
-`denyx-runtime-starlark` and runs it under `wasmtime` — the Starlark
-interpreter executes inside a wasmtime sandbox, with fuel-based
-preemption and interpreter-bug containment as additional layers over
-the shared policy gate. The legacy in-process `Runner` evaluates the
-same `starlark-rust` interpreter directly in the host process, with
-no sandbox around the interpreter itself. The flag is opt-in today
-and becomes the default in the next release once
-`denyx-runtime-starlark` publishes to crates.io. The policy gate
-stays in Rust on the host side on both paths — every effecting call
-goes through the same `Policy::check_*` machinery. See
-[wasm-sandbox.md](wasm-sandbox.md) for the parity table, the new
-attack surface wasmtime introduces, and the pentest result on the
-wasm path.
+`denyx-host` ships with two interchangeable runners. The default
+`WasmRunner` (selected by `denyx run` / `denyx-mcp` in v0.4.0+; pass
+`--no-wasm` to opt out) loads the `starlark-rust` interpreter compiled
+to `wasm32-wasip1` from `denyx-runtime-starlark` and runs it under
+`wasmtime` — the Starlark interpreter executes inside a wasmtime
+sandbox, with fuel-based preemption and interpreter-bug containment
+as additional layers over the shared policy gate. The legacy
+in-process `Runner` evaluates the same `starlark-rust` interpreter
+directly in the host process, with no sandbox around the interpreter
+itself. The policy gate stays in Rust on the host side on both paths
+— every effecting call goes through the same `Policy::check_*`
+machinery. See [wasm-sandbox.md](wasm-sandbox.md) for the parity
+table, the new attack surface wasmtime introduces, and the pentest
+result on the wasm path.
 
 ## What it defends against
 
@@ -58,8 +56,8 @@ wasm path.
 | **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutations, line removals, and seq jumps. |
 | **MCP tool definition poisoning reaching the cloud orchestrator (local-executor deployment)** | In the `denyx-local-mcp` architecture the cloud orchestrator's MCP tool list contains only `delegate_to_local`, so other servers' tool descriptions cannot reach its context — **provided** the host is launched with `--strict-mcp-config` (or equivalent) and denyx-local-mcp is the only MCP server configured. This is a precondition on operator setup, not enforced by Denyx itself. The local executor model receives tool routing metadata only from the operator-controlled policy file. See [Round 2 pentest report](security-pentest-r2-tool-poisoning.md). |
 | **Reads of resources the policy doesn't mention** | Default-deny: `fs.read` of a path not in `read_allow` or `local_only_read` returns `PolicyError::PathDenied`; `env.read` of a name not in `allow_vars` or `local_only_vars` returns `PolicyError::EnvDenied`; `subprocess.exec` of a command not in `allow_commands` or `local_only_commands` returns `PolicyError::SubprocessDenied`. **Operator caveat:** a too-broad rooted glob in `read_allow` (e.g. `["**"]` or `["/tmp/**"]`) silently defeats the property. Narrow allow-lists are the operator's responsibility. |
-| **Pure-CPU runaway in the agent script** *(`--use-wasm` only)* | wasmtime fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`) traps `for _ in range(10**9): pass` within ~1 sec of CPU as `DenyxError::RuntimeLimit` (exit 6). The in-process runner has no equivalent — `[runtime].max_seconds` is wall-time, not instruction count, so it doesn't catch pure-CPU loops that finish before the deadline. This is a wasm-path-only addition. |
-| **Interpreter bugs reaching host memory** *(`--use-wasm` only)* | `starlark-rust` runs inside `wasmtime`'s linear-memory sandbox. A miscompilation or memory-safety bug in the interpreter stays inside the wasm boundary instead of corrupting the host. Empirically validated under adversarial workload in the Round 2 v5 pentest (one WASM_TRAP fire — Opus's quadratic string-concat caused the Starlark interpreter to `process::abort` inside the wasm guest; the sandbox contained the abort cleanly). **Defence-in-depth, not a primary control** — the interpreter is a maintained dependency, not a known-hostile component. |
+| **Pure-CPU runaway in the agent script** *(wasm path only — default in v0.4.0+, opt out with `--no-wasm`)* | wasmtime fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`) traps `for _ in range(10**9): pass` within ~1 sec of CPU as `DenyxError::RuntimeLimit` (exit 6). The in-process runner has no equivalent — `[runtime].max_seconds` is wall-time, not instruction count, so it doesn't catch pure-CPU loops that finish before the deadline. This is a wasm-path-only addition. |
+| **Interpreter bugs reaching host memory** *(wasm path only — default in v0.4.0+, opt out with `--no-wasm`)* | `starlark-rust` runs inside `wasmtime`'s linear-memory sandbox. A miscompilation or memory-safety bug in the interpreter stays inside the wasm boundary instead of corrupting the host. Empirically validated under adversarial workload in the Round 2 v5 pentest (one WASM_TRAP fire — Opus's quadratic string-concat caused the Starlark interpreter to `process::abort` inside the wasm guest; the sandbox contained the abort cleanly). **Defence-in-depth, not a primary control** — the interpreter is a maintained dependency, not a known-hostile component. |
 
 ## What it does NOT defend against
 
@@ -156,7 +154,7 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   written by Claude. The architectural decisions are human; the
   implementation is not. This is the single biggest reason for
   this doc — please read with hostile eyes.
-- **wasmtime bugs on the `--use-wasm` path.** The wasm runner
+- **wasmtime bugs on the wasm path** (default in v0.4.0+). The wasm runner
   introduces wasmtime as a dependency. wasmtime is widely-used and
   security-audited, but past CVEs have hit its SIMD bounds checks,
   JIT codegen, and WASI implementation. A wasmtime exploit
@@ -245,6 +243,6 @@ files:
 | [security-audit.md](security-audit.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
 | [security-pentest-report.md](security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). Two High findings (base64, ROT-N), both remediated and closure-verified. Methodology + scope + residual risk. |
 | [06-policy-file.md](06-policy-file.md) | Policy file reference (operator-facing). |
-| [wasm-sandbox.md](wasm-sandbox.md) | What the `--use-wasm` runner adds, what it doesn't change, what's still open. |
+| [wasm-sandbox.md](wasm-sandbox.md) | What the wasm runner adds (default in v0.4.0+; opt out with `--no-wasm`), what it doesn't change, what's still open. |
 | [03-architecture.md](03-architecture.md) | How the runtime is structured (developer-facing). |
 | [examples/local_executor/run_exfil.py](../examples/local_executor/run_exfil.py) | The adversarial exfiltration probe — runs hand-written Starlark that *tries* to leak `local_only_var` values. Empirical version of the "what we don't defend against" list. |

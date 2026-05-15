@@ -145,13 +145,21 @@ struct RunArgs {
     #[arg(long)]
     yes: bool,
 
-    /// Evaluate the script inside a wasmtime sandbox (the Phase 5
-    /// migration runner) instead of the in-process Starlark
-    /// interpreter. Opt-in for now: the Wasm path enforces the same
-    /// Policy gate but does NOT yet emit audit events or fire the
-    /// confirm hook (those land in a Phase 4 wrap-up commit). Fuel-
-    /// based preemption is the Wasm-only gap-closer — see the
-    /// `fuel_exhaustion_traps_runaway_loop` test in crates/host.
+    /// Select the legacy in-process Starlark interpreter
+    /// instead of the wasmtime-sandboxed runner. The wasm sandbox
+    /// is the default in v0.4.0+; pass --no-wasm to opt out for
+    /// the (uncommon) case where wasmtime is not available or you
+    /// need the in-process runner's behaviour for a specific test.
+    /// The wasm path enforces the same Policy gate as the in-process
+    /// runner and also enforces [runtime].max_seconds + wasmtime
+    /// fuel-based preemption (see docs/wasm-sandbox.md).
+    #[arg(long)]
+    no_wasm: bool,
+
+    /// Deprecated alias: the wasm sandbox is the default in v0.4.0+,
+    /// so this flag is a no-op kept for backward compatibility with
+    /// scripts that pass it explicitly. Emits a one-line stderr
+    /// reminder when present; will be removed in a future release.
     #[arg(long)]
     use_wasm: bool,
 }
@@ -1189,16 +1197,18 @@ fn run(args: RunArgs) -> Result<(), CliError> {
         Arc::new(DenyAllConfirm)
     };
 
-    let outcome = if args.use_wasm {
+    if args.use_wasm {
         eprintln!(
-            "denyx: --use-wasm enabled (Phase 5 wasmtime runner). The Policy gate is enforced; audit events and confirm prompts are NOT yet emitted from this path. See the wasm-sandbox branch CHANGELOG for the deferral list."
+            "denyx: --use-wasm is a no-op as of v0.4.0; the wasm sandbox is the default. Pass --no-wasm to select the legacy in-process runner."
         );
-        let runner = WasmRunner::new(policy)
+    }
+    let outcome = if args.no_wasm {
+        let runner = Runner::new(policy)
             .with_audit(audit)
             .with_confirm_hook(confirm);
         runner.run(&task_id, &script, args.script.to_string_lossy().as_ref())?
     } else {
-        let runner = Runner::new(policy)
+        let runner = WasmRunner::new(policy)
             .with_audit(audit)
             .with_confirm_hook(confirm);
         runner.run(&task_id, &script, args.script.to_string_lossy().as_ref())?

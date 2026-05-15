@@ -3,11 +3,12 @@
 > ← [Back to docs README](README.md) · [Threat model](04-security-threat-model.md) · [Policy file](06-policy-file.md)
 
 This doc covers the wasmtime-sandboxed Starlark runner that ships with
-Denyx. The `--use-wasm` flag on `denyx run` and `denyx-mcp` activates it
-today; it becomes the default in the next release pending Phase 6 CI
-integration (see [Open work](#open-work)). Pentest evidence supporting
-the promotion is in the [Round 2 (LLM-driven) re-run](#round-2-llm-driven-re-run)
-section below.
+Denyx. As of v0.4.0 it is the **default** runtime; pass `--no-wasm` on
+`denyx run` or `denyx-mcp` to opt out and select the legacy in-process
+path. Pentest evidence supporting the promotion is in the
+[Round 2 (LLM-driven) re-run](#round-2-llm-driven-re-run) section below.
+The pentest panel was Sonnet + Opus; results don't generalise past the
+panel.
 
 If you're an operator wondering whether to flip the switch: read
 [Operator-facing differences](#operator-facing-differences) and the
@@ -44,13 +45,13 @@ The original crates gain new members:
 | Crate | What changed |
 |-------|--------------|
 | `denyx-host` | New `WasmRunner` type alongside the in-process `Runner`. Same `.run()` / `.policy()` / `.with_audit()` / `.with_confirm_hook()` surface; internally instantiates wasmtime, wires every `host_*` import to a Rust closure that gates through `Policy`, and runs the embedded interpreter. The cached `Engine` + `Module` mean per-call wasmtime cost is ~5ms after the first call. |
-| `denyx-cli` | New `--use-wasm` flag on `denyx run`. When set, dispatches to `WasmRunner`; when not, dispatches to the legacy `Runner`. Output format unchanged. |
-| `denyx-mcp` | Same `--use-wasm` flag on the server entry point. The `denyx_*` MCP tool surface is unchanged — synth'd Starlark routes through whichever runner is active. |
+| `denyx-cli` | `denyx run` dispatches to `WasmRunner` by default in v0.4.0+. Pass `--no-wasm` to select the legacy in-process `Runner`. Output format unchanged. `--use-wasm` is accepted for backward compatibility (no-op + one-line stderr reminder). |
+| `denyx-mcp` | Same defaults as `denyx-cli`. The `denyx_*` MCP tool surface is unchanged — synth'd Starlark routes through whichever runner is active. |
 
 ```
-                       ┌─ in-process Runner (default) ─────┐
-denyx run [--use-wasm]─┤                                    │── policy gate
-                       └─ WasmRunner ─ wasmtime ─ .wasm ────┘   (same in both)
+                       ┌─ WasmRunner ─ wasmtime ─ .wasm ─ (default, v0.4.0+) ─┐
+denyx run [--no-wasm]──┤                                                          │── policy gate
+                       └─ in-process Runner ────────────────────────────┘   (same in both)
 ```
 
 A new MCP tool surfaces during the same migration cycle for purely
@@ -491,13 +492,19 @@ don't set max_seconds).
 ### Activation
 
 ```sh
-denyx run --policy <toml> --use-wasm <script.star>
-denyx-mcp --policy <toml> --use-wasm
+# default in v0.4.0+ — no flag needed
+denyx run --policy <toml> <script.star>
+denyx-mcp --policy <toml>
+
+# opt out to the legacy in-process runner
+denyx run --policy <toml> --no-wasm <script.star>
+denyx-mcp --policy <toml> --no-wasm
 ```
 
-Both CLIs print a one-line warning on stderr when `--use-wasm`
-fires, naming the current deferral list. The flag is opt-in until
-the items in [Open work](#open-work) are closed.
+`--use-wasm` is still accepted by both CLIs for backward compatibility
+(scripts and host-configs that pass it explicitly keep working). It is
+a no-op in v0.4.0+ and emits a one-line stderr reminder when present.
+It will be removed in a future release.
 
 ### Exit codes and errors
 
@@ -534,16 +541,15 @@ Two costs matter and they are very different:
 
 What this means in practice:
 
-- **`denyx run --use-wasm <script>` from a fresh shell** pays
-  ~13 ms more than the in-process runner per invocation — wasmtime
+- **`denyx run <script>` from a fresh shell** (default wasm path)
+  pays ~13 ms more than `--no-wasm` per invocation — wasmtime
   instantiation, store setup, linker wiring. Imperceptible for
-  interactive use; matched closely enough by the in-process runner
-  that the cost is no longer a blocker for promoting `--use-wasm`
-  to default.
+  interactive use; the cost was small enough that we promoted wasm
+  to default in v0.4.0.
 
-- **`denyx-mcp --use-wasm` (long-lived server)** pays the cold-call
-  cost once at startup. Every subsequent tool call costs ~4 µs of
-  wasm overhead, invisible next to the underlying IO.
+- **`denyx-mcp` (long-lived server, default wasm path)** pays the
+  cold-call cost once at startup. Every subsequent tool call costs
+  ~4 µs of wasm overhead, invisible next to the underlying IO.
 
 - **The runner choice does not change the IO bottleneck.** A
   `fs.read` of a 10 KB file is ~10× more expensive than the runner
@@ -572,14 +578,15 @@ unchanged.
 
 ## Open work
 
-The wasm path is the recommended runtime today behind `--use-wasm`,
-and becomes the default in the next release. The remaining items:
+The wasm path is the default runtime in v0.4.0+. The remaining items
+are nice-to-haves that don't block the default:
 
-1. **Phase 6 CI integration is not done.** `denyx-runtime-starlark`
-   isn't published to crates.io yet. Flipping `--use-wasm` to
-   default before this would mean `cargo install denyx-cli` fails
-   because the runtime-starlark dependency doesn't resolve. **This
-   is the sole remaining default-blocker.**
+1. ~~**Phase 6 CI integration is not done.**~~ **Closed 2026-05-15.**
+   CI (`.github/workflows/ci.yml`) installs the `wasm32-wasip1` target
+   and runs `scripts/build-runtime-starlark.sh` before `cargo build` /
+   `cargo test` / `cargo clippy`, so the workspace builds on a fresh
+   checkout. `denyx-runtime-starlark` is still not published to
+   crates.io — that lands with `scripts/publish.sh` at release time.
 
 2. ~~No end-to-end multistep eval since the final parity commit.~~
    **Closed 2026-05-14.** Re-ran

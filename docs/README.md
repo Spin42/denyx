@@ -86,4 +86,4 @@ Lookups, not part of the reading path. Linked from the numbered docs above when 
 
 | Doc | What's in it |
 |-----|--------------|
-| [wasm-sandbox](wasm-sandbox.md) | The opt-in `--use-wasm` runner: parity table vs the in-process runner, fuel-based preemption, threat-model deltas, and what's still pending validation. |
+| [wasm-sandbox](wasm-sandbox.md) | The wasm runner: default in v0.4.0+, opt out with `--no-wasm`. Parity table vs the in-process runner, fuel-based preemption, threat-model deltas, and what's still pending validation. |

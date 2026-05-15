@@ -311,7 +311,7 @@ Most-clicked entries:
 | [08-quickstart](docs/08-quickstart.md) | 5-minute CLI walkthrough — generate, run, audit. The non-MCP version of the quickstart at the top of this README. |
 | [09-claude-code](docs/09-claude-code.md) / [10-opencode](docs/10-opencode.md) | Host-specific wiring details, including v1/v2 differences and the built-in-tool lockdown. |
 | [05-owasp-agentic-coverage](docs/05-owasp-agentic-coverage.md) | Empirical scoring against the OWASP Agentic Top 10 — 2 strong / 4 partial / 4 out-of-scope by design — with concrete tests behind every position. |
-| [07-wasm-sandbox](docs/wasm-sandbox.md) | The recommended Wasm-sandboxed Starlark runner (`--use-wasm` today, default in the next release): parity table vs the in-process runner, fuel-based preemption, threat-model deltas, pentest result. |
+| [07-wasm-sandbox](docs/wasm-sandbox.md) | The Wasm-sandboxed Starlark runner: default in v0.4.0+ (pass `--no-wasm` to opt out). Parity table vs the in-process runner, fuel-based preemption, threat-model deltas, pentest result. |
 | [comparison](docs/comparison.md) | How Denyx compares to host built-ins, MCP gateways, LLM guardrails, IFC research, and audit-shape peers. Read when evaluating Denyx vs alternatives. |
 | [host-config](docs/host-config.md) / [doctor](docs/doctor.md) | Reference pages for the two CLI commands you'll re-run most often: `denyx host-config` (cross-host wiring) and `denyx-mcp doctor` / `denyx-local-mcp doctor` (preflight). |
 
@@ -327,12 +327,12 @@ table in mind before deciding where to deploy it:
   model are human, the implementation is not. Read diffs before trusting
   them — especially `crates/policy/`, the verifier, and
   `crates/host/src/taint.rs`.
-- **The Wasm-sandboxed Starlark runner is the recommended runtime.** It
-  ships today behind the `--use-wasm` flag on `denyx run` and `denyx-mcp`,
-  and becomes the default in the next release once
-  `denyx-runtime-starlark` is published to crates.io (the remaining
-  Phase 6 CI item). Pentested across 5 LLM-driven runs / 112 attempts /
-  0 LEAK — full accounting in [docs/wasm-sandbox.md](docs/wasm-sandbox.md).
+- **The Wasm-sandboxed Starlark runner is the default in v0.4.0+.**
+  `denyx run` and `denyx-mcp` dispatch through the wasmtime runner unless
+  `--no-wasm` is passed (which selects the legacy in-process path).
+  Pentested across 5 LLM-driven runs / 112 attempts / 0 LEAK — full
+  accounting in [docs/wasm-sandbox.md](docs/wasm-sandbox.md). The pentest
+  panel was Sonnet + Opus; results don't generalise past the panel.
 - **No human security engineer has read the code with hostile intent yet.**
   That external review is the single biggest gating item between today and
   unattended production use. What *has* happened: a [16-surface bypass

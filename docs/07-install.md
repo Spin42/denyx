@@ -222,7 +222,7 @@ bind-mount jail per call.
 This addresses a **different threat from the wasm sandbox**, not the
 same one:
 
-- The Wasm sandbox (always on with `--use-wasm`, no install required)
+- The Wasm sandbox (default in v0.4.0+; opt out with `--no-wasm`. No install required.)
   contains the *Starlark interpreter* — interpreter-bug containment
   and fuel-based pure-CPU preemption.
 - bwrap contains the *child processes* the script spawns — a
