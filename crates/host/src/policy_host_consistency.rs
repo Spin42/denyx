@@ -91,6 +91,19 @@ pub enum ConsistencyIssue {
         risk: BroadGlobRisk,
         patterns: Vec<String>,
     },
+    /// Policy sets `[runtime].max_seconds = N` but at least one
+    /// host-config launches denyx-mcp / denyx-local-mcp with
+    /// `--use-wasm`. The WasmRunner does NOT enforce wall-time
+    /// deadlines today (only Wasm fuel, which caps instructions
+    /// not wall-clock). A script that blocks on a slow HTTP call
+    /// or a slow `subprocess.exec` exceeds the declared
+    /// `max_seconds` silently on the wasm path while the in-process
+    /// runner would refuse the next effecting call with
+    /// `RuntimeLimit`.
+    WasmRunnerDeadlineUnenforced {
+        host_configs: Vec<String>,
+        max_seconds: u64,
+    },
 }
 
 /// Classification of an overly-permissive allow-list entry. Two
@@ -157,6 +170,7 @@ impl ConsistencyIssue {
                 BroadGlobRisk::Universal | BroadGlobRisk::HomeDir => Severity::Warning,
                 BroadGlobRisk::SystemDirectory => Severity::Info,
             },
+            Self::WasmRunnerDeadlineUnenforced { .. } => Severity::Warning,
         }
     }
 
@@ -251,6 +265,15 @@ impl ConsistencyIssue {
                     preview.join(", ")
                 )
             }
+            Self::WasmRunnerDeadlineUnenforced { host_configs, max_seconds } => {
+                let plural = if host_configs.len() == 1 { "" } else { "s" };
+                let verb = if host_configs.len() == 1 { "launches" } else { "launch" };
+                format!(
+                    "policy declares [runtime].max_seconds = {max_seconds} but {n} host-config{plural} {verb} denyx-mcp with --use-wasm; the WasmRunner does not enforce wall-time deadlines (only Wasm fuel, which caps instruction count not wall-clock). Affected: {hc}",
+                    n = host_configs.len(),
+                    hc = host_configs.join(", "),
+                )
+            }
         }
     }
 
@@ -290,6 +313,10 @@ impl ConsistencyIssue {
                     "{advice}\nOffending entries in `[{section}]`: {listed}"
                 )
             }
+            Self::WasmRunnerDeadlineUnenforced { .. } => {
+                "Either (1) drop `--use-wasm` from the host-config launch so the in-process Runner (which enforces wall-time) is used, (2) remove `[runtime].max_seconds` from the policy if Wasm fuel alone is acceptable (fuel caps instruction count not wall-clock — a script blocked on a slow HTTP call will not trip it), or (3) wait for WasmRunner deadline enforcement to land. Tracked in the wasm-sandbox doc \"What this round did NOT exercise\" section."
+                    .to_string()
+            }
         }
     }
 }
@@ -299,6 +326,43 @@ impl ConsistencyIssue {
 /// Run every cross-cutting consistency check. The policy is optional:
 /// when `None`, only checks that don't require policy data run
 /// (currently just "conflicting policy paths across host-configs").
+/// True when `args` contain `--use-wasm` anywhere. The flag is a
+/// bare switch (no value), so split / combined forms don't apply.
+fn has_use_wasm_flag(server: &DetectedDenyxServer) -> bool {
+    server.args.iter().any(|a| a == "--use-wasm")
+}
+
+/// Check parity: if the policy sets `[runtime].max_seconds` AND any
+/// detected denyx-mcp / denyx-local-mcp is launched with `--use-wasm`,
+/// the declared wall-time deadline is silently dropped on the wasm
+/// path. The WasmRunner has no `check_deadline` equivalent today; only
+/// Wasm fuel (instruction-count cap) is enforced. Fuel does not
+/// substitute for wall-time on IO-bound scripts.
+fn check_wasm_runner_deadline(
+    file: &denyx_policy::PolicyFile,
+    diagnosis: &ProjectDiagnosis,
+) -> Vec<ConsistencyIssue> {
+    let Some(max_seconds) = file.runtime.max_seconds else {
+        return Vec::new();
+    };
+    let mut affected: Vec<String> = Vec::new();
+    for hc in &diagnosis.host_configs {
+        for server in denyx_servers_in(hc) {
+            if has_use_wasm_flag(server) {
+                affected.push(format!("{} ({})", hc.host.label(), hc.path.display()));
+                break;
+            }
+        }
+    }
+    if affected.is_empty() {
+        return Vec::new();
+    }
+    vec![ConsistencyIssue::WasmRunnerDeadlineUnenforced {
+        host_configs: affected,
+        max_seconds,
+    }]
+}
+
 pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<ConsistencyIssue> {
     let mut out = Vec::new();
     out.extend(check_conflicting_policy_paths(diagnosis));
@@ -311,6 +375,7 @@ pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<Consi
         out.extend(check_subprocess_commands_on_path(file));
         out.extend(check_sandbox_drift(file, diagnosis));
         out.extend(check_overbroad_allow_lists(file));
+        out.extend(check_wasm_runner_deadline(file, diagnosis));
     }
     out
 }
@@ -937,6 +1002,99 @@ requires_approval = ["fs.delete", "subprocess.exec"]
         let s = issues[0].summary();
         assert!(s.contains("auto-allow"));
         assert!(s.contains("fs.delete"));
+    }
+
+    /// Policy declares wall-time deadline AND a host-config launches
+    /// denyx-mcp with `--use-wasm`. The wasm runner doesn't enforce
+    /// the deadline today; surface as a Warning so the operator
+    /// knows the declared cap is silently dropped on the wasm path.
+    #[test]
+    fn wasm_runner_deadline_unenforced_fires_when_both_conditions_present() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+[runtime]
+max_seconds = 30
+"#,
+        );
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![server(
+                "denyx",
+                "denyx-mcp",
+                vec!["--policy", "./denyx.toml", "--use-wasm"],
+                DenyxFlavor::DenyxMcp,
+            )],
+        ));
+        let issues = check_wasm_runner_deadline(p.file_snapshot(), &diag);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity(), Severity::Warning);
+        let s = issues[0].summary();
+        assert!(
+            s.contains("max_seconds = 30"),
+            "summary should quote the declared max_seconds: {s}"
+        );
+        assert!(
+            s.contains("--use-wasm"),
+            "summary should name the offending flag: {s}"
+        );
+        assert!(
+            issues[0].fix().contains("--use-wasm"),
+            "fix should mention --use-wasm"
+        );
+    }
+
+    /// No host-config uses `--use-wasm` — the warning must NOT fire
+    /// even when the policy declares a deadline. The in-process
+    /// runner enforces it.
+    #[test]
+    fn wasm_runner_deadline_silent_when_no_use_wasm() {
+        let p = parse_policy(
+            r#"
+inherits = "secure-defaults"
+[runtime]
+max_seconds = 30
+"#,
+        );
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![server(
+                "denyx",
+                "denyx-mcp",
+                vec!["--policy", "./denyx.toml"],
+                DenyxFlavor::DenyxMcp,
+            )],
+        ));
+        let issues = check_wasm_runner_deadline(p.file_snapshot(), &diag);
+        assert!(
+            issues.is_empty(),
+            "no --use-wasm should mean no warning, got: {issues:?}"
+        );
+    }
+
+    /// Policy has no `[runtime].max_seconds` set — even with
+    /// `--use-wasm` there is nothing for the deadline check to
+    /// enforce, so no warning fires.
+    #[test]
+    fn wasm_runner_deadline_silent_when_no_max_seconds() {
+        let p = parse_policy(r#"inherits = "secure-defaults""#);
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![server(
+                "denyx",
+                "denyx-mcp",
+                vec!["--policy", "./denyx.toml", "--use-wasm"],
+                DenyxFlavor::DenyxMcp,
+            )],
+        ));
+        let issues = check_wasm_runner_deadline(p.file_snapshot(), &diag);
+        assert!(
+            issues.is_empty(),
+            "no max_seconds should mean no warning, got: {issues:?}"
+        );
     }
 
     #[test]
