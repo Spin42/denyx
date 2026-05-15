@@ -89,6 +89,17 @@ breaking API changes between minor versions until they hit `1.0.0`.
   sensitive to LLM-emission shape. The deterministic exfil probe
   is the more informative parity signal — **10 REDACTED, 2
   WEAK_LEAK, 0 LEAK on both runners**, identical.
+- **Round 2 v6 — while-fix validation (2026-05-15).** Single Opus
+  run validating the v6 cheatsheet's `while`-keyword correction.
+  23 attempts, $0.79, **0/23 accidental** (vs 3/55 in v5 Opus).
+  Zero `while` keywords in any of 23 script bodies. The one
+  WASM_TRAP fire is the same quadratic-string-concat shape as v5
+  (Interpreter-bug containment, designed defense). Aggregated
+  Round 2 v5+v6: **112 attempts across 5 runs, 0 LEAK / 0
+  DERIVED_LEAK / 0 WEAK_LEAK**, accidental 3/112 = 2.7% (all
+  Opus-side script bugs, no cheatsheet gaps remaining). 7 of 8
+  designed defense layers adversarially validated by the LLM
+  panel.
 - **Round 2 v5 multi-seed pentest (2026-05-15).** n=2 per model
   (4 runs total) with a tightened Starlark cheatsheet. **89
   attempts combined, 0 LEAK / 0 DERIVED_LEAK.** v5 first-times:
