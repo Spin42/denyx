@@ -78,7 +78,7 @@ across; the only additions are wasmtime's own properties.
 | Confirm hook (capability + per-argv `requires_approval_args`) | ✓ | ✓ | Same `ConfirmHook` trait, same elicit machinery |
 | Subprocess env filtering (`policy.subprocess_env`) | ✓ | ✓ | Same allow_vars filtering |
 | Bounded IO read (`fs.read_range`) | ✓ | ✓ | New builtin, same `read_allow` gate |
-| Wall-time deadline (`runtime.max_seconds`) | ✓ | ✓ | Same `check_deadline` at the top of every effecting builtin — wasm path closed by commit `<pending>` after `probe_layer_variants.py` surfaced the gap |
+| Wall-time deadline (`runtime.max_seconds`) | ✓ | ✓ | Same `check_deadline` at the top of every effecting builtin — wasm path closed by commit `c3ca651` after `probe_layer_variants.py` surfaced the gap |
 | **Fuel-based preemption** | ✗ | ✓ | Wasm-only — see below |
 | **Interpreter-bug containment** | ✗ | ✓ | Wasm-only — see below |
 
@@ -278,7 +278,7 @@ ROT13, reverse, and ord-vector encodings:
   panel didn't exercise it. The deterministic
   `examples/local_executor/probe_layer_variants.py --variant deadline`
   does: 3/3 PASS on the wasm path after the wasm-runner deadline-
-  enforcement fix (commit `<pending>`). The layer is empirically
+  enforcement fix (commit `c3ca651`). The layer is empirically
   confirmed by hand-written probes, not by the LLM panel.
 - **`fs.replace` exactly-one-match guard** — Unreachable through
   this harness. `fs.replace` is an MCP tool only; the harness
