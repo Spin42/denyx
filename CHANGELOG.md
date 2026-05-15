@@ -13,6 +13,8 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-15
+
 - **Wasm-path pentest evidence.** Wasm path pentested across 5
   LLM-driven runs (Opus n=3 + Sonnet n=2), 112 attempts, 0 LEAK /
   0 DERIVED_LEAK / 0 WEAK_LEAK. 7/8 designed defense layers
@@ -24,21 +26,22 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ### Added
 
-- **Wasmtime-sandboxed Starlark runner.** New `--use-wasm` flag on
-  `denyx run` and `denyx-mcp` routes evaluation through a
+- **Wasmtime-sandboxed Starlark runner — now the default.**
+  `denyx run` and `denyx-mcp` dispatch through a
   `wasm32-wasip1`-compiled `starlark-rust` interpreter running
-  inside `wasmtime`. The policy gate stays in Rust on the host
-  side — the wasm path is functionally equivalent to the
-  in-process runner on every security boundary documented in
+  inside `wasmtime`. Pass `--no-wasm` to opt out and select the
+  legacy in-process runner. `--use-wasm` is still accepted as a
+  no-op (one-line stderr reminder) for backward compatibility
+  with scripts and host-configs that pass it explicitly; it will
+  be removed in a future release. The policy gate stays in Rust
+  on the host side — the wasm path is functionally equivalent to
+  the in-process runner on every security boundary documented in
   `docs/04-security-threat-model.md`, plus fuel-based preemption
-  and interpreter-bug containment. Currently opt-in via
-  `--use-wasm`; default in next release once
-  `denyx-runtime-starlark` publishes to crates.io (tracked in
-  #64). Two new crates underpin this: `denyx-interpreter` (NOT
-  published — source for the `.wasm` artefact) and
-  `denyx-runtime-starlark` (published — ships the pre-built
-  `.wasm` as a `&[u8]`).
-- **Fuel-based preemption** *(`--use-wasm` only)*. wasmtime's
+  and interpreter-bug containment. Two new crates underpin this:
+  `denyx-interpreter` (NOT published — source for the `.wasm`
+  artefact) and `denyx-runtime-starlark` (published — ships the
+  pre-built `.wasm` as a `&[u8]`).
+- **Fuel-based preemption** *(wasm path only — default in 0.4.0+, opt out with `--no-wasm`)*. wasmtime's
   per-instruction fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`)
   traps runaway pure-CPU loops within ~1 sec as
   `DenyxError::RuntimeLimit` (exit code 6 — same as `max_seconds`
@@ -70,12 +73,14 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ### Operator-facing notes
 
-- `--use-wasm` prints a one-line warning to stderr listing the
-  current deferral set. Audit log shape, exit codes, and error
-  messages are byte-identical to the in-process runner except
-  for `DenyxError::RuntimeLimit`'s reason string
-  (`"wasm fuel exhausted after N units"` vs `"wall-time deadline
-  exceeded"`).
+- `--no-wasm` selects the legacy in-process runner. `--use-wasm`
+  is accepted as a no-op for backward compatibility and emits a
+  one-line stderr reminder when present (so host-configs and
+  scripts that pass it explicitly know to drop it). Audit log
+  shape, exit codes, and error messages are byte-identical to the
+  in-process runner except for `DenyxError::RuntimeLimit`'s
+  reason string (`"wasm fuel exhausted after N units"` vs
+  `"wall-time deadline exceeded"`).
 - Cold-call cost on the wasm path is ~16.5 ms median per
   `WasmRunner` instance — down from ~481 ms in earlier builds.
   `denyx-runtime-starlark`'s `build.rs` AOT-precompiles the
@@ -90,7 +95,7 @@ breaking API changes between minor versions until they hit `1.0.0`.
   ~4 µs vs ~3 µs for the in-process runner — statistically
   indistinguishable. Measured by `scripts/bench-wasm-runner.py`.
 
-### Not yet validated (gates on promoting `--use-wasm` to default)
+### Validation status at the 0.4.0 cut
 
 - ~~No multistep-eval rerun against the final wasm path.~~ ✓
   **Closed 2026-05-14.** Both runners reach 32-36/36 on
@@ -181,14 +186,23 @@ breaking API changes between minor versions until they hit `1.0.0`.
   through this harness — unit-tested. Round 2 v3 (tool-poisoning)
   scoped to in-process; wasm migration does not change that
   surface.
-- No pentest re-run against the wasm path. Round 1 and Round 2 v3
-  reports cover the in-process runner only.
-- CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
-  before `cargo publish`. `cargo install denyx-cli` from
-  crates.io would not work until that lands. **This is the sole
-  remaining default-blocker.**
-- Fuel budget is hardcoded; no `[runtime].max_wasm_fuel` policy
-  field yet.
+- ~~CI doesn't yet stage the `.wasm` into
+  `denyx-runtime-starlark` before `cargo publish`.~~ **Closed
+  2026-05-15.** `.github/workflows/ci.yml` installs the
+  `wasm32-wasip1` target via `dtolnay/rust-toolchain` and runs
+  `scripts/build-runtime-starlark.sh` before `cargo build` /
+  `cargo test` / `cargo clippy`, so the workspace builds on a
+  fresh checkout. `denyx-runtime-starlark` is published as part
+  of `scripts/publish.sh` in dependency order
+  (`denyx-policy` → `denyx-runtime-starlark` → `denyx-host` →
+  rest).
+- The Round 1 / Round 2 v3 (tool-poisoning) reports cover the
+  in-process runner only. Round 1 was re-run on the wasm path
+  (same 10 REDACTED / 2 WEAK_LEAK / 0 LEAK — see
+  `docs/wasm-sandbox.md`); Round 2 v3 was not re-run because the
+  wasm migration does not change the tool-poisoning surface.
+- Fuel budget is still hardcoded; no `[runtime].max_wasm_fuel`
+  policy field yet. Nice-to-have, not a release-blocker.
 
 See [docs/wasm-sandbox.md](docs/wasm-sandbox.md) for the full
 parity table, threat-model differences, and open work.
@@ -655,6 +669,8 @@ the `aegis-*` crate names were partially taken on crates.io.
   own crypto (AES, custom permutations) or pure side channels
   (length, comparison oracles, substring guesses).
 
-[Unreleased]: https://github.com/Spin42/denyx/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Spin42/denyx/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Spin42/denyx/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Spin42/denyx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Spin42/denyx/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Spin42/denyx/releases/tag/v0.1.0

@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-host"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "allocative",
  "anyhow",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-interpreter"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-local-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-policy"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "denyx-runtime-starlark"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "wasmtime",
 ]

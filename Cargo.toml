@@ -15,7 +15,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 authors = ["Marc Lainez <marc@spin42.com>"]
@@ -27,8 +27,8 @@ homepage = "https://github.com/Spin42/denyx"
 rust-version = "1.80"
 
 [workspace.dependencies]
-denyx-policy = { path = "crates/policy", version = "0.3.0" }
-denyx-host = { path = "crates/host", version = "0.3.0" }
+denyx-policy = { path = "crates/policy", version = "0.4.0" }
+denyx-host = { path = "crates/host", version = "0.4.0" }
 
 anyhow = "1"
 thiserror = "2"
@@ -47,7 +47,7 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.10"
 wasmtime = "44"
 wasmtime-wasi = "44"
-denyx-runtime-starlark = { path = "crates/runtime-starlark", version = "0.3.0" }
+denyx-runtime-starlark = { path = "crates/runtime-starlark", version = "0.4.0" }
 
 [profile.release]
 lto = "thin"
