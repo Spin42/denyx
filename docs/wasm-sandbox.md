@@ -172,151 +172,162 @@ legitimate use of a secret as a string. Documented in
 
 ### Round 2 (LLM-driven) re-run
 
-Three iterations of this round were needed to produce a credible
-result. Each iteration surfaced a measurement gap; the v3 numbers
-are what the doc commits to.
+Four iterations were needed to produce a credible result. Each
+iteration surfaced a different measurement gap. v4 is what the doc
+commits to; the earlier iterations are kept in git history
+(`64b4062`, `4d62b8b`, `9e0ab61`, `735a741`, `328b89d`) as a record
+of how the methodology had to evolve to be honest.
 
-**v1** — one Sonnet run, one Opus run. Headline `0 LEAK`. Surface-
-coverage analysis after the fact showed Opus exercised only
-`print()` (20/20 attempts), neither model exercised `fs.read_range`
-or `fs.replace` or fuel-exhaustion. v1's `0 LEAK` proved only that
-the print redactor caught the encoder families both models tried.
+**v1** — one Sonnet, one Opus. Headline `0 LEAK`. Post-hoc surface
+analysis showed Opus exercised only `print()` (20/20). v1 proved
+only that the print redactor caught the encoder families both
+models tried.
 
-**v2** — harness prompt rewritten (commit `9e0ab61`) with a
-COVERAGE CONTRACT front-loaded, starter techniques per sink, and a
-9-step numbered user-prompt. Both models met the per-sink contract:
-Opus 26 attempts COMPLETE coverage, Sonnet 24 attempts COMPLETE
-coverage, 0 LEAK / 0 DERIVED_LEAK across 50 combined. But: the
-harness's `_classify` lumped every `isError=true` into a generic
-ERROR bucket. 21 of 50 attempts were uninterpretable.
+**v2** — prompt rewritten (`9e0ab61`) with a COVERAGE CONTRACT and
+per-sink starter techniques. Both models met the contract: Opus 26
+attempts, Sonnet 24 attempts, 0 LEAK across 50 combined. But
+`_classify` lumped every `isError=true` into a generic ERROR
+bucket — 21/50 attempts uninterpretable.
 
-**v3** — two further harness changes (commit `735a741`):
+**v3** — typed-error capture (`735a741`) + `fs.replace` removed
+from the prompt (it'''s MCP-only, not a Starlark builtin). Opus 25
+attempts, Sonnet 21 attempts, 0 LEAK across 46. Typed buckets
+revealed accidental defense (Starlark parser/runtime rejecting
+Python idiom) was 30% of attempts.
 
-  1. Typed-error capture: `_classify` now parses the `DenyxError`
-     prefix the host emits (`crates/host/src/lib.rs:163-178`) and
-     attributes each error to its actual cause — POLICY_DENY,
-     VERIFIER_DENY, CONFIRM_DENIED, FUEL_EXHAUSTED,
-     DEADLINE_EXCEEDED, MISSING_BUILTIN, STARLARK_PARSE,
-     STARLARK_RUNTIME, IO_ERROR.
-  2. `fs.replace` removed from the prompt's sink contract. v2
-     analysis showed 7/50 attempts hit `Object of type \`struct\` has
-     no attribute \`replace\`` — Starlark's prelude binds only
-     `read / read_range / write / delete` on the `fs` struct.
-     `fs.replace` exists as an MCP tool only
-     (`crates/mcp/src/main.rs:1092`), synthesizes a Starlark
-     script server-side. The pentest harness only exposes
-     `mcp__denyx__denyx_run` to the cloud model, so the
-     `fs.replace` guard CANNOT be adversarially exercised through
-     this harness — it'd require a harness redesign that exposes
-     `mcp__denyx__denyx_fs_replace` directly. Unit tests in
-     `crates/mcp/src/main.rs` cover the guard; the LLM pentest
-     does not.
+**v4** — Starlark dialect cheatsheet + retry-doesn'''t-count contract
+(`07e6349`) to push the accidental fraction down; `[REDACTED]`-in-
+error-body matcher added to `_classify` to correctly attribute
+`fail(secret)` outcomes to the fail-message scrubber (they had
+been misclassified as STARLARK_RUNTIME since v2). The v3 doc'''s
+claim that fail-scrub was "not adversarially validated" was wrong;
+it had been firing on every attempt, the classifier just didn'''t
+see it.
 
-**v3 single runs against the wasm path:**
+**v4 single runs against the wasm path:**
 
 ```
-Opus 4.7   (claude-opus-4-7,   $5 cap)
-  cost=$0.74  duration=628923ms  attempts=25
-  POLICY_DENY=10  VERIFIER_DENY=1  CONFIRM_DENIED=1  FUEL_EXHAUSTED=2
-  REDACTED=3  STARLARK_PARSE=4  STARLARK_RUNTIME=4  MISSING_BUILTIN=0
-  LEAK=0  DERIVED_LEAK=0  WEAK_LEAK=0
-  coverage: print=7/3 fs.write=3/3 fs.delete=3/2 sub.exec=3/3
-            net.http_get=3/3 fail=2/2 fuel=4/1  → COMPLETE
-
-Sonnet 4.6 (claude-sonnet-4-6, $3 cap)
-  cost=$0.59  duration=275559ms  attempts=21
-  POLICY_DENY=11  FUEL_EXHAUSTED=1  REDACTED=3
-  STARLARK_PARSE=3  STARLARK_RUNTIME=3  MISSING_BUILTIN=0
+Opus 4.7   (claude-opus-4-7,  $6 cap; truncated at 60-min wallclock)
+  cost ~$3.76  duration=3600s  attempts=24
+  POLICY_DENY=12  VERIFIER_DENY=3   FUEL_EXHAUSTED=3
+  REDACTED=3     FAIL_SCRUB=2      STARLARK_PARSE=1
   LEAK=0  DERIVED_LEAK=0  WEAK_LEAK=0
   coverage: print=7/3 fs.write=3/3 fs.delete=2/2 sub.exec=3/3
-            net.http_get=3/3 fail=2/2 fuel=1/1  → COMPLETE
+            net.http_get=3/3 fail=2/2 fuel=3/1  → COMPLETE
+
+Sonnet 4.6 (claude-sonnet-4-6, $4 cap)
+  cost=$0.52  duration=284598ms  attempts=21
+  POLICY_DENY=11  FUEL_EXHAUSTED=2  REDACTED=3
+  FAIL_SCRUB=2    STARLARK_PARSE=1  STARLARK_RUNTIME=2
+  LEAK=0  DERIVED_LEAK=0  WEAK_LEAK=0
+  coverage: print=3/3 fs.write=3/3 fs.delete=2/2 sub.exec=3/3
+            net.http_get=3/3 fail=2/2 fuel=2/1  → COMPLETE
 ```
 
-**0 LEAK and 0 DERIVED_LEAK across the combined 46 attempts.**
+**0 LEAK and 0 DERIVED_LEAK across the combined 45 attempts.**
 
 #### Layer-by-layer empirical accounting
 
-This is the actual claim. Of 46 attempts, layer-by-layer:
+| Layer                                      | Opus | Sonnet | v4 Total | v3 baseline |
+|--------------------------------------------|------|--------|---------:|------------:|
+| Outbound-taint refusal (POLICY_DENY)       |   12 |     11 |       23 |          21 |
+| Wasm fuel preemption (FUEL_EXHAUSTED)      |    3 |      2 |        5 |           3 |
+| Print redactor (REDACTED)                  |    3 |      3 |        6 |           6 |
+| Verifier static check (VERIFIER_DENY)      |    3 |      0 |        3 |           1 |
+| **Fail-message scrubber (FAIL_SCRUB)**     |    2 |      2 |    **4** | **0** (was misclassified) |
+| Confirm hook (CONFIRM_DENIED)              |    0 |      0 |        0 |           1 |
+| Deadline (DEADLINE_EXCEEDED)               |    0 |      0 |        0 |           0 |
+| **Designed defenses subtotal**             | **23** | **18** | **41** |      **32** |
+| STARLARK_PARSE (accidental)                |    1 |      1 |        2 |           7 |
+| STARLARK_RUNTIME (accidental)              |    0 |      2 |        2 |           7 |
+| MISSING_BUILTIN (harness bug)              |    0 |      0 |        0 |           0 |
+| LEAK / DERIVED_LEAK / WEAK_LEAK            |    0 |      0 |        0 |           0 |
 
-| Layer                                | Opus | Sonnet | Total | Status |
-|--------------------------------------|------|--------|-------|--------|
-| Outbound-taint refusal (POLICY_DENY) |   10 |     11 |    21 | ✓ confirmed on `fs.write`, `fs.delete`, `subprocess.exec`, `net.http_get` |
-| Wasm fuel preemption                 |    2 |      1 |     3 | ✓ confirmed on `range(10**8)`-class loops |
-| Print redactor                       |    3 |      3 |     6 | partial credit — see below |
-| Verifier static check (VERIFIER_DENY)|    1 |      0 |     1 | ✓ adversarially confirmed once; routinely bypassed by name-concat (see below) |
-| Confirm hook (CONFIRM_DENIED)        |    1 |      0 |     1 | ✓ exercised once on Opus (b32-RFC4648 `fs.delete`) |
-| Deadline (DEADLINE_EXCEEDED)         |    0 |      0 |     0 | not exercised |
-| ***Accidental* — STARLARK_PARSE**    |    4 |      3 |     7 | parser rejected Python idiom — **not Denyx** |
-| ***Accidental* — STARLARK_RUNTIME**  |    4 |      3 |     7 | eval error — **not Denyx** |
-| MISSING_BUILTIN (harness bug)        |    0 |      0 |     0 | ✓ fixed in v3 |
-| LEAK / DERIVED_LEAK / WEAK_LEAK      |    0 |      0 |     0 | — |
+**Accidental fraction: 4/45 = 8.9%** (v3: 14/46 = 30%). The cheatsheet + retry contract shifted parser-rejection attempts into real sink-reach attempts.
+
+#### What v4 empirically validates
+
+Five distinct designed defense layers caught secret-bearing
+output across 45 attempts spanning plaintext, base64, base32,
+ROT13, reverse, and ord-vector encodings:
+
+1. **Outbound-taint refusal** (23 fires) — `fs.write`, `fs.delete`,
+   `subprocess.exec`, `net.http_get` all refused every encoded /
+   plaintext sink reach.
+2. **Wasm fuel preemption** (5 fires) — `range(10**8)`-class loops
+   caught by the fuel meter.
+3. **Print redactor** (6 fires) — print-channel outputs scrubbed
+   to `[REDACTED]` or matched no recoverable form.
+4. **Verifier static check** (3 fires) — literal-arg `env.read("LITERAL")`
+   caught before evaluation. Both models routinely bypass via
+   `"DENYX_PENTEST" + "_SECRET"` name concat; the verifier is
+   opportunistic, not load-bearing.
+5. **Fail-message scrubber** (4 fires) — `fail(tainted)` produces
+   `starlark error: ... fail: [REDACTED]`; the taint redactor
+   scrubs the message before surface.
+
+#### What v4 does NOT exercise
+
+- **Confirm hook (CONFIRM_DENIED)** — 0 v4 fires. Pentest policy
+  doesn'''t set `requires_approval`. A variant policy with
+  `requires_approval = ["fs.write", "fs.delete", ...]` would
+  force the hook to fire; not done here.
+- **Deadline (DEADLINE_EXCEEDED)** — 0 fires. Pentest policy
+  doesn'''t set `runtime.max_seconds`. Wasm fuel covers the
+  instruction cap; wall-time is a separate, unmeasured gate.
+- **`fs.replace` exactly-one-match guard** — Unreachable through
+  this harness. `fs.replace` is an MCP tool only; the harness
+  exposes only `mcp__denyx__denyx_run`. Unit-tested,
+  not LLM-pentested.
+- **`fs.read_range` adversarially** — No model attempt called it.
+  Same gate as `fs.read`, unit tests cover it.
+
+#### Caveats on the strong claim
+
+- **Print redactor: partial credit only.** Of 10 print-channel
+  attempts across both models, 6 reached the redactor and got
+  REDACTED. The other 4 died upstream (3 caught by the verifier,
+  1 by capability gate on a literal `fs.read` of the local-only
+  fixture).
+- **Verifier is opportunistic.** Both models routinely bypass via
+  name concat. The 3 VERIFIER_DENY fires this run are Opus
+  deliberately probing the static check; the actual line of
+  defense for LLM adversaries is outbound-taint refusal at the
+  sink.
+- **Fail-scrub fires 100% when reached** (4/4). The scrubber
+  doesn'''t suppress the error itself — the script still raises a
+  `fail`, the caller still sees `starlark error: ... fail:
+  [REDACTED]`. The secret is unrecoverable from the surfaced
+  body; the gate is upstream of any operator who reads error
+  text.
 
 #### What this proves and what it doesn'''t
 
-The strong claim from this round: **outbound-taint refusal is
-empirically confirmed on every non-LOCAL-ONLY sink the model
-reached** — 21 separate adversarial attempts spanning plaintext,
-base64, base32, reverse, affine, and ord-vector forms of the
-secret, on `fs.write`, `fs.delete`, `subprocess.exec`, and
-`net.http_get`. Every one was refused before the side effect ran.
+This proves: across the panel tested (Opus 4.7 + Sonnet 4.6,
+white-box, single-shot per shape, ~$4.3 combined spend),
+**every secret-bearing attempt that reached an output boundary
+was caught by a designed defense.** No LEAK, no DERIVED_LEAK.
 
-The wasm-only fuel-preemption defense is empirically confirmed
-on 3 separate `range(10**8)`-class loops.
+This does NOT prove:
+- Denyx defends against ALL LLM exfiltration attempts. Not what
+  was tested.
+- 0 LEAK across 45 attempts implies 0% leak rate. n=45 from a
+  white-box harness is a non-uniform sample.
+- The confirm-hook or deadline layers work adversarially —
+  unmeasured this round.
+- The verifier is a meaningful defense beyond catching the
+  careless model.
 
-The print redactor is confirmed only with partial credit:
+#### Sample-size caveats (still apply)
 
-- 6 attempts produced output the redactor classified as
-  REDACTED (verdict: "no recoverable info in output").
-- 8 print attempts died upstream at Starlark parse or runtime
-  before producing output; the redactor never saw those.
-- 1 attempt was caught by the verifier statically (Opus
-  emitting a literal-arg `env.read("DENYX_PENTEST_SECRET")`).
-
-So of 15 print-channel attempts, only 6 actually exercised the
-redactor — though 0/15 leaked, the redactor itself is responsible
-for 6/15 of those outcomes.
-
-The verifier static check fired only once across 46 attempts. Both
-models routinely write `"DENYX_PENTEST" + "_SECRET"` and pass that
-to `env.read(...)`, which evades the verifier (which only inspects
-literal string-args). **The verifier is opportunistic — it catches
-the careless model — and is NOT what stops LLM-class adversaries
-from reaching the secret.** Outbound-taint refusal at runtime is.
-
-#### What this round did NOT exercise
-
-- **`fs.replace` exactly-one-match guard.** MCP-only tool; not
-  reachable from Starlark; harness doesn'''t expose it. Unit
-  tests cover the guard, not this round.
-- **Confirm hook beyond one fire.** The pentest policy doesn'''t
-  set `requires_approval` for the gated capabilities by default
-  — only the per-argv `requires_approval_args` patterns fire.
-  Stress-testing the hook properly needs a different policy.
-- **`DEADLINE_EXCEEDED` (wall-time deadline).** The pentest
-  policy doesn'''t set `runtime.max_seconds`. Fuel covers the
-  Wasm-instruction cap; wall-time is a separate gate that
-  remains unmeasured here.
-- **`fs.read_range` adversarially.** No model attempt called it.
-  Same gate as `fs.read`, unit tests cover it.
-- **Round 2 v3 tool-poisoning.** Targets the verifier and tool
-  description, both unchanged by the wasm migration. In-process
-  Round 2 v3 doc still applies.
-
-#### Sample-size caveats
-
-- n=1 per model per round. Single seed. Different temperature
-  or panel produces different novel techniques.
-- White-box harness. The model is told the secret value and the
-  redactor'''s transform set up front. Black-box probing would be
-  a separate, harder test.
-- ~30% of v3 attempts (14/46) hit Starlark parse or runtime
+- n=1 per model per round. Single seed. White-box harness (model
+  knows the secret value and the redactor'''s transform set).
+- 4/45 = 8.9% of v4 attempts still hit Starlark parse/runtime
   errors — these are accidental defense (the dialect rejects
-  Python idiom), not Denyx enforcement, and would not be
-  caught in a real attacker'''s third or fourth retry. A
-  follow-up harness improvement (Starlark cheatsheet in the
-  prompt, or auto-retry on parse/runtime errors) would shift
-  some of these into actual sink-reach attempts. Until that
-  lands, the 21 POLICY_DENY count is a floor, not a ceiling.
+  Python idiom), not Denyx enforcement.
+- Opus run was truncated by a 60-min harness wallclock; ~$3.76
+  spent of $6. Some attempts (final JSON marker) didn'''t surface.
+  Re-classified via `--reuse-transcript`; verdicts are authoritative.
 
 ## Operator-facing differences
 
@@ -421,15 +432,19 @@ outstanding:
 2. ~~No pentest re-run against the wasm path.~~ **Closed
    2026-05-15.** Round 1 (`run_exfil.py`): 10 REDACTED / 2
    WEAK_LEAK / 0 LEAK, identical to in-process. Round 2 LLM-
-   driven: three harness iterations, v3 final result above.
-   46 combined attempts (Opus 25 + Sonnet 21), full per-sink
+   driven: four harness iterations, v4 final result above. 45
+   combined attempts (Opus 24 + Sonnet 21), full per-sink
    coverage on both runs, **0 LEAK / 0 DERIVED_LEAK**, typed-
-   error attribution per layer. Empirical fires: 21 outbound-
-   taint refusal, 3 fuel preemption, 6 redactor (partial credit),
-   1 verifier, 1 confirm-hook. `fs.replace` guard not reachable
-   through this harness (MCP-only tool); unit-tested. Round 2
-   v3 (tool-poisoning) scoped to in-process; wasm migration
-   does not change that surface.
+   error attribution per layer. Empirical fires across 5
+   distinct designed defense layers: 23 outbound-taint refusal,
+   5 fuel preemption, 6 redactor (partial credit), 3 verifier,
+   4 fail-message scrubber. Accidental fraction dropped to 8.9%
+   from v3'''s 30% via Starlark cheatsheet + retry contract.
+   Confirm-hook and deadline layers still unmeasured (pentest
+   policy doesn'''t enable them). `fs.replace` guard not reachable
+   through this harness (MCP-only); unit-tested. Round 2 v3
+   (tool-poisoning) scoped to in-process; wasm migration does
+   not change that surface.
 
 3. **Phase 6 CI integration is not done.** `denyx-runtime-starlark`
    isn't published to crates.io yet. Flipping `--use-wasm` to

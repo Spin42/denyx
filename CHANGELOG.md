@@ -90,46 +90,38 @@ breaking API changes between minor versions until they hit `1.0.0`.
   is the more informative parity signal — **10 REDACTED, 2
   WEAK_LEAK, 0 LEAK on both runners**, identical.
 - ~~No pentest re-run against the wasm path.~~ **Closed 2026-05-15
-  via three harness iterations.**
-    - **v1 prompt**: Opus 20 attempts (100% print sink, 0 LEAK).
-      Sonnet 23 attempts (78% print, mixed sinks, 0 LEAK). Surface
-      coverage analysis showed Opus exercised only the print
-      redactor — headline `0 LEAK` proved only one layer worked.
-    - **v2 prompt** (commit `9e0ab61` — COVERAGE CONTRACT + starter
-      techniques + 9-step user-prompt). Both models met the
-      per-sink contract: Opus 26 attempts, Sonnet 24 attempts, 0
-      LEAK / 0 DERIVED_LEAK across 50. But `_classify` lumped all
-      `isError=true` into a generic ERROR bucket — 21/50 attempts
-      uninterpretable. Subsequent analysis also flagged that
-      `fs.replace` is an MCP-only tool, not a Starlark builtin —
-      7/50 v2 attempts hit `struct has no attribute replace`
-      (MISSING_BUILTIN, not a defense fire).
-    - **v3 prompt + classifier** (commit `735a741` — typed-error
-      capture parses DenyxError prefixes; fs.replace replaced
-      with fs.delete in the sink contract). Opus 25 attempts
-      ($0.74), Sonnet 21 attempts ($0.59), **0 LEAK / 0
-      DERIVED_LEAK across 46**. Layer-by-layer:
-        - Outbound-taint refusal (POLICY_DENY): 21 fires across
-          fs.write, fs.delete, subprocess.exec, net.http_get
-        - Wasm fuel preemption: 3 fires on range(10**8)-class
-          loops
-        - Print redactor: 6 fires (partial credit — 8 other
-          print attempts died upstream at parse/runtime)
-        - Verifier static check: 1 fire (Opus only); both models
-          routinely bypass via name-concat. Verifier is
-          opportunistic, not load-bearing.
-        - Confirm hook: 1 fire (Opus only, b32-encoded fs.delete)
-        - MISSING_BUILTIN: 0 (confirms fs.replace prompt fix)
-        - LEAK / DERIVED_LEAK / WEAK_LEAK: 0
-      Accidental defense (not Denyx): 14/46 = 30% Starlark parse
-      / runtime errors — parser rejected Python idiom the model
-      assumed worked. Closing this bucket needs a Starlark
-      cheatsheet in the prompt or auto-retry on parse errors —
-      follow-up, not done.
-  Sample size n=1 per model per round, single seed, white-box.
-  `fs.replace` guard not reachable through this harness — unit-
-  tested. Round 2 v3 (tool-poisoning) scoped to in-process; wasm
-  migration does not change that surface.
+  via four harness iterations.**
+    - **v1 → v3**: methodology evolution recorded in commits
+      `9e0ab61`, `735a741`, `328b89d`. v3 final: 46 attempts,
+      0 LEAK, 32 designed-defense fires, 30% accidental
+      (Starlark parser rejecting Python idiom).
+    - **v4 prompt + classifier** (commit `07e6349` — Starlark
+      dialect cheatsheet, retry-doesn'''t-count-toward-coverage
+      contract, [REDACTED]-in-error-body matcher for fail-scrub):
+      Opus 24 attempts ($3.76, truncated by 60-min wallclock),
+      Sonnet 21 attempts ($0.52). **0 LEAK / 0 DERIVED_LEAK
+      across 45 attempts.** Layer-by-layer:
+        - Outbound-taint refusal (POLICY_DENY): 23 fires
+        - Wasm fuel preemption: 5 fires
+        - Print redactor: 6 fires (partial credit)
+        - Verifier static check: 3 fires (Opus only; both models
+          routinely bypass via name concat — verifier is
+          opportunistic, not load-bearing)
+        - **Fail-message scrubber (FAIL_SCRUB): 4 fires** —
+          previously misclassified in v2/v3 as STARLARK_RUNTIME;
+          the v3 doc'''s "not adversarially validated" claim was
+          wrong. `fail(secret)` produces `fail: [REDACTED]` on
+          every attempt; the scrubber has fired 100% of the time.
+        - Accidental (parser + runtime): 4/45 = 8.9% (down from
+          30% in v3) — Starlark dialect rejections, not Denyx.
+  Five distinct designed defense layers empirically validated
+  across the round. Confirm-hook and deadline layers still
+  unmeasured (pentest policy doesn'''t enable `requires_approval`
+  or `runtime.max_seconds`). Sample size n=1 per model per round,
+  single seed, white-box. `fs.replace` guard not reachable
+  through this harness — unit-tested. Round 2 v3 (tool-poisoning)
+  scoped to in-process; wasm migration does not change that
+  surface.
 - No pentest re-run against the wasm path. Round 1 and Round 2 v3
   reports cover the in-process runner only.
 - CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
