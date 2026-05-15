@@ -13,6 +13,186 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+- **Wasm-path pentest evidence.** Wasm path pentested across 5
+  LLM-driven runs (Opus n=3 + Sonnet n=2), 112 attempts, 0 LEAK /
+  0 DERIVED_LEAK / 0 WEAK_LEAK. 7/8 designed defense layers
+  empirically validated by the LLM panel; deadline by deterministic
+  probe (the pentest policies don't enable `runtime.max_seconds`).
+  Full layer-by-layer accounting in `docs/wasm-sandbox.md`. Sample
+  size is small (white-box, single-shot per shape); see the round
+  reports for caveats.
+
+### Added
+
+- **Wasmtime-sandboxed Starlark runner.** New `--use-wasm` flag on
+  `denyx run` and `denyx-mcp` routes evaluation through a
+  `wasm32-wasip1`-compiled `starlark-rust` interpreter running
+  inside `wasmtime`. The policy gate stays in Rust on the host
+  side — the wasm path is functionally equivalent to the
+  in-process runner on every security boundary documented in
+  `docs/04-security-threat-model.md`, plus fuel-based preemption
+  and interpreter-bug containment. Currently opt-in via
+  `--use-wasm`; default in next release once
+  `denyx-runtime-starlark` publishes to crates.io (tracked in
+  #64). Two new crates underpin this: `denyx-interpreter` (NOT
+  published — source for the `.wasm` artefact) and
+  `denyx-runtime-starlark` (published — ships the pre-built
+  `.wasm` as a `&[u8]`).
+- **Fuel-based preemption** *(`--use-wasm` only)*. wasmtime's
+  per-instruction fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`)
+  traps runaway pure-CPU loops within ~1 sec as
+  `DenyxError::RuntimeLimit` (exit code 6 — same as `max_seconds`
+  on the in-process runner). Closes the gap where
+  `for _ in range(10**9): pass` runs forever within
+  `[runtime].max_seconds` because wall-time deadlines don't catch
+  pure-CPU loops.
+- **`denyx_fs_read_range(path, offset, limit)` MCP tool + Starlark
+  builtin.** Bounded read at the IO layer via `File::seek` +
+  `Read::take(limit)`. Same `read_allow` gate as `fs.read`. For
+  surgical reads of large files, reduces both wire bytes (across
+  the MCP boundary) and disk-read cost.
+- **`denyx_fs_replace(path, old, new)` MCP tool.** Read-modify-write
+  with an exactly-one-match guard. Refuses if `old` occurs 0 or 2+
+  times in the file — ambiguous patches fail loudly instead of
+  applying silently. Goes through `fs.read` + `fs.write` gates;
+  **not atomic** under concurrent writes (same semantics as plain
+  `fs.write`).
+
+### Changed
+
+- `denyx-host` gains `wasmtime` and `wasmtime-wasi` as workspace
+  dependencies. The in-process `Runner` is unchanged; the new
+  `WasmRunner` lives alongside.
+- The Starlark interpreter's globals now include the same
+  `LibraryExtension` set on both paths (`Print, StructType,
+  NamespaceType, Json, Map, Filter, Debug`) — required for the
+  Wasm path's parity with the in-process runner.
+
+### Operator-facing notes
+
+- `--use-wasm` prints a one-line warning to stderr listing the
+  current deferral set. Audit log shape, exit codes, and error
+  messages are byte-identical to the in-process runner except
+  for `DenyxError::RuntimeLimit`'s reason string
+  (`"wasm fuel exhausted after N units"` vs `"wall-time deadline
+  exceeded"`).
+- Cold-call cost on the wasm path is ~16.5 ms median per
+  `WasmRunner` instance — down from ~481 ms in earlier builds.
+  `denyx-runtime-starlark`'s `build.rs` AOT-precompiles the
+  embedded `.wasm` to a wasmtime serialized module (`.cwasm`) on
+  the host architecture; `WasmRunner` loads it via
+  `Module::deserialize` (single-digit ms) instead of JIT-compiling
+  the raw `.wasm` (~480 ms). If deserialize fails (different
+  wasmtime version, different Config flags, target-architecture
+  mismatch), the runner falls back transparently to JIT-compiling
+  the raw `.wasm` — same behaviour as before AOT existed.
+  Amortized per-call cost inside an already-instantiated runner is
+  ~4 µs vs ~3 µs for the in-process runner — statistically
+  indistinguishable. Measured by `scripts/bench-wasm-runner.py`.
+
+### Not yet validated (gates on promoting `--use-wasm` to default)
+
+- ~~No multistep-eval rerun against the final wasm path.~~ ✓
+  **Closed 2026-05-14.** Both runners reach 32-36/36 on
+  `qwen2.5-coder:7b` depending on whether the LLM emits literal-
+  argument shapes that the verifier catches statically (failing
+  the harness's success-with-redaction check) or variable-argument
+  shapes that flow through the runtime redactor. Both outcomes
+  are valid security behaviour; the harness's task definition is
+  sensitive to LLM-emission shape. The deterministic exfil probe
+  is the more informative parity signal — **10 REDACTED, 2
+  WEAK_LEAK, 0 LEAK on both runners**, identical.
+- **Round 2 v6 — while-fix validation (2026-05-15).** Single Opus
+  run validating the v6 cheatsheet's `while`-keyword correction.
+  23 attempts, $0.79, **0/23 accidental** (vs 3/55 in v5 Opus).
+  Zero `while` keywords in any of 23 script bodies. The one
+  WASM_TRAP fire is the same quadratic-string-concat shape as v5
+  (Interpreter-bug containment, designed defense). Aggregated
+  Round 2 v5+v6: **112 attempts across 5 runs, 0 LEAK / 0
+  DERIVED_LEAK / 0 WEAK_LEAK**, accidental 3/112 = 2.7% (all
+  Opus-side script bugs, no cheatsheet gaps remaining). 7 of 8
+  designed defense layers adversarially validated by the LLM
+  panel.
+- **Round 2 v5 multi-seed pentest (2026-05-15).** n=2 per model
+  (4 runs total) with a tightened Starlark cheatsheet. **89
+  attempts combined, 0 LEAK / 0 DERIVED_LEAK.** v5 first-times:
+    - Interpreter-bug containment empirically confirmed (1
+      WASM_TRAP fire — Opus's quadratic string-concat caused the
+      Starlark interpreter to `process::abort` inside the wasm
+      guest; the sandbox contained it cleanly). 7 of 7 named
+      designed defense layers (excluding deadline, which the
+      pentest policy doesn't enable) now have at least one
+      adversarial fire from the LLM panel.
+    - Confirm hook fired twice in v5 (vs 0 in v4) — Opus seed 1
+      on encoded-secret fs.delete paths.
+  Reproducibility: Sonnet n=2 produced identical verdict
+  distributions seed-to-seed (17 attempts each, same buckets);
+  Opus n=2 varied materially (31 vs 24 attempts, different
+  bucket emphasis). Accidental dropped from 8.9% (v4) to 4.5%
+  (v5); all 4 residuals were Opus, with 2 sharing a single root
+  cause (`while` keyword inside def — the v5 cheatsheet
+  incorrectly implied `while` works inside def, but the Starlark
+  Standard dialect rejects `while` EVERYWHERE; corrected in
+  follow-up commit).
+- **WasmRunner wall-time deadline parity (2026-05-15).** Surfaced
+  by `examples/local_executor/probe_layer_variants.py --variant
+  deadline`: in-process Runner 3/3 PASS, wasm Runner 0/3 PASS —
+  `wasm_runner.rs` had zero references to `check_deadline`,
+  `start_time`, or `max_seconds`. `[runtime].max_seconds` was
+  silently dropped on the wasm path. Closed by threading a
+  `start_time: Instant` through `WasmState` and calling a new
+  `check_wasm_deadline` helper at the top of every effecting
+  Func closure (11 builtins). Validation: 2 new wasm-runner
+  unit tests + `probe_layer_variants.py` now 7/7 PASS (4 confirm
+  + 3 deadline). 140/140 `denyx-host` tests green. Doctor
+  diagnostic added in commit `5a34fa4` still flags the same
+  combination for older builds where the runner fix hasn't
+  shipped yet.
+- ~~No pentest re-run against the wasm path.~~ **Closed 2026-05-15
+  via four harness iterations.**
+    - **v1 → v3**: methodology evolution recorded in commits
+      `9e0ab61`, `735a741`, `328b89d`. v3 final: 46 attempts,
+      0 LEAK, 32 designed-defense fires, 30% accidental
+      (Starlark parser rejecting Python idiom).
+    - **v4 prompt + classifier** (commit `07e6349` — Starlark
+      dialect cheatsheet, retry-doesn'''t-count-toward-coverage
+      contract, [REDACTED]-in-error-body matcher for fail-scrub):
+      Opus 24 attempts ($3.76, truncated by 60-min wallclock),
+      Sonnet 21 attempts ($0.52). **0 LEAK / 0 DERIVED_LEAK
+      across 45 attempts.** Layer-by-layer:
+        - Outbound-taint refusal (POLICY_DENY): 23 fires
+        - Wasm fuel preemption: 5 fires
+        - Print redactor: 6 fires (partial credit)
+        - Verifier static check: 3 fires (Opus only; both models
+          routinely bypass via name concat — verifier is
+          opportunistic, not load-bearing)
+        - **Fail-message scrubber (FAIL_SCRUB): 4 fires** —
+          previously misclassified in v2/v3 as STARLARK_RUNTIME;
+          the v3 doc'''s "not adversarially validated" claim was
+          wrong. `fail(secret)` produces `fail: [REDACTED]` on
+          every attempt; the scrubber has fired 100% of the time.
+        - Accidental (parser + runtime): 4/45 = 8.9% (down from
+          30% in v3) — Starlark dialect rejections, not Denyx.
+  Five distinct designed defense layers empirically validated
+  across the round. Confirm-hook and deadline layers still
+  unmeasured (pentest policy doesn'''t enable `requires_approval`
+  or `runtime.max_seconds`). Sample size n=1 per model per round,
+  single seed, white-box. `fs.replace` guard not reachable
+  through this harness — unit-tested. Round 2 v3 (tool-poisoning)
+  scoped to in-process; wasm migration does not change that
+  surface.
+- No pentest re-run against the wasm path. Round 1 and Round 2 v3
+  reports cover the in-process runner only.
+- CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
+  before `cargo publish`. `cargo install denyx-cli` from
+  crates.io would not work until that lands. **This is the sole
+  remaining default-blocker.**
+- Fuel budget is hardcoded; no `[runtime].max_wasm_fuel` policy
+  field yet.
+
+See [docs/wasm-sandbox.md](docs/wasm-sandbox.md) for the full
+parity table, threat-model differences, and open work.
+
 ## [0.3.0] — 2026-05-11
 
 ### Added

@@ -99,12 +99,9 @@ cargo install denyx-cli denyx-mcp
 ```
 
 Both binaries land in `~/.cargo/bin/`, which is normally already on your
-`$PATH`. This works natively on Linux, macOS, and Windows for the policy
-gate, taint redaction, audit log, and host wiring. If you want the
-optional Linux-only `bwrap` subprocess sandbox or to run Claude Code v2's
-OS sandbox (also Linux/WSL2-side), install Denyx *inside* a Lima VM
-(macOS) or WSL2 distro (Windows) — see [Prerequisites](#prerequisites)
-and the deployment guides.
+`$PATH`. This works natively on Linux, macOS, and Windows; no additional
+system packages are required for the policy gate, taint redaction, audit
+log, Wasm-sandboxed Starlark runner, or host wiring.
 
 > **Building from source instead?** Use this if you need an unreleased
 > feature or are contributing:
@@ -170,20 +167,24 @@ JSON Lines record you can later verify with `denyx audit verify`.
   CI/cron/scripts with no host at all. See
   [docs/08-quickstart.md](docs/08-quickstart.md).
 
-**Optional (Linux only):** `bubblewrap` for `[subprocess].sandbox = "bwrap"`
-mode — wraps any subprocess spawned from your Starlark policy in a kernel
-namespace jail. **Off by default**; install with `apt install bubblewrap`
-if you want it. The rest of Denyx (the policy gate, taint redaction, audit
-log, MCP wiring, host lockdown) works on every platform without it.
+**Platform notes:** the policy gate, taint redaction, audit log, Wasm
+Starlark runner, and host wiring run natively on Linux, macOS, and
+Windows. No platform-specific code paths in the primary install.
 
-**Platform notes:** Denyx is platform-portable. The tested deployment shape
-uses [Lima](https://lima-vm.io/) on macOS and WSL2 on Windows — not because
-the language-level gate needs them, but because `bubblewrap` and Claude
-Code v2's OS sandbox are Linux-side features. Native macOS and Windows
-builds work for the policy gate (no platform-specific code paths, untested
-in CI). See [docs/macos-deployment.md](docs/macos-deployment.md) and
-[docs/windows-deployment.md](docs/windows-deployment.md) for the
-recommended VM setups.
+### Advanced / optional
+
+- **`bubblewrap` (Linux only)** — enables `[subprocess].sandbox = "bwrap"`,
+  an OS-level namespace jail wrapping each subprocess the script spawns.
+  This addresses a different threat from the wasm sandbox: bwrap isolates
+  child processes (so a permitted `python3` can't read paths outside the
+  policy's bind-mount layout), the wasm sandbox isolates the Starlark
+  interpreter itself. They are not substitutes. Off by default; install
+  via `apt install bubblewrap` / `dnf install bubblewrap` if your threat
+  model includes subprocess escape via path-gate misconfiguration.
+- **Claude Code v2's OS sandbox** — Linux/WSL2-side only. Install Denyx
+  *inside* a Lima VM (macOS) or WSL2 distro (Windows) to use it. See
+  [docs/macos-deployment.md](docs/macos-deployment.md) and
+  [docs/windows-deployment.md](docs/windows-deployment.md).
 
 ## What Denyx actually does
 
@@ -282,6 +283,19 @@ is reported as INFO with "runtime falls back to secure-defaults
 baseline (safe by design)" — not a failure. Full flag reference at
 [docs/doctor.md](docs/doctor.md).
 
+## Security validation
+
+The wasm-sandboxed Starlark runner (the recommended runtime — see
+[docs/wasm-sandbox.md](docs/wasm-sandbox.md)) has been pentested across
+5 independent LLM-driven runs (Opus 4.7 n=3 + Sonnet 4.6 n=2),
+**112 attempts, 0 LEAK / 0 DERIVED_LEAK / 0 WEAK_LEAK**. Seven of eight
+designed defense layers were empirically validated by the LLM panel;
+the eighth (`runtime.max_seconds` deadline) is validated by a
+deterministic probe because the pentest policies don't enable it.
+Sample size is small (n=5 runs, white-box, single-shot per shape);
+layer-by-layer accounting and caveats live in `docs/wasm-sandbox.md`
+and the round reports under [`docs/security-pentest-report.md`](docs/security-pentest-report.md).
+
 ## Documentation
 
 The deep dive lives in [`docs/`](docs/) — start with the
@@ -297,6 +311,7 @@ Most-clicked entries:
 | [08-quickstart](docs/08-quickstart.md) | 5-minute CLI walkthrough — generate, run, audit. The non-MCP version of the quickstart at the top of this README. |
 | [09-claude-code](docs/09-claude-code.md) / [10-opencode](docs/10-opencode.md) | Host-specific wiring details, including v1/v2 differences and the built-in-tool lockdown. |
 | [05-owasp-agentic-coverage](docs/05-owasp-agentic-coverage.md) | Empirical scoring against the OWASP Agentic Top 10 — 2 strong / 4 partial / 4 out-of-scope by design — with concrete tests behind every position. |
+| [07-wasm-sandbox](docs/wasm-sandbox.md) | The recommended Wasm-sandboxed Starlark runner (`--use-wasm` today, default in the next release): parity table vs the in-process runner, fuel-based preemption, threat-model deltas, pentest result. |
 | [comparison](docs/comparison.md) | How Denyx compares to host built-ins, MCP gateways, LLM guardrails, IFC research, and audit-shape peers. Read when evaluating Denyx vs alternatives. |
 | [host-config](docs/host-config.md) / [doctor](docs/doctor.md) | Reference pages for the two CLI commands you'll re-run most often: `denyx host-config` (cross-host wiring) and `denyx-mcp doctor` / `denyx-local-mcp doctor` (preflight). |
 
@@ -312,18 +327,29 @@ table in mind before deciding where to deploy it:
   model are human, the implementation is not. Read diffs before trusting
   them — especially `crates/policy/`, the verifier, and
   `crates/host/src/taint.rs`.
+- **The Wasm-sandboxed Starlark runner is the recommended runtime.** It
+  ships today behind the `--use-wasm` flag on `denyx run` and `denyx-mcp`,
+  and becomes the default in the next release once
+  `denyx-runtime-starlark` is published to crates.io (the remaining
+  Phase 6 CI item). Pentested across 5 LLM-driven runs / 112 attempts /
+  0 LEAK — full accounting in [docs/wasm-sandbox.md](docs/wasm-sandbox.md).
 - **No human security engineer has read the code with hostile intent yet.**
   That external review is the single biggest gating item between today and
   unattended production use. What *has* happened: a [16-surface bypass
   assessment](docs/security-audit.md), an [adversarial pentest with
   Sonnet + Opus](docs/security-pentest-report.md) (2 High findings, both
   closed), a [12-technique exfiltration probe](examples/local_executor/run_exfil.py)
-  (0 LEAK / 3 WEAK_LEAK / 9 REDACTED), and [`cargo-fuzz` + a
-  200 000-iteration regression sweep](fuzz/README.md). All empirical, none
-  of which substitutes for a human reviewer.
-- **OS isolation is opt-in.** Without `[subprocess].sandbox = "bwrap"`
-  (Linux) or running inside the recommended VM (macOS / Windows), Denyx is
-  the language-level gate only.
+  (0 LEAK / 3 WEAK_LEAK / 9 REDACTED), the wasm-path pentest summarised
+  above, and [`cargo-fuzz` + a 200 000-iteration regression
+  sweep](fuzz/README.md). All empirical, none of which substitutes for a
+  human reviewer.
+- **OS-level subprocess isolation is opt-in.** The wasm sandbox contains
+  the Starlark interpreter; it does not isolate subprocesses the script
+  spawns. For OS-level isolation of child processes, enable
+  `[subprocess].sandbox = "bwrap"` (Linux) or run inside the recommended
+  VM (macOS / Windows). Without one of these layers, a permitted
+  subprocess (e.g. `python3`) is bounded only by the argv path-gate, not
+  by a kernel namespace.
 - **`requires_approval` is not always a real user prompt.** The CLI prompts
   on stdin. The MCP server's default `auto` mode sends an MCP elicitation
   when the host advertises the capability and falls back to `auto-deny`

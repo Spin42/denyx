@@ -77,14 +77,19 @@ ENV_SECRET_VALUE = "sk-env-do-not-leak-MNOP4321-fixture-secret"
 # ---- MCP client (minimal, lifted from run_multistep.py) ----------------
 
 class McpClient:
-    def __init__(self, mcp_bin: Path, policy: Path) -> None:
+    def __init__(self, mcp_bin: Path, policy: Path, use_wasm: bool = False) -> None:
         if not mcp_bin.exists():
             raise FileNotFoundError(
                 f"denyx-mcp not found at {mcp_bin}. "
                 f"Run `cargo build --release -p denyx-mcp` first."
             )
         self.proc = subprocess.Popen(
-            [str(mcp_bin), "--policy", str(policy)],
+            [
+                *(
+                    [str(mcp_bin), "--policy", str(policy)]
+                    + (["--use-wasm"] if use_wasm else [])
+                )
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -505,6 +510,11 @@ def main() -> int:
     parser.add_argument("--only", help="Run only this technique by name", default=None)
     parser.add_argument("--show-script", action="store_true", help="Print each Starlark before running")
     parser.add_argument("--show-output", action="store_true", help="Print each MCP output verbatim")
+    parser.add_argument(
+        "--use-wasm",
+        action="store_true",
+        help="Evaluate scripts inside the wasmtime sandbox (Phase 5 migration path).",
+    )
     args = parser.parse_args()
 
     if not args.mcp_bin.exists():
@@ -516,7 +526,7 @@ def main() -> int:
     print(f"# secret: ENV[{ENV_SECRET_NAME}] = {ENV_SECRET_VALUE!r}")
     print()
 
-    client = McpClient(args.mcp_bin, policy)
+    client = McpClient(args.mcp_bin, policy, use_wasm=args.use_wasm)
     try:
         results: list[Result] = []
         for t in TECHNIQUES:

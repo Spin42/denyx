@@ -24,3 +24,14 @@ allocative.workspace = true
 ureq.workspace = true
 sha2.workspace = true
 url.workspace = true
+
+# Wasm-sandbox path — parallel WasmRunner introduced in Phase 4 of the
+# wasmtime-sandbox migration. The pre-built Starlark interpreter ships
+# as a byte slice via denyx-runtime-starlark; wasmtime + wasmtime-wasi
+# load it, provide WASI preview1, and dispatch denyx::host_* imports
+# back through the existing Policy/Audit/Confirm machinery. The in-
+# process Runner (above deps) remains the default until Phase 5 flips
+# the call site in denyx-cli.
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+denyx-runtime-starlark.workspace = true

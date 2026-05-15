@@ -432,8 +432,22 @@ need the relevant interpreter (`python` for Python, `node` for
 Node, etc.) negate it AND add a `[subprocess.deny_args]` entry that
 blocks the inline-execution flags (`-c`, `-e`, `-p`).
 
-**Layer 2 (opt-in): `[subprocess].sandbox = "bwrap"`.** OS-level
-isolation. Every `subprocess.exec` call is wrapped with
+**Layer 2 (advanced / legacy, opt-in): `[subprocess].sandbox = "bwrap"`.**
+
+> Note: this is an OS-level *subprocess* isolation layer and is **not
+> the recommended primary defense**. The recommended interpreter-
+> containment defense is the Wasm sandbox documented in
+> [`wasm-sandbox.md`](wasm-sandbox.md) — it isolates the Starlark
+> interpreter itself (fuel-based preemption + interpreter-bug
+> containment). bwrap isolates the *child processes* a permitted
+> subprocess spawns, which addresses a different threat: subprocess
+> escape via path-gate misconfiguration on a binary that takes
+> inline code or constructs paths at runtime. The two layers are
+> complementary, not substitutes. Keep this section if you have an
+> existing policy that sets `sandbox = "bwrap"`; otherwise the wasm
+> sandbox is the right starting point and bwrap is opt-in on top.
+
+OS-level isolation. Every `subprocess.exec` call is wrapped with
 [bubblewrap](https://github.com/containers/bubblewrap), which
 constructs a fresh Linux namespace + bind-mount jail per call. The
 child sees:

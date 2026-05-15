@@ -29,7 +29,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use denyx_host::{
     AllowAllConfirm, AuditSink, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm,
-    DenyxError, JsonlAuditSink, Runner,
+    DenyxError, JsonlAuditSink, Runner, WasmRunner,
 };
 use denyx_policy::Policy;
 
@@ -144,6 +144,16 @@ struct RunArgs {
     /// Useful in tests/CI; refuse in production.
     #[arg(long)]
     yes: bool,
+
+    /// Evaluate the script inside a wasmtime sandbox (the Phase 5
+    /// migration runner) instead of the in-process Starlark
+    /// interpreter. Opt-in for now: the Wasm path enforces the same
+    /// Policy gate but does NOT yet emit audit events or fire the
+    /// confirm hook (those land in a Phase 4 wrap-up commit). Fuel-
+    /// based preemption is the Wasm-only gap-closer — see the
+    /// `fuel_exhaustion_traps_runaway_loop` test in crates/host.
+    #[arg(long)]
+    use_wasm: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1179,11 +1189,20 @@ fn run(args: RunArgs) -> Result<(), CliError> {
         Arc::new(DenyAllConfirm)
     };
 
-    let runner = Runner::new(policy)
-        .with_audit(audit)
-        .with_confirm_hook(confirm);
-
-    let outcome = runner.run(&task_id, &script, args.script.to_string_lossy().as_ref())?;
+    let outcome = if args.use_wasm {
+        eprintln!(
+            "denyx: --use-wasm enabled (Phase 5 wasmtime runner). The Policy gate is enforced; audit events and confirm prompts are NOT yet emitted from this path. See the wasm-sandbox branch CHANGELOG for the deferral list."
+        );
+        let runner = WasmRunner::new(policy)
+            .with_audit(audit)
+            .with_confirm_hook(confirm);
+        runner.run(&task_id, &script, args.script.to_string_lossy().as_ref())?
+    } else {
+        let runner = Runner::new(policy)
+            .with_audit(audit)
+            .with_confirm_hook(confirm);
+        runner.run(&task_id, &script, args.script.to_string_lossy().as_ref())?
+    };
     for line in &outcome.printed {
         println!("{line}");
     }

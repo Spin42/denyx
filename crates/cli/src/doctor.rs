@@ -460,6 +460,9 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
                 }
                 ConsistencyIssue::SandboxAllowWriteStale { .. } => "sandbox allowWrite stale",
                 ConsistencyIssue::OverBroadAllowList { .. } => "over-broad allow-list entry",
+                ConsistencyIssue::WasmRunnerDeadlineUnenforced { .. } => {
+                    "wasm runner ignores [runtime].max_seconds"
+                }
             };
             match sev {
                 Severity::Critical => {

@@ -33,6 +33,7 @@ pub mod project_diagnosis;
 pub mod startup_block;
 pub mod taint;
 pub mod verifier;
+pub mod wasm_runner;
 
 /// Shared `ureq` agent with auto-redirect disabled. ureq's default
 /// agent follows up to 5 redirects without re-checking the new URL
@@ -41,7 +42,7 @@ pub mod verifier;
 /// auto-follow and surface 3xx responses as a clear error so
 /// scripts must call net.http_* again on the new URL (which goes
 /// through the policy gate).
-fn no_redirect_agent() -> &'static ureq::Agent {
+pub(crate) fn no_redirect_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| ureq::AgentBuilder::new().redirects(0).build())
 }
@@ -51,7 +52,7 @@ fn no_redirect_agent() -> &'static ureq::Agent {
 /// The redirected URL must be checked separately by the script
 /// via another net.http_* call so the policy gate fires on the
 /// new host.
-fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
+pub(crate) fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<String> {
     let status = resp.status();
     if (300..400).contains(&status) {
         let location = resp
@@ -74,6 +75,7 @@ pub use audit::{
 };
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
 pub use taint::{redact, redact_lines, TaintRegistry, REDACTED};
+pub use wasm_runner::WasmRunner;
 
 /// A capability the runtime knows how to enforce.
 ///
@@ -138,6 +140,7 @@ pub const CAPABILITIES: &[Capability] = &[
 const PRELUDE: &str = "\
 fs = struct(\n\
     read = _denyx_fs_read,\n\
+    read_range = _denyx_fs_read_range,\n\
     write = _denyx_fs_write,\n\
     delete = _denyx_fs_delete,\n\
 )\n\
@@ -563,6 +566,62 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
             Ok(resolved) => {
                 ctx.require_confirm("fs.read", format!("read {}", resolved.display()))?;
                 let result = std::fs::read_to_string(&resolved);
+                if let Ok(content) = result.as_ref() {
+                    if ctx.policy.fs_read_is_local_only(&resolved) {
+                        ctx.taint.add(content);
+                    }
+                }
+                ctx.emit(AuditEvent::fs(
+                    &ctx.task_id,
+                    step,
+                    "fs.read",
+                    &resolved,
+                    result.is_ok(),
+                    result.as_ref().err().map(|e| e.to_string()),
+                ));
+                Ok(result?)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ctx.emit(AuditEvent::denied(
+                    &ctx.task_id,
+                    step,
+                    "fs.read",
+                    &format!("path={path}"),
+                    &msg,
+                ));
+                ctx.capture(CapturedKind::Policy, &msg);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Bounded read at the IO layer: open file, seek to `offset`,
+    /// read at most `limit` bytes. Avoids loading the whole file into
+    /// memory for surgical reads of large files. Same policy gate as
+    /// fs.read (read_allow); same taint registration if local-only.
+    fn _denyx_fs_read_range<'v>(
+        path: &str,
+        offset: u64,
+        limit: u64,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let ctx = ctx_from_eval(eval)?;
+        let step = ctx.begin_call("fs.read")?;
+        match ctx.policy.check_fs_read(Path::new(path)) {
+            Ok(resolved) => {
+                ctx.require_confirm(
+                    "fs.read",
+                    format!("read_range {} [{offset}..+{limit}]", resolved.display()),
+                )?;
+                let result: std::io::Result<String> = (|| {
+                    let mut file = std::fs::File::open(&resolved)?;
+                    file.seek(SeekFrom::Start(offset))?;
+                    let mut buf = String::new();
+                    file.take(limit).read_to_string(&mut buf)?;
+                    Ok(buf)
+                })();
                 if let Ok(content) = result.as_ref() {
                     if ctx.policy.fs_read_is_local_only(&resolved) {
                         ctx.taint.add(content);

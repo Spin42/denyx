@@ -1,0 +1,4 @@
+# The .wasm artefact is built by scripts/build-runtime-starlark.sh
+# (or by CI before `cargo publish`). It is not part of the source
+# tree — see README.md for the reproducibility recipe.
+starlark_interpreter.wasm

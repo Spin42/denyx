@@ -237,6 +237,14 @@ exercised in [`crates/host/tests/sandbox_bwrap.rs`](../crates/host/tests/sandbox
 (13 tests, including 6 added in the recent mutation-testing
 triage round).
 
+**Optional fourth layer (`--use-wasm`):** the Starlark interpreter
+itself runs inside a `wasmtime` linear-memory sandbox. A
+miscompilation or memory-safety bug in `starlark-rust` stays
+contained at the wasm boundary instead of corrupting the host
+address space. Defence-in-depth, not a primary control. See
+[wasm-sandbox](wasm-sandbox.md) for the full parity table
+and threat-model deltas.
+
 Tests:
 
 - `asi05_unlisted_command_denied` — `bash -c id` blocked when only
