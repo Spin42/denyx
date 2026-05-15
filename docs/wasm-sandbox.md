@@ -78,6 +78,7 @@ across; the only additions are wasmtime's own properties.
 | Confirm hook (capability + per-argv `requires_approval_args`) | ✓ | ✓ | Same `ConfirmHook` trait, same elicit machinery |
 | Subprocess env filtering (`policy.subprocess_env`) | ✓ | ✓ | Same allow_vars filtering |
 | Bounded IO read (`fs.read_range`) | ✓ | ✓ | New builtin, same `read_allow` gate |
+| Wall-time deadline (`runtime.max_seconds`) | ✓ | ✓ | Same `check_deadline` at the top of every effecting builtin — wasm path closed by commit `<pending>` after `probe_layer_variants.py` surfaced the gap |
 | **Fuel-based preemption** | ✗ | ✓ | Wasm-only — see below |
 | **Interpreter-bug containment** | ✗ | ✓ | Wasm-only — see below |
 
@@ -190,18 +191,18 @@ attempts, Sonnet 24 attempts, 0 LEAK across 50 combined. But
 bucket — 21/50 attempts uninterpretable.
 
 **v3** — typed-error capture (`735a741`) + `fs.replace` removed
-from the prompt (it'''s MCP-only, not a Starlark builtin). Opus 25
+from the prompt (it's MCP-only, not a Starlark builtin). Opus 25
 attempts, Sonnet 21 attempts, 0 LEAK across 46. Typed buckets
 revealed accidental defense (Starlark parser/runtime rejecting
 Python idiom) was 30% of attempts.
 
-**v4** — Starlark dialect cheatsheet + retry-doesn'''t-count contract
+**v4** — Starlark dialect cheatsheet + retry-doesn't-count contract
 (`07e6349`) to push the accidental fraction down; `[REDACTED]`-in-
 error-body matcher added to `_classify` to correctly attribute
 `fail(secret)` outcomes to the fail-message scrubber (they had
-been misclassified as STARLARK_RUNTIME since v2). The v3 doc'''s
+been misclassified as STARLARK_RUNTIME since v2). The v3 doc's
 claim that fail-scrub was "not adversarially validated" was wrong;
-it had been firing on every attempt, the classifier just didn'''t
+it had been firing on every attempt, the classifier just didn't
 see it.
 
 **v4 single runs against the wasm path:**
@@ -269,12 +270,16 @@ ROT13, reverse, and ord-vector encodings:
 #### What v4 does NOT exercise
 
 - **Confirm hook (CONFIRM_DENIED)** — 0 v4 fires. Pentest policy
-  doesn'''t set `requires_approval`. A variant policy with
+  doesn't set `requires_approval`. A variant policy with
   `requires_approval = ["fs.write", "fs.delete", ...]` would
   force the hook to fire; not done here.
-- **Deadline (DEADLINE_EXCEEDED)** — 0 fires. Pentest policy
-  doesn'''t set `runtime.max_seconds`. Wasm fuel covers the
-  instruction cap; wall-time is a separate, unmeasured gate.
+- **Deadline (DEADLINE_EXCEEDED) — closed by probe.** v4 pentest
+  policy doesn't set `runtime.max_seconds`, so the LLM-driven
+  panel didn't exercise it. The deterministic
+  `examples/local_executor/probe_layer_variants.py --variant deadline`
+  does: 3/3 PASS on the wasm path after the wasm-runner deadline-
+  enforcement fix (commit `<pending>`). The layer is empirically
+  confirmed by hand-written probes, not by the LLM panel.
 - **`fs.replace` exactly-one-match guard** — Unreachable through
   this harness. `fs.replace` is an MCP tool only; the harness
   exposes only `mcp__denyx__denyx_run`. Unit-tested,
@@ -295,13 +300,13 @@ ROT13, reverse, and ord-vector encodings:
   defense for LLM adversaries is outbound-taint refusal at the
   sink.
 - **Fail-scrub fires 100% when reached** (4/4). The scrubber
-  doesn'''t suppress the error itself — the script still raises a
+  doesn't suppress the error itself — the script still raises a
   `fail`, the caller still sees `starlark error: ... fail:
   [REDACTED]`. The secret is unrecoverable from the surfaced
   body; the gate is upstream of any operator who reads error
   text.
 
-#### What this proves and what it doesn'''t
+#### What this proves and what it doesn't
 
 This proves: across the panel tested (Opus 4.7 + Sonnet 4.6,
 white-box, single-shot per shape, ~$4.3 combined spend),
@@ -321,12 +326,12 @@ This does NOT prove:
 #### Sample-size caveats (still apply)
 
 - n=1 per model per round. Single seed. White-box harness (model
-  knows the secret value and the redactor'''s transform set).
+  knows the secret value and the redactor's transform set).
 - 4/45 = 8.9% of v4 attempts still hit Starlark parse/runtime
   errors — these are accidental defense (the dialect rejects
   Python idiom), not Denyx enforcement.
 - Opus run was truncated by a 60-min harness wallclock; ~$3.76
-  spent of $6. Some attempts (final JSON marker) didn'''t surface.
+  spent of $6. Some attempts (final JSON marker) didn't surface.
   Re-classified via `--reuse-transcript`; verdicts are authoritative.
 
 ## Operator-facing differences
@@ -439,9 +444,9 @@ outstanding:
    distinct designed defense layers: 23 outbound-taint refusal,
    5 fuel preemption, 6 redactor (partial credit), 3 verifier,
    4 fail-message scrubber. Accidental fraction dropped to 8.9%
-   from v3'''s 30% via Starlark cheatsheet + retry contract.
+   from v3's 30% via Starlark cheatsheet + retry contract.
    Confirm-hook and deadline layers still unmeasured (pentest
-   policy doesn'''t enable them). `fs.replace` guard not reachable
+   policy doesn't enable them). `fs.replace` guard not reachable
    through this harness (MCP-only); unit-tested. Round 2 v3
    (tool-poisoning) scoped to in-process; wasm migration does
    not change that surface.

@@ -43,11 +43,58 @@
 //! `DenyxError::Other("wasm trap: …")`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use wasmtime::{Caller, Config, Engine, Extern, Linker, Module, Store};
 use wasmtime_wasi::p1::{add_to_linker_sync, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::WasiCtxBuilder;
+
+/// Wall-time deadline check for the wasm path. Mirrors the in-process
+/// Runner's `HostCtx::check_deadline` (lib.rs:376): if the policy
+/// declares `[runtime].max_seconds = N`, every effecting builtin
+/// inspects elapsed wall-clock since script start and refuses the
+/// call with `DenyxError::RuntimeLimit` once N seconds have passed.
+///
+/// Called at the TOP of every effecting Func closure, BEFORE the
+/// policy gate / outbound-taint / confirm-hook / IO work. A
+/// deadline-exceeded script fails cleanly before any side effect
+/// runs.
+///
+/// Returns `Ok(())` when the deadline hasn't been exceeded (or the
+/// policy doesn't declare one). Returns `Err` after emitting an
+/// audit-denied event and stashing `DenyxError::RuntimeLimit` into
+/// the captured_error slot — the wasmtime trap surfaces back to
+/// `WasmRunner::run` which checks the slot and produces the typed
+/// error to the caller.
+fn check_wasm_deadline(
+    caller: &mut Caller<'_, WasmState>,
+    policy: &denyx_policy::Policy,
+    audit: &Arc<dyn crate::AuditSink>,
+    task_id: &str,
+    capability: &'static str,
+) -> Result<(), wasmtime::Error> {
+    let Some(max_seconds) = policy.runtime_max_seconds() else {
+        return Ok(());
+    };
+    let elapsed = caller.data().start_time.elapsed();
+    if elapsed.as_secs() < max_seconds {
+        return Ok(());
+    }
+    let step = caller
+        .data()
+        .step_counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let msg = format!(
+        "wall-time deadline of {max_seconds}s exceeded ({:.1}s elapsed) at {capability}",
+        elapsed.as_secs_f64()
+    );
+    audit.emit(crate::AuditEvent::denied(
+        task_id, step, capability, "deadline", &msg,
+    ));
+    caller.data_mut().captured_error = Some(crate::DenyxError::RuntimeLimit(msg));
+    Err(wasmtime::Error::msg("deadline exceeded"))
+}
 
 use denyx_policy::Policy;
 use denyx_runtime_starlark::{STARLARK_INTERPRETER_CWASM, STARLARK_INTERPRETER_WASM};
@@ -185,6 +232,7 @@ impl WasmRunner {
             captured_error: None,
             step_counter: std::sync::atomic::AtomicU32::new(0),
             taint_registry: TaintRegistry::default(),
+            start_time: Instant::now(),
         };
         let mut store = Store::new(&self.engine, state);
         store
@@ -234,6 +282,13 @@ impl WasmRunner {
                       path_ptr: u32,
                       path_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(
+                        &mut caller,
+                        &fs_read_policy,
+                        &fs_read_audit,
+                        &fs_read_task_id,
+                        "fs.read",
+                    )?;
                     // 1. Read path from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -395,6 +450,13 @@ impl WasmRunner {
                       offset: u64,
                       limit: u64|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(
+                        &mut caller,
+                        &fs_read_range_policy,
+                        &fs_read_range_audit,
+                        &fs_read_range_task_id,
+                        "fs.read",
+                    )?;
                     use std::io::{Read, Seek, SeekFrom};
                     // 1. Read path from guest memory.
                     let path = read_string_from_guest(&mut caller, path_ptr, path_len, "path")?;
@@ -540,6 +602,7 @@ impl WasmRunner {
                       content_ptr: u32,
                       content_len: u32|
                       -> Result<(), wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
                     // 1. Read path and content from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -699,6 +762,7 @@ impl WasmRunner {
                       path_ptr: u32,
                       path_len: u32|
                       -> Result<(), wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
                     // 1. Read path from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -846,6 +910,13 @@ impl WasmRunner {
                       name_ptr: u32,
                       name_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(
+                        &mut caller,
+                        &env_read_policy,
+                        &env_read_audit,
+                        &env_read_task_id,
+                        "env.read",
+                    )?;
                     // 1. Read name from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -998,6 +1069,7 @@ impl WasmRunner {
                       argv_json_ptr: u32,
                       argv_json_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
                     // 1. Read argv JSON from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -1314,6 +1386,7 @@ impl WasmRunner {
                       url_ptr: u32,
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     if let Err(e) = http_get_policy.check_http_get(&url) {
                         let step = caller
@@ -1475,6 +1548,7 @@ impl WasmRunner {
                       body_ptr: u32,
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     if let Err(e) = http_post_policy.check_http_post(&url) {
@@ -1637,6 +1711,7 @@ impl WasmRunner {
                       body_ptr: u32,
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     if let Err(e) = http_put_policy.check_http_put(&url) {
@@ -1799,6 +1874,7 @@ impl WasmRunner {
                       body_ptr: u32,
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     if let Err(e) = http_patch_policy.check_http_patch(&url) {
@@ -1963,6 +2039,7 @@ impl WasmRunner {
                       url_ptr: u32,
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
+                    check_wasm_deadline(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     if let Err(e) = http_delete_policy.check_http_delete(&url) {
                         let step = caller
@@ -2271,6 +2348,12 @@ struct WasmState {
     /// can register through `&caller.data().taint_registry` without
     /// needing `&mut`.
     taint_registry: TaintRegistry,
+    /// Monotonic wall-clock instant the script started executing.
+    /// Combined with `policy.runtime_max_seconds()` it bounds how long
+    /// any effecting capability call is allowed to run before being
+    /// rejected with `DenyxError::RuntimeLimit`. Mirrors the
+    /// in-process Runner's `HostCtx::start_time` (lib.rs:347).
+    start_time: Instant,
 }
 
 #[derive(serde::Deserialize)]
@@ -2868,6 +2951,97 @@ runaway()
             DenyxError::RuntimeLimit(_) => {}
             other => panic!("expected DenyxError::RuntimeLimit, got {other:?}"),
         }
+    }
+
+    /// `[runtime] max_seconds = 0` should fire `RuntimeLimit` on the
+    /// FIRST effecting builtin call. Mirrors the in-process Runner
+    /// behaviour (lib.rs:376) — closes the parity gap surfaced by
+    /// examples/local_executor/probe_layer_variants.py.
+    #[test]
+    fn deadline_zero_max_seconds_trips_first_effecting_call_env_read() {
+        let policy_path = write_temp_policy(
+            "deadline_env_read",
+            r#"[runtime]
+max_seconds = 0
+
+[environment]
+allow_vars = ["USER", "HOME", "PATH"]
+"#,
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let script = r#"
+print(env.read("USER"))
+"#;
+        let err = runner
+            .run("test", script, "deadline_env_read.star")
+            .expect_err("env.read should trip the wall-time deadline before reading");
+        match &err {
+            DenyxError::RuntimeLimit(msg) => {
+                assert!(
+                    msg.contains("wall-time deadline"),
+                    "expected wall-time deadline message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("env.read"),
+                    "deadline message should name the capability, got: {msg}"
+                );
+            }
+            other => panic!("expected DenyxError::RuntimeLimit, got {other:?}"),
+        }
+    }
+
+    /// Same property on a different capability — confirms the deadline
+    /// check is wired into every effecting builtin, not just env.read.
+    #[test]
+    fn deadline_zero_max_seconds_trips_first_effecting_call_fs_write() {
+        // Use a dedicated subdir for write_allow so it doesn't include
+        // the policy file's parent (/tmp). Denyx refuses self-writable
+        // policies (an agent that can rewrite its own policy disables
+        // every other rule).
+        let target_dir = unique_tmp_path("deadline_fs_write_subdir");
+        std::fs::create_dir_all(&target_dir).expect("mkdir target subdir");
+        let target = target_dir.join("file.txt");
+        let policy_path = write_temp_policy(
+            "deadline_fs_write",
+            &format!(
+                "[runtime]
+max_seconds = 0
+
+[filesystem]
+write_allow = [{:?}]
+",
+                target_dir.display().to_string() + "/**"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let script = format!(
+            r#"
+fs.write({:?}, "hello")
+"#,
+            target.display().to_string()
+        );
+        let err = runner
+            .run("test", &script, "deadline_fs_write.star")
+            .expect_err("fs.write should trip the wall-time deadline before writing");
+        match &err {
+            DenyxError::RuntimeLimit(msg) => {
+                assert!(
+                    msg.contains("wall-time deadline"),
+                    "expected wall-time deadline message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("fs.write"),
+                    "deadline message should name the capability, got: {msg}"
+                );
+            }
+            other => panic!("expected DenyxError::RuntimeLimit, got {other:?}"),
+        }
+        assert!(
+            !target.exists(),
+            "deadline-tripped fs.write must not create the target file"
+        );
     }
 
     /// AuditSink that captures every emitted event into a Vec, for

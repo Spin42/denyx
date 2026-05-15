@@ -89,6 +89,20 @@ breaking API changes between minor versions until they hit `1.0.0`.
   sensitive to LLM-emission shape. The deterministic exfil probe
   is the more informative parity signal — **10 REDACTED, 2
   WEAK_LEAK, 0 LEAK on both runners**, identical.
+- **WasmRunner wall-time deadline parity (2026-05-15).** Surfaced
+  by `examples/local_executor/probe_layer_variants.py --variant
+  deadline`: in-process Runner 3/3 PASS, wasm Runner 0/3 PASS —
+  `wasm_runner.rs` had zero references to `check_deadline`,
+  `start_time`, or `max_seconds`. `[runtime].max_seconds` was
+  silently dropped on the wasm path. Closed by threading a
+  `start_time: Instant` through `WasmState` and calling a new
+  `check_wasm_deadline` helper at the top of every effecting
+  Func closure (11 builtins). Validation: 2 new wasm-runner
+  unit tests + `probe_layer_variants.py` now 7/7 PASS (4 confirm
+  + 3 deadline). 140/140 `denyx-host` tests green. Doctor
+  diagnostic added in commit `5a34fa4` still flags the same
+  combination for older builds where the runner fix hasn't
+  shipped yet.
 - ~~No pentest re-run against the wasm path.~~ **Closed 2026-05-15
   via four harness iterations.**
     - **v1 → v3**: methodology evolution recorded in commits
