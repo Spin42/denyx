@@ -42,7 +42,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
+      # denyx-runtime-starlark/build.rs requires the .wasm artefact at
+      # compile time. Stage it before clippy compiles the workspace.
+      - name: Stage starlark_interpreter.wasm
+        run: bash scripts/build-runtime-starlark.sh
       # `-D warnings` makes any new clippy warning a build failure.
       # The current tree is clippy-clean as of the introduction of
       # this gate; new warnings should fail loud rather than rot.
@@ -74,11 +79,18 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
 
       # Caches ~/.cargo/{registry,git} and target/. Rerun cost on a
       # warm cache is dominated by recompiling our crates only.
       - name: Cache cargo registry + build output
         uses: Swatinem/rust-cache@v2
+
+      # denyx-runtime-starlark/build.rs requires the .wasm artefact at
+      # compile time. Stage it before `cargo build` touches the crate.
+      - name: Stage starlark_interpreter.wasm
+        run: bash scripts/build-runtime-starlark.sh
 
       - name: cargo build
         run: cargo build --workspace --locked --verbose
@@ -108,9 +120,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      # denyx-runtime-starlark/build.rs requires the .wasm artefact at
+      # compile time. Stage it before instrumented build/test.
+      - name: Stage starlark_interpreter.wasm
+        run: bash scripts/build-runtime-starlark.sh
       - name: Generate coverage (LCOV + summary)
         run: |
           cargo llvm-cov --workspace --locked --no-fail-fast --lcov --output-path lcov.info
