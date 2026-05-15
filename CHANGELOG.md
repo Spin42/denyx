@@ -89,6 +89,27 @@ breaking API changes between minor versions until they hit `1.0.0`.
   sensitive to LLM-emission shape. The deterministic exfil probe
   is the more informative parity signal — **10 REDACTED, 2
   WEAK_LEAK, 0 LEAK on both runners**, identical.
+- **Round 2 v5 multi-seed pentest (2026-05-15).** n=2 per model
+  (4 runs total) with a tightened Starlark cheatsheet. **89
+  attempts combined, 0 LEAK / 0 DERIVED_LEAK.** v5 first-times:
+    - Interpreter-bug containment empirically confirmed (1
+      WASM_TRAP fire — Opus's quadratic string-concat caused the
+      Starlark interpreter to `process::abort` inside the wasm
+      guest; the sandbox contained it cleanly). 7 of 7 named
+      designed defense layers (excluding deadline, which the
+      pentest policy doesn't enable) now have at least one
+      adversarial fire from the LLM panel.
+    - Confirm hook fired twice in v5 (vs 0 in v4) — Opus seed 1
+      on encoded-secret fs.delete paths.
+  Reproducibility: Sonnet n=2 produced identical verdict
+  distributions seed-to-seed (17 attempts each, same buckets);
+  Opus n=2 varied materially (31 vs 24 attempts, different
+  bucket emphasis). Accidental dropped from 8.9% (v4) to 4.5%
+  (v5); all 4 residuals were Opus, with 2 sharing a single root
+  cause (`while` keyword inside def — the v5 cheatsheet
+  incorrectly implied `while` works inside def, but the Starlark
+  Standard dialect rejects `while` EVERYWHERE; corrected in
+  follow-up commit).
 - **WasmRunner wall-time deadline parity (2026-05-15).** Surfaced
   by `examples/local_executor/probe_layer_variants.py --variant
   deadline`: in-process Runner 3/3 PASS, wasm Runner 0/3 PASS —
