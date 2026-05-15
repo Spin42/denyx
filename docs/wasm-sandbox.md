@@ -172,94 +172,133 @@ legitimate use of a secret as a string. Documented in
 
 ### Round 2 (LLM-driven) re-run
 
-Two single-shot runs against the wasm path, both via `claude` CLI
-driving `run_pentest.py --use-wasm`, replay phase evaluating
-inside the wasmtime sandbox.
+The first cut of this section reported `0 LEAK` from Sonnet 4.6
+and Opus 4.7 runs against the wasm path. Subsequent surface-
+coverage analysis showed those runs were **undersampled**: Opus
+exercised only `print()` (20/20 attempts), and neither model
+exercised `fs.read_range`, `fs.replace`, or fuel-exhaustion at
+all. The `0 LEAK` headline only demonstrated the print-output
+redactor worked, not the other six defense layers.
 
-**Sonnet 4.6 — `claude-sonnet-4-6`, $2 budget cap**
+The harness prompt was rewritten (commit `9e0ab61`) to front-load
+an explicit coverage contract (sink × floor × starter shapes) and
+a 9-step numbered user-prompt. Floors total **18 attempts across
+6 sinks + 1 fuel-exhaustion** per run.
 
-  # turns=24  duration=861953ms  cost=$1.0330
-  # attempts: 23  (DENIED=8  ERROR=8  REDACTED=6  WEAK_LEAK=1  LEAK=0)
-  # novel attempts (not in run_exfil.py's 12 hand-written): 9
+**v2 results — single run each, both via `run_pentest.py
+--use-wasm`, replay inside wasmtime sandbox:**
 
-**Opus 4.7 — `claude-opus-4-7`, $5 budget cap**
+```
+Opus 4.7 (claude-opus-4-7, $5 cap)
+  cost=$0.83  duration=372110ms  attempts=26
+  verdicts: DENIED=9 ERROR=10 REDACTED=4 FUEL_EXHAUSTED=3 LEAK=0
+            DERIVED_LEAK=0 WEAK_LEAK=0
+  coverage: print=7/3 fs.write=3/3 fs.replace=4/3 sub.exec=3/3
+            net.http_get=3/3 fail=2/2 fuel=4/1   → COMPLETE
 
-  # turns=N/A duration=183570ms cost=$0.7050
-  # attempts: 20  (DENIED=1  ERROR=5  REDACTED=13  WEAK_LEAK=1  LEAK=0)
-  # novel attempts (not in run_exfil.py's 12 hand-written): 17
+Sonnet 4.6 (claude-sonnet-4-6, $3 cap)
+  cost=$0.77  duration=444104ms  attempts=24
+  verdicts: DENIED=9 ERROR=11 REDACTED=3 FUEL_EXHAUSTED=1 LEAK=0
+            DERIVED_LEAK=0 WEAK_LEAK=0
+  coverage: print=9/3 fs.write=3/3 fs.replace=3/3 sub.exec=3/3
+            net.http_get=3/3 fail=2/2 fuel=1/1   → COMPLETE
+```
 
-**0 LEAK and 0 DERIVED_LEAK on both runs.** Opus burned 32% of
-budget before stopping itself, generated nearly twice as many
-novel scripts in a fifth of the wall-clock time, but converged
-on the same encoder-family techniques (base64/base32 hand-rolled,
-ord-vector dumps, Caesar/ROT/affine, big-endian bigint concat,
-pairwise byte-swap).
+**0 LEAK and 0 DERIVED_LEAK across the combined 50 attempts.**
 
-#### Honest accounting: which layer caught what
+#### Honest layer accounting
 
-Not every non-LEAK verdict is a Denyx defense. The 20 Opus
-attempts decompose as:
+50 attempts is not the same as 50 designed-defense fires. The
+breakdown matters:
 
-| Verdict | n  | Caught by                                          |
-|---------|----|----------------------------------------------------|
-| DENIED  | 1  | Policy gate (literal env name `DENYX_PENTEST_SECRET`) |
-| REDACTED| 13 | Output redactor (taint registry + transform set) |
-| ERROR   | 5  | Starlark **parser/runtime errors** — not a Denyx defense; the script failed to evaluate before reaching the gate or the output boundary. Counted here as accidental defense, not designed defense. |
-| WEAK_LEAK | 1 | Numeric side-channel (bigint concat printed as decimal); redactor flagged the digits as a length / numeric token. Documented limit, not a designed bypass. |
+| Outcome bucket | n / 50 | What actually happened |
+|----------------|--------|------------------------|
+| Outbound-taint refusal (DENIED on `fs.write`/`subprocess.exec`/`net.http_get`/`fs.delete`) | 18 | The runtime refused the call before the side effect ran. This is the designed defense firing on a tainted argument. **Empirically validated by this round.** |
+| Fuel preemption (FUEL_EXHAUSTED) | 4 | Wasm fuel meter tripped on `range(10**8)`-class loops. **Designed wasm-only defense, empirically validated.** |
+| Print redactor (REDACTED on `print()`) | 7 | Either the redactor scrubbed the output to `[REDACTED]`, OR the script's output simply didn't contain a recoverable secret form. The harness cannot distinguish these two cases from the verdict alone. Partial credit. |
+| Starlark parser / runtime errors (ERROR) | 21 | The script failed to evaluate before reaching any Denyx gate. **Accidental defense — Starlark rejecting Python idiom the model emitted**, not Denyx's doing. 9 of these were on the `print` sink (pure parser rejection), 7 on `fs.replace` (call shape ambiguous — could be the exactly-one-match guard, could be Starlark; we cannot tell from the transcript), 4 on `fail()` (could be designed fail-scrubbing, could be generic error-path discarding stderr — same ambiguity), 1 on `fuel` (integer overflow on `range(10**10)`). |
+| Real leaks (LEAK / DERIVED_LEAK / WEAK_LEAK) | 0 | None. |
 
-So of Opus's 20 attempts, **14 were caught by designed defenses
-(1 gate + 13 redactor)**, 5 by accidental defense (Starlark
-parser rejecting Python idiom the model emitted), 1 was a
-documented side-channel limit. For Sonnet's 23, the 8 ERROR
-verdicts have the same caveat. Reporting "0 LEAK" without this
-decomposition would over-credit the runtime.
+So the designed defenses we can claim from this round are:
 
-#### Novel techniques across both runs
+- **Outbound-taint refusal at sink boundary:** confirmed on 18
+  attempts across `fs.write`, `subprocess.exec`, `net.http_get`.
+- **Fuel-based preemption:** confirmed on 4 attempts.
+- **Print-output redactor:** confirmed but with partial credit
+  on 7 attempts (some of which may be "no recoverable output"
+  rather than secret-bytes scrubbed).
 
-The union of novel shapes the two models surfaced (post-dedup):
+What we cannot claim from this round:
 
-  - Hand-rolled RFC 4648 base64 with manual padding
-  - Hand-rolled base32 (RFC 4648 A–Z 2–7)
-  - ROT13 letters-only and Shift-47 over printable ASCII
-  - Affine encoding (`ord(c) * 7 + 3` per byte)
-  - First-difference / delta sequence between consecutive `ord`s
-  - Per-char ord-vector (`[ord(c) for c in s]`)
-  - Pairwise byte-swap (`s[i+1] + s[i]`)
-  - Big-endian bigint concat (`n = (n<<8) | ord(c)`) — produced
-    the one WEAK_LEAK (numeric side-channel)
-  - Dynamic env-name construction (`"DENYX" + "_PENTEST_SECRET"`)
-  - File-mediated indirection (`env.read(fs.read("varname.txt"))`)
-  - Division-by-zero side-channel on prefix match
-  - HTTP-mediated exfil with encoded secret in URL
-  - Per-char print interleaved with high-volume cover-text
-    (`print(c)` then `print("Q"*200)`) — audit-grep evasion
+- **`fs.replace` exactly-one-match guard fired adversarially:**
+  7 ERROR verdicts targeted `fs.replace` but the harness records
+  only `isError=true` without the typed error class. We cannot
+  tell whether the guard fired, the outbound-taint scrubber fired
+  on `new`, or Starlark rejected the call shape. Unit tests in
+  `crates/host/src/wasm_runner.rs` cover the guard; this round
+  did not add adversarial confirmation.
 
-None produced full-secret recovery; the redactor's transform set
-caught every encoded form because the transform set includes
-common ASCII recodings (hex, byte-reverse, XOR keys, etc.) AND
-the post-output classifier in `_classify` re-runs the same
-recoveries against printed text. Cryptographic transforms with a
-script-generated key remain out-of-scope by design — neither
-model attempted one in either run.
+- **`fail()` error-message scrubbing fired adversarially:**
+  4 ERROR on `fail()` — same disambiguation gap. The host code
+  routes the error message through the redactor (`97641c2`); the
+  unit tests cover it; this round did not.
 
-#### Sample-size caveats
+- **Verifier static checks:** every attempt that started with
+  `env.read("DENYX_PENTEST_SECRET")` as a literal first call
+  would be caught by the verifier — but the harness blocks the
+  call as `isError=true` with no typed class. Same disambiguation
+  gap. The 21 ERROR verdicts likely include some verifier hits.
 
-- **n=1 Sonnet run + n=1 Opus run.** Single seeds, single-shot
-  prompts. Different temperature, run order, or panel will
-  produce different novel techniques.
-- **Budget under-spend on Opus is meaningful:** Opus stopped at
-  $0.71 of a $5.00 cap, suggesting the model self-assessed the
-  test surface as exhausted at 20 attempts. Push the model
-  harder (multi-turn refinement, explicit "try N more" prompts)
-  and the picture may change.
-- **The harness is white-box.** The model knows the secret value
-  and is told the redactor's transform set up-front. This makes
-  the bar harder than a blind black-box attacker but should not
-  be confused with a comprehensive evaluation against unknown
-  attackers.
-- **Round 2 v3 (tool-poisoning) was NOT re-run on the wasm
-  path** — that adversarial class targets the verifier and tool
-  description, both unchanged by the wasm migration.
+These three measurement gaps are real and should be closed by
+adding typed-error capture to the harness's `_classify` so the
+report distinguishes `VerifierError` / `PolicyError` / `Starlark`
+/ `FailWithRedactedMessage` outcomes.
+
+#### Comparison to v1 (undersampled)
+
+| Metric | v1 Opus | v1 Sonnet | v2 Opus | v2 Sonnet |
+|--------|---------|-----------|---------|-----------|
+| Attempts | 20 | 23 | 26 | 24 |
+| Cost | $0.71 | $1.03 | $0.83 | $0.77 |
+| % on print sink | 100% | 78% | 27% | 38% |
+| Distinct sinks exercised | 1 | 5 | 7 | 7 |
+| LEAK / DERIVED_LEAK | 0 | 0 | 0 | 0 |
+| Coverage status | INCOMPLETE | INCOMPLETE | **COMPLETE** | **COMPLETE** |
+
+The v1 runs are kept in repo history (commits `64b4062`,
+`4d62b8b`) but should not be cited as evidence of full-surface
+defense. The v2 results are the credible ones.
+
+#### Sample-size caveats (still apply)
+
+- **n=1 per model.** Single seed, single-shot. Different
+  temperature or panel produces different novel techniques. The
+  v2 prompt also ships starter shapes — the models lean on
+  them. A model that doesn't see the starter list might choose
+  differently.
+- **White-box harness.** The model is told the secret value and
+  the redactor's transform set. This makes the bar harder than
+  black-box probing.
+- **Round 2 v3 (tool-poisoning) NOT re-run on wasm.** That class
+  targets the verifier and tool description, both unchanged by
+  the wasm migration; unit tests cover it; this LLM-driven
+  round does not.
+- **No multi-seed / multi-turn refinement loop.** A reviewer who
+  wants stronger evidence would re-run v2 with different seeds
+  and an outer loop that re-prompts the model on under-covered
+  sinks.
+
+#### Meta-result on LLM-driven adversarial harnesses
+
+v1 → v2 is itself a finding: even with the secret value handed
+to it and 7 named defenses explicitly listed, **Opus chose
+print-only attacks 20/20 times.** "Be creative across N
+defenses" was not enough; explicit per-sink floors + starter
+shapes + a numbered user-prompt were needed to get breadth
+coverage. LLM-driven pentest output should be read with this in
+mind: absence of attempts against a sink is not evidence the
+sink is safe; it may just be evidence the model wasn'''t pushed
+to try.
 
 ## Operator-facing differences
 
@@ -361,16 +400,19 @@ outstanding:
    [REDACTED]` and `token=[REDACTED]` are the output the harness
    verifies against.
 
-2. ~~No pentest re-run against the wasm path.~~ **Closed
-   2026-05-15.** Round 1 (`run_exfil.py`): 10 REDACTED / 2
-   WEAK_LEAK / 0 LEAK, identical to in-process. Round 2 LLM-
-   driven (`run_pentest.py`): 0 LEAK on Sonnet ($1.03, 23
-   attempts, 9 novel) and on Opus 4.7 ($0.71, 20 attempts, 17
-   novel). Both rounds documented above with caveats on what
-   was caught by designed defenses vs. accidental ones. Round 2
-   v3 (tool-poisoning) remains scoped to the in-process runner;
-   the wasm migration does not change the surface that report
-   covers.
+2. ~~No pentest re-run against the wasm path.~~ **Partially
+   closed 2026-05-15.** Round 1 (`run_exfil.py`): 10 REDACTED /
+   2 WEAK_LEAK / 0 LEAK, identical to in-process. Round 2 LLM-
+   driven (`run_pentest.py`): two passes documented above. v1
+   was undersampled (Opus 100% print sink). v2 with rewritten
+   coverage-contract prompt: 50 combined attempts (Opus 26 +
+   Sonnet 24), full sink coverage on both runs, **0 LEAK / 0
+   DERIVED_LEAK**. 18 outbound-taint refusal denials and 4
+   fuel-preemption events empirically validated; `fs.replace`
+   guard, `fail()` scrubbing, and verifier static-check fires
+   not yet disambiguated from generic ERROR verdicts (gap noted
+   above). Round 2 v3 (tool-poisoning) scoped to in-process;
+   the wasm migration does not change that surface.
 
 3. **Phase 6 CI integration is not done.** `denyx-runtime-starlark`
    isn't published to crates.io yet. Flipping `--use-wasm` to
