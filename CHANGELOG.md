@@ -13,18 +13,31 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+- **Wasm-path pentest evidence.** Wasm path pentested across 5
+  LLM-driven runs (Opus n=3 + Sonnet n=2), 112 attempts, 0 LEAK /
+  0 DERIVED_LEAK / 0 WEAK_LEAK. 7/8 designed defense layers
+  empirically validated by the LLM panel; deadline by deterministic
+  probe (the pentest policies don't enable `runtime.max_seconds`).
+  Full layer-by-layer accounting in `docs/wasm-sandbox.md`. Sample
+  size is small (white-box, single-shot per shape); see the round
+  reports for caveats.
+
 ### Added
 
-- **Opt-in wasmtime sandbox for Starlark evaluation.** New
-  `--use-wasm` flag on `denyx run` and `denyx-mcp` routes evaluation
-  through a `wasm32-wasip1`-compiled `starlark-rust` interpreter
-  running inside `wasmtime`. The policy gate stays in Rust on the
-  host side — the wasm path is functionally equivalent to the
+- **Wasmtime-sandboxed Starlark runner.** New `--use-wasm` flag on
+  `denyx run` and `denyx-mcp` routes evaluation through a
+  `wasm32-wasip1`-compiled `starlark-rust` interpreter running
+  inside `wasmtime`. The policy gate stays in Rust on the host
+  side — the wasm path is functionally equivalent to the
   in-process runner on every security boundary documented in
-  `docs/04-security-threat-model.md`. **Not yet default.** Two
-  new crates underpin this: `denyx-interpreter` (NOT published —
-  source for the `.wasm` artefact) and `denyx-runtime-starlark`
-  (published — ships the pre-built `.wasm` as a `&[u8]`).
+  `docs/04-security-threat-model.md`, plus fuel-based preemption
+  and interpreter-bug containment. Currently opt-in via
+  `--use-wasm`; default in next release once
+  `denyx-runtime-starlark` publishes to crates.io (tracked in
+  #64). Two new crates underpin this: `denyx-interpreter` (NOT
+  published — source for the `.wasm` artefact) and
+  `denyx-runtime-starlark` (published — ships the pre-built
+  `.wasm` as a `&[u8]`).
 - **Fuel-based preemption** *(`--use-wasm` only)*. wasmtime's
   per-instruction fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`)
   traps runaway pure-CPU loops within ~1 sec as
@@ -172,7 +185,8 @@ breaking API changes between minor versions until they hit `1.0.0`.
   reports cover the in-process runner only.
 - CI doesn't yet stage the `.wasm` into `denyx-runtime-starlark`
   before `cargo publish`. `cargo install denyx-cli` from
-  crates.io would not work until that lands.
+  crates.io would not work until that lands. **This is the sole
+  remaining default-blocker.**
 - Fuel budget is hardcoded; no `[runtime].max_wasm_fuel` policy
   field yet.
 

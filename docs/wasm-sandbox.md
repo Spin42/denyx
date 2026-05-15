@@ -2,10 +2,11 @@
 
 > ← [Back to docs README](README.md) · [Threat model](04-security-threat-model.md) · [Policy file](06-policy-file.md)
 
-This doc covers the wasmtime-sandboxed Starlark runner that ships
-alongside the original in-process runner. It is **opt-in** in the
-current release — pass `--use-wasm` on `denyx run` or `denyx-mcp`.
-Promotion to default is pending the items in the [Open work](#open-work)
+This doc covers the wasmtime-sandboxed Starlark runner that ships with
+Denyx. The `--use-wasm` flag on `denyx run` and `denyx-mcp` activates it
+today; it becomes the default in the next release pending Phase 6 CI
+integration (see [Open work](#open-work)). Pentest evidence supporting
+the promotion is in the [Round 2 (LLM-driven) re-run](#round-2-llm-driven-re-run)
 section below.
 
 If you're an operator wondering whether to flip the switch: read
@@ -571,10 +572,16 @@ unchanged.
 
 ## Open work
 
-The wasm path is not yet promoted to default. Items still
-outstanding:
+The wasm path is the recommended runtime today behind `--use-wasm`,
+and becomes the default in the next release. The remaining items:
 
-1. ~~No end-to-end multistep eval since the final parity commit.~~
+1. **Phase 6 CI integration is not done.** `denyx-runtime-starlark`
+   isn't published to crates.io yet. Flipping `--use-wasm` to
+   default before this would mean `cargo install denyx-cli` fails
+   because the runtime-starlark dependency doesn't resolve. **This
+   is the sole remaining default-blocker.**
+
+2. ~~No end-to-end multistep eval since the final parity commit.~~
    **Closed 2026-05-14.** Re-ran
    `examples/local_executor/run_multistep.py --use-wasm` against
    `qwen2.5-coder:7b` after all parity work landed: **36/36 PASS**
@@ -585,27 +592,19 @@ outstanding:
    [REDACTED]` and `token=[REDACTED]` are the output the harness
    verifies against.
 
-2. ~~No pentest re-run against the wasm path.~~ **Closed
+3. ~~No pentest re-run against the wasm path.~~ **Closed
    2026-05-15.** Round 1 (`run_exfil.py`): 10 REDACTED / 2
    WEAK_LEAK / 0 LEAK, identical to in-process. Round 2 LLM-
-   driven: four harness iterations, v4 final result above. 45
-   combined attempts (Opus 24 + Sonnet 21), full per-sink
-   coverage on both runs, **0 LEAK / 0 DERIVED_LEAK**, typed-
-   error attribution per layer. Empirical fires across 5
-   distinct designed defense layers: 23 outbound-taint refusal,
-   5 fuel preemption, 6 redactor (partial credit), 3 verifier,
-   4 fail-message scrubber. Accidental fraction dropped to 8.9%
-   from v3's 30% via Starlark cheatsheet + retry contract.
-   Confirm-hook and deadline layers still unmeasured (pentest
-   policy doesn't enable them). `fs.replace` guard not reachable
-   through this harness (MCP-only); unit-tested. Round 2 v3
+   driven: v4 + v5 + v6 across 5 independent runs (Opus n=3 +
+   Sonnet n=2), **112 attempts, 0 LEAK / 0 DERIVED_LEAK / 0
+   WEAK_LEAK**. 7 of 8 designed defense layers empirically
+   validated by the LLM panel; the eighth (`runtime.max_seconds`
+   deadline) is solo-validated via `probe_layer_variants.py`
+   because the pentest policies don't enable it. Confirm-hook
+   fires landed in v5. `fs.replace` guard not reachable through
+   this harness (MCP-only); unit-tested. Round 2 v3
    (tool-poisoning) scoped to in-process; wasm migration does
    not change that surface.
-
-3. **Phase 6 CI integration is not done.** `denyx-runtime-starlark`
-   isn't published to crates.io yet. Flipping `--use-wasm` to
-   default before this would mean `cargo install denyx-cli` fails
-   because the runtime-starlark dependency doesn't resolve.
 
 4. **Bench coverage is process-level only.** The cold-call /
    amortized-per-call numbers in [Performance
@@ -613,12 +612,13 @@ outstanding:
    `scripts/bench-wasm-runner.py`. There is no `criterion` bench
    covering the in-process steady-state per-call path on the
    `denyx-mcp` side, and no measurement of fuel-budget headroom on
-   realistic scripts.
+   realistic scripts. Nice-to-have, not a default-blocker.
 
 5. **Fuel budget is hardcoded.** `DEFAULT_WASM_FUEL = 200_000_000`
    is in `crates/host/src/wasm_runner.rs`. Operators have no way
    to tune it via policy. A future `[runtime].max_wasm_fuel`
-   policy field would close this.
+   policy field would close this. Nice-to-have, not a
+   default-blocker.
 
 ## Where to look in the code
 

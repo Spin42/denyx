@@ -27,16 +27,22 @@ to MCP-aware orchestrators. There is no plugin model and no dynamic
 policy: every effect goes through one of nine Rust functions, all in
 `crates/host/src/`.
 
-`denyx-host` ships with two interchangeable runners. The default
-in-process `Runner` evaluates Starlark via `starlark-rust` directly.
-The opt-in `WasmRunner` (`--use-wasm` on `denyx run` /
-`denyx-mcp`) loads the same `starlark-rust` interpreter compiled
-to `wasm32-wasip1` from `denyx-runtime-starlark` and runs it under
-`wasmtime`. The policy gate stays in Rust on the host side on both
-paths — every effecting call goes through the same `Policy::check_*`
-machinery. See [wasm-sandbox.md](wasm-sandbox.md) for the
-parity table and what the wasm path adds that the in-process runner
-cannot offer.
+`denyx-host` ships with two interchangeable runners. The recommended
+`WasmRunner` (`--use-wasm` on `denyx run` / `denyx-mcp`) loads the
+`starlark-rust` interpreter compiled to `wasm32-wasip1` from
+`denyx-runtime-starlark` and runs it under `wasmtime` — the Starlark
+interpreter executes inside a wasmtime sandbox, with fuel-based
+preemption and interpreter-bug containment as additional layers over
+the shared policy gate. The legacy in-process `Runner` evaluates the
+same `starlark-rust` interpreter directly in the host process, with
+no sandbox around the interpreter itself. The flag is opt-in today
+and becomes the default in the next release once
+`denyx-runtime-starlark` publishes to crates.io. The policy gate
+stays in Rust on the host side on both paths — every effecting call
+goes through the same `Policy::check_*` machinery. See
+[wasm-sandbox.md](wasm-sandbox.md) for the parity table, the new
+attack surface wasmtime introduces, and the pentest result on the
+wasm path.
 
 ## What it defends against
 
@@ -53,7 +59,7 @@ cannot offer.
 | **MCP tool definition poisoning reaching the cloud orchestrator (local-executor deployment)** | In the `denyx-local-mcp` architecture the cloud orchestrator's MCP tool list contains only `delegate_to_local`, so other servers' tool descriptions cannot reach its context — **provided** the host is launched with `--strict-mcp-config` (or equivalent) and denyx-local-mcp is the only MCP server configured. This is a precondition on operator setup, not enforced by Denyx itself. The local executor model receives tool routing metadata only from the operator-controlled policy file. See [Round 2 pentest report](security-pentest-r2-tool-poisoning.md). |
 | **Reads of resources the policy doesn't mention** | Default-deny: `fs.read` of a path not in `read_allow` or `local_only_read` returns `PolicyError::PathDenied`; `env.read` of a name not in `allow_vars` or `local_only_vars` returns `PolicyError::EnvDenied`; `subprocess.exec` of a command not in `allow_commands` or `local_only_commands` returns `PolicyError::SubprocessDenied`. **Operator caveat:** a too-broad rooted glob in `read_allow` (e.g. `["**"]` or `["/tmp/**"]`) silently defeats the property. Narrow allow-lists are the operator's responsibility. |
 | **Pure-CPU runaway in the agent script** *(`--use-wasm` only)* | wasmtime fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`) traps `for _ in range(10**9): pass` within ~1 sec of CPU as `DenyxError::RuntimeLimit` (exit 6). The in-process runner has no equivalent — `[runtime].max_seconds` is wall-time, not instruction count, so it doesn't catch pure-CPU loops that finish before the deadline. This is a wasm-path-only addition. |
-| **Interpreter bugs reaching host memory** *(`--use-wasm` only)* | `starlark-rust` runs inside `wasmtime`'s linear-memory sandbox. A miscompilation or memory-safety bug in the interpreter stays inside the wasm boundary instead of corrupting the host. **Defence-in-depth, not a primary control** — the interpreter is a maintained dependency, not a known-hostile component. |
+| **Interpreter bugs reaching host memory** *(`--use-wasm` only)* | `starlark-rust` runs inside `wasmtime`'s linear-memory sandbox. A miscompilation or memory-safety bug in the interpreter stays inside the wasm boundary instead of corrupting the host. Empirically validated under adversarial workload in the Round 2 v5 pentest (one WASM_TRAP fire — Opus's quadratic string-concat caused the Starlark interpreter to `process::abort` inside the wasm guest; the sandbox contained the abort cleanly). **Defence-in-depth, not a primary control** — the interpreter is a maintained dependency, not a known-hostile component. |
 
 ## What it does NOT defend against
 
@@ -113,10 +119,28 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   Operators whose threat model assumes the LLM-side wrappers stop
   injection should not rely on that assumption. See
   [Round 2 pentest report](security-pentest-r2-tool-poisoning.md).
-- **Pure-CPU denial-of-service inside the script.** `[runtime].max_seconds`
-  bounds wall time, but during that window an agent can busy-loop,
-  allocate, or fork-bomb on Linux without `bwrap`. Run inside a
-  container if you care about resource exhaustion.
+- **Pure-CPU denial-of-service inside the script (in-process runner
+  only).** `[runtime].max_seconds` bounds wall time, but during that
+  window an agent can busy-loop or allocate freely on the in-process
+  runner — wall-time deadlines don't catch pure-CPU loops. The
+  WasmRunner closes this via fuel preemption (see the row in the
+  defends-against table); on the in-process runner it remains a gap.
+  Fork-bomb-class subprocess exhaustion is a separate concern handled
+  by the optional `[subprocess].sandbox = "bwrap"` layer on Linux, or
+  by running inside a container/VM.
+- **OS-level subprocess sandboxing is opt-in and addresses a different
+  threat from the wasm sandbox.** The WasmRunner contains the Starlark
+  interpreter — a runtime bug in the interpreter, or a runaway
+  pure-CPU loop, stays inside the wasmtime guest. It does **not**
+  isolate subprocesses the script spawns: a permitted `python3` runs
+  as a normal child of the host process, bounded only by the policy's
+  argv path-gate and `subprocess.deny_args`. For OS-level subprocess
+  isolation (kernel namespaces, fresh bind-mount layout per call),
+  enable `[subprocess].sandbox = "bwrap"` on Linux or run inside the
+  recommended VM on macOS / Windows. The wasm sandbox and bwrap are
+  not substitutes — they protect different boundaries. See the
+  [policy-file `[subprocess]` section](06-policy-file.md#subprocess)
+  for the bwrap layer's properties.
 - **OS-level kernel bugs / sandbox escape.** Denyx is a *language-runtime*
   gate. Even with `[subprocess].sandbox = "bwrap"`, a kernel-level
   exploit defeats it. Run inside a VM if you care about kernel
