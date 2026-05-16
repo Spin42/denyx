@@ -10,19 +10,20 @@ unreleased features.
 
 The install command is the same on every platform; no platform-
 specific packages are required for the policy gate, taint redaction,
-audit log, Wasm-sandboxed Starlark runner, or host wiring. The only
-platform variation is the optional `bubblewrap` layer for OS-level
-*subprocess* isolation, which is Linux-only — see
-[Advanced: OS-level subprocess sandbox](#advanced-os-level-subprocess-sandbox)
-at the bottom of this doc.
+audit log, Wasm-sandboxed Starlark runner, or host wiring. Denyx
+does not isolate subprocesses the script spawns — if your threat
+model needs kernel-level isolation of permitted child processes,
+run Denyx inside a VM or container. See
+[docs/04-security-threat-model.md](04-security-threat-model.md)
+for the scope.
 
 ## Pick your platform
 
-| Host OS    | Where Denyx runs                          | Sandbox layer for the Starlark interpreter | Optional OS-level subprocess sandbox             | Setup guide                                                |
-|------------|-------------------------------------------|--------------------------------------------|--------------------------------------------------|------------------------------------------------------------|
-| **Linux**  | Native binary on the host                 | Wasm (wasmtime) — built in                 | `bubblewrap` (`bwrap`) — Linux-only, optional    | This doc, "[Linux native](#linux-native)" below            |
-| **macOS**  | Native binary; Lima VM only if you want bwrap or Claude Code v2's OS sandbox | Wasm (wasmtime) — built in                 | `bubblewrap` inside the VM (optional)            | [macos-deployment.md](macos-deployment.md)                 |
-| **Windows**| Native binary; WSL2 only if you want bwrap or Claude Code v2's OS sandbox | Wasm (wasmtime) — built in                 | `bubblewrap` inside WSL (optional)               | [windows-deployment.md](windows-deployment.md)             |
+| Host OS    | Where Denyx runs                          | Sandbox layer for the Starlark interpreter | Setup guide                                                |
+|------------|-------------------------------------------|--------------------------------------------|------------------------------------------------------------|
+| **Linux**  | Native binary on the host                 | Wasm (wasmtime) — built in                 | This doc, "[Linux native](#linux-native)" below            |
+| **macOS**  | Native binary; Lima VM only if you want Claude Code v2's OS sandbox stanza tested against a real Linux kernel | Wasm (wasmtime) — built in                 | [macos-deployment.md](macos-deployment.md)                 |
+| **Windows**| Native binary; WSL2 only if you want Claude Code v2's OS sandbox stanza tested against a real Linux kernel | Wasm (wasmtime) — built in                 | [windows-deployment.md](windows-deployment.md)             |
 
 The interpreter-containment sandbox (wasmtime wrapping `starlark-rust`)
 ships in the host binary on every platform; nothing to install
@@ -97,8 +98,9 @@ See **[macos-deployment.md](macos-deployment.md)**. Native install:
 cargo install denyx-cli denyx-mcp
 ```
 
-For Lima-VM hosted setups (only needed if you want the optional bwrap
-subprocess sandbox or Claude Code v2's OS sandbox):
+For Lima-VM hosted setups (only needed if you want Claude Code v2's
+OS sandbox stanza exercised against a real Linux kernel, or you
+want VM-level isolation around the host process):
 
 ```sh
 brew install lima
@@ -108,14 +110,15 @@ limactl shell denyx -- bash -lc "cargo install denyx-cli denyx-mcp"
 
 The Lima template in
 [`examples/macos/denyx.lima.yaml`](../examples/macos/denyx.lima.yaml)
-provisions bubblewrap and the Rust toolchain on first boot.
+provisions the Rust toolchain on first boot.
 
 ## Windows
 
 See **[windows-deployment.md](windows-deployment.md)**. The native
 install works in a regular Windows shell after a Rust toolchain
-install. WSL2 is only required if you want the optional bwrap
-subprocess sandbox or Claude Code v2's OS sandbox.
+install. WSL2 is only required if you want Claude Code v2's OS
+sandbox stanza exercised against a real Linux kernel, or VM-level
+isolation around the host process.
 
 For the WSL2 path, in elevated PowerShell:
 
@@ -211,62 +214,6 @@ python3 examples/local_executor/run_pentest.py --help
 
 The orchestrated and pentest harnesses additionally require the
 `claude` CLI on `PATH`.
-
-## Advanced: OS-level subprocess sandbox
-
-`bubblewrap` is an **optional, advanced-operator-only** add-on. It
-enables `[subprocess].sandbox = "bwrap"` in the policy, which wraps
-every subprocess the script spawns in a fresh Linux namespace +
-bind-mount jail per call.
-
-This addresses a **different threat from the wasm sandbox**, not the
-same one:
-
-- The Wasm sandbox (default in v0.4.0+; opt out with `--no-wasm`. No install required.)
-  contains the *Starlark interpreter* — interpreter-bug containment
-  and fuel-based pure-CPU preemption.
-- bwrap contains the *child processes* the script spawns — a
-  permitted `python3` or `make` can't reach paths outside the
-  policy's bind-mount layout, regardless of how it constructs them
-  internally.
-
-You want bwrap when your threat model includes subprocess escape via
-path-gate misconfiguration (binaries that take inline code, paths
-constructed at runtime inside an interpreter's heap). The wasm
-sandbox does not cover that surface; they are complementary layers,
-not substitutes.
-
-Install:
-
-```sh
-# Debian/Ubuntu
-sudo apt install bubblewrap
-
-# Fedora
-sudo dnf install bubblewrap
-
-# Arch
-sudo pacman -S bubblewrap
-```
-
-Then in your policy:
-
-```toml
-[subprocess]
-allow_commands = ["python3", "git", "make"]
-sandbox        = "bwrap"
-```
-
-Properties, caveats, and the full bind-mount layout are documented
-in [`docs/06-policy-file.md` § Subprocess →
-Layer 2](06-policy-file.md#subprocess-is-a-privilege-boundary).
-Denyx refuses to load if `sandbox = "bwrap"` is set but the binary
-isn't on `$PATH` — silent fall-through would be the wrong direction.
-
-macOS and Windows operators can install bubblewrap inside a Lima VM
-or WSL2 distro respectively (see the per-platform deployment guides
-linked above); native macOS / Windows bwrap-equivalent backends
-(`sandbox-exec`, Job Objects) are future work.
 
 ## Where next
 

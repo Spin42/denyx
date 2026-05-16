@@ -17,7 +17,7 @@ scope by design.
 | ASI-02 | Tool Misuse and Exploitation | **Strong** | 3 tests (`asi02_*`) |
 | ASI-03 | Identity and Privilege Abuse | **Partial** | 2 tests (`asi03_*`) |
 | ASI-04 | Agentic Supply Chain Vulnerabilities | Out of scope | — |
-| ASI-05 | Unexpected Code Execution | **Strong** | 2 tests (`asi05_*`) + `sandbox_bwrap.rs` |
+| ASI-05 | Unexpected Code Execution | **Strong** | 2 tests (`asi05_*`) |
 | ASI-06 | Context Management and Retrieval Manipulation | Out of scope | — |
 | ASI-07 | Insecure Inter-Agent Communication | Out of scope | — |
 | ASI-08 | Cascading Failures | Out of scope | — |
@@ -219,7 +219,8 @@ property.
 > deserialization, templates), leading to compromise or sandbox
 > escape."*
 
-**Denyx position: strong.** Three layers, then the OS sandbox.
+**Denyx position: strong.** Three layers at the language-runtime
+gate, plus interpreter containment in the wasm sandbox.
 
 1. **Command allowlist** — only listed binaries can spawn.
 2. **Arg-side denial** — `[subprocess.deny_args]` matches
@@ -230,20 +231,29 @@ property.
    `cat ../../etc/passwd` doesn't slip past the gate via
    relative-path tricks.
 
-On Linux, when `[subprocess].sandbox = "bwrap"`, the spawned child
-also runs inside a bubblewrap mount-namespaced sandbox with an
-unshared net namespace by default. That OS-isolation layer is
-exercised in [`crates/host/tests/sandbox_bwrap.rs`](../crates/host/tests/sandbox_bwrap.rs)
-(13 tests, including 6 added in the recent mutation-testing
-triage round).
+**Interpreter containment (default in v0.4.0+; opt out with
+`--no-wasm`):** the Starlark interpreter itself runs inside a
+`wasmtime` linear-memory sandbox. A miscompilation or
+memory-safety bug in `starlark-rust` stays contained at the wasm
+boundary instead of corrupting the host address space. Defence-
+in-depth, not a primary control. Empirically validated under
+adversarial workload in the Round 2 v5 pentest (one `WASM_TRAP`
+fire — Opus's quadratic string-concat caused the Starlark
+interpreter to `process::abort` inside the wasm guest; the
+sandbox contained the abort cleanly). See
+[wasm-sandbox](wasm-sandbox.md) for the full parity table and
+threat-model deltas.
 
-**Fourth layer (default in v0.4.0+; opt out with `--no-wasm`):** the Starlark interpreter
-itself runs inside a `wasmtime` linear-memory sandbox. A
-miscompilation or memory-safety bug in `starlark-rust` stays
-contained at the wasm boundary instead of corrupting the host
-address space. Defence-in-depth, not a primary control. See
-[wasm-sandbox](wasm-sandbox.md) for the full parity table
-and threat-model deltas.
+**Note:** none of these layers isolate the *child process* a
+permitted `subprocess.exec` starts. A permitted `python3` runs in
+the host kernel — if it constructs paths inside its own heap that
+the argv path-gate cannot see (e.g.
+`python3 -c "open(chr(47)+'etc'+chr(47)+'passwd').read()"`),
+ASI-05 coverage in v0.4.0 depends on `secure-defaults` denying
+inline interpreters and the host being run inside a VM or
+container. The legacy `[subprocess].sandbox = "bwrap"` field
+addressed this on Linux but is deprecated in v0.4.0; see
+[06-policy-file.md](06-policy-file.md#subprocess-is-a-privilege-boundary).
 
 Tests:
 

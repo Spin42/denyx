@@ -122,8 +122,7 @@ The MCP entry calls `denyx-mcp` directly:
 ```
 
 Use on Linux, or on macOS/Windows when running the MCP server natively
-without a VM. Note: the optional `[subprocess].sandbox = "bwrap"` mode
-only works on Linux.
+without a VM.
 
 ### `lima`
 

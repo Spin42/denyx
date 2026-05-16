@@ -123,26 +123,29 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   runner — wall-time deadlines don't catch pure-CPU loops. The
   WasmRunner closes this via fuel preemption (see the row in the
   defends-against table); on the in-process runner it remains a gap.
-  Fork-bomb-class subprocess exhaustion is a separate concern handled
-  by the optional `[subprocess].sandbox = "bwrap"` layer on Linux, or
-  by running inside a container/VM.
-- **OS-level subprocess sandboxing is opt-in and addresses a different
-  threat from the wasm sandbox.** The WasmRunner contains the Starlark
-  interpreter — a runtime bug in the interpreter, or a runaway
-  pure-CPU loop, stays inside the wasmtime guest. It does **not**
-  isolate subprocesses the script spawns: a permitted `python3` runs
-  as a normal child of the host process, bounded only by the policy's
-  argv path-gate and `subprocess.deny_args`. For OS-level subprocess
-  isolation (kernel namespaces, fresh bind-mount layout per call),
-  enable `[subprocess].sandbox = "bwrap"` on Linux or run inside the
-  recommended VM on macOS / Windows. The wasm sandbox and bwrap are
-  not substitutes — they protect different boundaries. See the
-  [policy-file `[subprocess]` section](06-policy-file.md#subprocess)
-  for the bwrap layer's properties.
+  Fork-bomb-class subprocess exhaustion is out of scope at the
+  Denyx layer — run inside a container or VM if your threat model
+  includes it.
+- **Denyx does not isolate subprocesses the script spawns.** The
+  WasmRunner contains the Starlark interpreter — a runtime bug in
+  the interpreter, or a runaway pure-CPU loop, stays inside the
+  wasmtime guest. It does **not** isolate child processes a
+  permitted `subprocess.exec` call starts: a permitted `python3`
+  runs as a normal child of the host process, bounded only by the
+  policy's `allow_commands`, argv path-gate, and
+  `subprocess.deny_args`. If your threat model includes a permitted
+  interpreter constructing paths inside its own heap that bypass
+  the argv path-gate (e.g. `python3 -c "open(chr(47)+...)"`), run
+  Denyx inside a container or VM — the kernel namespace is outside
+  Denyx's scope. The previous `[subprocess].sandbox = "bwrap"`
+  field is deprecated in v0.4.0; see
+  [policy-file `[subprocess]`](06-policy-file.md#subprocess-is-a-privilege-boundary)
+  for the deprecation note.
 - **OS-level kernel bugs / sandbox escape.** Denyx is a *language-runtime*
-  gate. Even with `[subprocess].sandbox = "bwrap"`, a kernel-level
-  exploit defeats it. Run inside a VM if you care about kernel
-  exploits.
+  gate. Even with the wasm sandbox containing the Starlark
+  interpreter, a kernel-level exploit reachable from a permitted
+  subprocess (or from wasmtime itself) defeats it. Run inside a VM
+  if you care about kernel exploits.
 - **DNS rebinding.** Hostname-allowlist checks happen against a
   resolved IP, but a malicious resolver can return a different IP
   on the next lookup the OS does. Resolved-IP pinning is future

@@ -253,9 +253,12 @@ Different shape: these isolate processes; they don't enforce a policy.
 **Complementary to Denyx, not competing.** A Denyx-gated agent inside
 an E2B sandbox is strictly stronger than either alone: the sandbox
 contains kernel-level escape, Denyx prevents the agent from issuing
-disallowed effects in the first place. The Linux-only `bwrap` mode in
-Denyx ([04-security-threat-model.md](04-security-threat-model.md))
-is the in-tree equivalent.
+disallowed effects in the first place. Denyx does not isolate
+child processes the script spawns; if your threat model includes
+kernel-level subprocess isolation, an outer sandbox is the path.
+The legacy in-tree `[subprocess].sandbox = "bwrap"` field is
+deprecated in v0.4.0 (see
+[04-security-threat-model.md](04-security-threat-model.md)).
 
 ## Generic policy engines
 
@@ -316,10 +319,13 @@ that's the slice Denyx fills.
 
 ## When NOT to use Denyx
 
-- **You need OS-level isolation as the primary boundary.** Denyx is
-  language-runtime enforcement plus optional `bwrap` on Linux. If you
-  need namespace / VM / Wasm-grade isolation, run an E2B sandbox or
-  containerise. Denyx pairs well with these but does not replace them.
+- **You need OS-level isolation of subprocesses as the primary
+  boundary.** Denyx is language-runtime enforcement; the wasm
+  sandbox contains the Starlark interpreter, not the child
+  processes a permitted `subprocess.exec` starts. If you need
+  namespace / VM / Wasm-grade isolation of the *child process*,
+  run an E2B sandbox or containerise. Denyx pairs well with these
+  but does not replace them.
 - **You want content-safety / prompt-injection classification on
   natural-language input.** That's NeMo Guardrails, Lakera, Llama
   Firewall territory. Denyx doesn't classify text; it gates capability

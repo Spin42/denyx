@@ -432,22 +432,36 @@ need the relevant interpreter (`python` for Python, `node` for
 Node, etc.) negate it AND add a `[subprocess.deny_args]` entry that
 blocks the inline-execution flags (`-c`, `-e`, `-p`).
 
-**Layer 2 (advanced / legacy, opt-in): `[subprocess].sandbox = "bwrap"`.**
+**Layer 2 (deprecated as of v0.4.0): `[subprocess].sandbox = "bwrap"`.**
 
-> Note: this is an OS-level *subprocess* isolation layer and is **not
-> the recommended primary defense**. The recommended interpreter-
-> containment defense is the Wasm sandbox documented in
-> [`wasm-sandbox.md`](wasm-sandbox.md) — it isolates the Starlark
-> interpreter itself (fuel-based preemption + interpreter-bug
-> containment). bwrap isolates the *child processes* a permitted
-> subprocess spawns, which addresses a different threat: subprocess
-> escape via path-gate misconfiguration on a binary that takes
-> inline code or constructs paths at runtime. The two layers are
-> complementary, not substitutes. Keep this section if you have an
-> existing policy that sets `sandbox = "bwrap"`; otherwise the wasm
-> sandbox is the right starting point and bwrap is opt-in on top.
+> **Status:** deprecated in v0.4.0. The field is still parsed and
+> the runtime still wraps `subprocess.exec` calls with bubblewrap
+> when it's set, so existing policies keep working — but new
+> policies should not set it. The code path may be removed in a
+> future release. The wasm-sandboxed Starlark runner
+> ([`wasm-sandbox.md`](wasm-sandbox.md)) is now the primary
+> interpreter-containment layer; the empirical evidence that
+> backs it (Round 1 + Round 2 v4/v5/v6 pentests, 112 LLM-driven
+> attempts across 5 runs, 0 LEAK / 0 DERIVED_LEAK / 0 WEAK_LEAK)
+> is documented there with the n=5 and white-box-harness caveats.
+>
+> What this layer was, and what it actually addressed: OS-level
+> isolation of the **child process** a permitted `subprocess.exec`
+> spawns. That is a different boundary from the wasm sandbox
+> (which contains the *Starlark interpreter*) — the wasm runner
+> does not isolate child processes. If your threat model requires
+> kernel-level isolation of permitted subprocesses (a permitted
+> `python3` constructing paths inside its heap that the argv
+> path-gate cannot see, e.g.
+> `python3 -c "open(chr(47)+'etc'+chr(47)+'passwd').read()"`),
+> the supported approach in v0.4.0+ is to run Denyx inside a VM
+> or container — not to enable this field.
 
-OS-level isolation. Every `subprocess.exec` call is wrapped with
+For operators with existing policies that set `sandbox = "bwrap"`,
+the field still behaves as documented below; the rest of this
+subsection describes that behaviour.
+
+Every `subprocess.exec` call is wrapped with
 [bubblewrap](https://github.com/containers/bubblewrap), which
 constructs a fresh Linux namespace + bind-mount jail per call. The
 child sees:
@@ -460,39 +474,35 @@ child sees:
   allow lists (read-only or read-write as appropriate)
 - *Nothing else.* `/etc/passwd` is not bound. `~/.aws` is not
   bound. The agent's writable directories outside the policy are
-  not bound. The child literally cannot reach paths the policy
-  didn't permit, **no matter what obfuscation an interpreter uses
-  to construct them.**
+  not bound. The child cannot reach paths the policy didn't permit
+  through ordinary filesystem syscalls inside that bind-mount
+  layout.
 
 ```toml
 [subprocess]
 allow_commands = ["python3", "git", "make"]
-sandbox        = "bwrap"   # opt in to OS-level isolation
+sandbox        = "bwrap"   # deprecated; see note above
 ```
 
-Properties:
-- Linux-only for v1. Requires `bubblewrap` installed (`apt install
+Properties (unchanged from the pre-deprecation behaviour):
+- Linux-only. Requires `bubblewrap` installed (`apt install
   bubblewrap` on Debian/Ubuntu, `dnf install bubblewrap` on
   Fedora). Denyx refuses to load if `sandbox = "bwrap"` is set but
-  the binary isn't on `PATH` — silent fall-through to non-sandboxed
-  execution would be the wrong direction.
+  the binary isn't on `PATH`.
 - Per-call overhead: ~10-50ms for the namespace setup.
 - Network: kept (`--share-net`) if any `[network].http_*_allow` is
   populated; otherwise the netns is dropped (`--unshare-net`).
 - Process: `--die-with-parent`, `--unshare-pid/uts/ipc`,
-  `--new-session`. The child is sandboxed and won't outlive Denyx.
+  `--new-session`.
 - Env: `--clearenv` then `--setenv` per declared `allow_vars`.
-  Mirrors the language-layer env filter; bwrap is also responsible
-  for env scoping when this mode is on.
 
-When `sandbox = "bwrap"` is enabled, the argv path-gate (Layer 1)
-becomes a fast first-line check; the bwrap layer is the actual
-enforcement. Even if the path-gate has a false negative for some
-clever argv, the child still can't reach paths outside the
-bind-mount layout.
+When `sandbox = "bwrap"` is set, the argv path-gate (Layer 1) is
+a fast first-line check and bubblewrap enforces the bind-mount
+layout for the child.
 
-macOS/Windows operators get Layer 1 only today; platform-specific
-backends (`sandbox-exec`, Job Objects) are future work.
+macOS/Windows operators never had this layer; the recommended
+shape on those platforms in v0.4.0+ is the wasm sandbox plus a VM
+if kernel-level subprocess isolation is in scope.
 
 #### Subprocess env is filtered, not inherited
 

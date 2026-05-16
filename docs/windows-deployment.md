@@ -3,46 +3,63 @@
 > ← [Back to docs README](README.md) · [Install](07-install.md) · [Architecture](03-architecture.md)
 
 > ⚠️ **Not yet exhaustively tested — feedback wanted.** Denyx's CI runs
-> on Linux only. The WSL2 path below is the project's recommended
-> approach for getting bubblewrap on Windows, but it has not been
-> validated across many Windows builds, WSL kernel versions, or
-> distros. If something doesn't work, please
+> on Linux only. The WSL2 path below has not been validated across
+> many Windows builds, WSL kernel versions, or distros. Native
+> (no-WSL) Windows builds also compile but are similarly untested.
+> If something doesn't work, please
 > [open an issue](https://github.com/Spin42/denyx/issues) or send a
-> PR — feedback from real Windows users is exactly what hardens this
-> path. Native (no-WSL) Windows builds also compile but are similarly
-> untested; see the [README's Prerequisites table](../README.md#prerequisites)
-> for the trade-off.
+> PR. See the [README's Prerequisites table](../README.md#prerequisites)
+> for the native-vs-WSL trade-off.
+>
+> **As of v0.4.0, the native install is the recommended path on
+> Windows** — the wasm-sandboxed Starlark runner ships in the host
+> binary and runs natively. The WSL2 shape below is still useful if
+> you want Claude Code v2's OS sandbox stanza exercised against a
+> real Linux kernel (its `bwrap` backend is Linux-only), or
+> VM-level isolation around the host process. The legacy
+> `[subprocess].sandbox = "bwrap"` field is deprecated in v0.4.0;
+> Denyx does not isolate child processes the script spawns
+> regardless of whether the host is in WSL.
 
-This is the supported Windows deployment shape: **run `denyx-mcp`
-inside WSL2 (Windows Subsystem for Linux) and let your host's MCP
-client talk to it through `wsl.exe -e`.** Windows ships a real Linux
-kernel via WSL2; bubblewrap and namespaces work exactly as they do
-on bare-metal Linux. No native Windows code, no untested FFI, no
-AppContainer ceremony.
+This is the **WSL2-hosted** Windows deployment shape: **run
+`denyx-mcp` inside WSL2 (Windows Subsystem for Linux) and let your
+host's MCP client talk to it through `wsl.exe -e`.** It's an
+option, not the default — for the native install (recommended in
+v0.4.0+), see [07-install.md](07-install.md). Use the WSL shape
+below when you specifically want either Claude Code v2's OS sandbox
+stanza exercised against a real Linux kernel (the `bwrap` backend
+the stanza relies on is Linux-only), or VM-level isolation around
+the whole host process.
 
 If you'd rather skip the rationale, the
 [four-command quickstart](#quickstart) below gets you running.
 
 ## Why this shape
 
-Native Windows sandboxing equivalent to bubblewrap means **AppContainer
-+ Restricted Token + Job Object** — Chromium-sandbox territory:
-thousands of lines of platform-specific code, signed-binary
-requirements, capability-SID registration, and edge cases that need
-real testing on Windows hardware. Shipping a half-implementation
-would be security theater.
+When the optional layer you want is Claude Code v2's OS-sandbox
+stanza (whose Linux backend uses bubblewrap), or VM-level
+isolation around the host process, WSL2 is the natural fit on
+Windows. WSL2 is a real Linux kernel running under Hyper-V,
+integrated as a Windows feature with first-class Microsoft
+support. The wider ecosystem already uses it for "Linux-shaped
+tooling on Windows": the GitHub-Actions runner, Docker Desktop,
+Bun, Deno, the entire JetBrains line on Windows. Denyx is not
+special.
 
-WSL2 sidesteps all of this by being a real Linux kernel running
-under Hyper-V, integrated as a Windows feature with first-class
-Microsoft support and no deprecation pressure. The wider ecosystem
-already uses it for "Linux-shaped tooling on Windows": the
-GitHub-Actions runner, Docker Desktop, Bun, Deno, the entire
-JetBrains line on Windows. Denyx is not special.
+Native Windows sandboxing equivalent to bubblewrap — AppContainer
++ Restricted Token + Job Object, Chromium-sandbox territory — is
+not on the v0.1 roadmap and is not how Denyx isolates the
+Starlark interpreter anyway (the wasm sandbox is the layer that
+does that, and it runs natively on Windows). If you want the
+Linux-side bwrap variant of Claude Code v2's sandbox tested
+honestly, WSL2 is the path.
 
 The cost is a one-time `wsl --install` on the Windows side. The
-benefit is that **the Windows deployment behaves identically to a
-Linux deployment**: bubblewrap real, namespaces real, audit log on a
-real ext4 filesystem, no platform-specific code paths to maintain.
+benefit is that the Windows deployment behaves identically to a
+Linux deployment for the layers that need a Linux kernel: audit
+log on a real ext4 filesystem, Claude Code v2's bubblewrap-backed
+sandbox stanza actually fires (it's a no-op on Windows without
+WSL2), no platform-specific code paths to maintain.
 
 ## Quickstart
 
@@ -57,7 +74,7 @@ In the resulting Ubuntu shell:
 
 ```sh
 sudo apt-get update -y
-sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl
+sudo apt-get install -y build-essential pkg-config libssl-dev curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
@@ -87,8 +104,8 @@ it writes are read by Claude Code / opencode on the Windows side.)
 Replace `YOU` with your Windows username and adjust the policy
 path to wherever your project lives. The agent calls `denyx_run`
 from the host; the call traverses `wsl.exe -e` (stdio JSON-RPC),
-lands in the WSL2 distro, the script runs under bubblewrap, the
-printed output flows back up the pipe.
+lands in the WSL2 distro, the script runs under the wasm sandbox
+inside `denyx-mcp`, the printed output flows back up the pipe.
 
 ## Prerequisites
 
@@ -139,17 +156,12 @@ In the Ubuntu shell:
 ```sh
 sudo apt-get update -y
 sudo apt-get install -y \
-  bubblewrap \
   ca-certificates \
   curl \
   build-essential \
   pkg-config \
   libssl-dev \
   git
-
-# Confirm bubblewrap can create user namespaces. WSL2 enables them
-# by default; this is a smoke check.
-bwrap --ro-bind / / --unshare-pid /bin/true && echo "bwrap OK"
 
 # Install rustup if you don't already have a Rust toolchain.
 if ! command -v cargo >/dev/null; then
@@ -242,7 +254,7 @@ Notes:
 - WSL distros auto-start on first invocation; subsequent calls
   are ~10 ms pipe-overhead.
 
-### 6. Verify the sandbox actually fired
+### 6. Verify the gate actually fired
 
 In the Ubuntu shell:
 
@@ -254,12 +266,14 @@ echo 'fs.read("/etc/shadow")' > /tmp/check.star
 ```
 
 You should see a typed Policy denial — the path isn't in
-`read_allow`. If you bypass the language gate via a subprocess
-(`["cat", "/etc/shadow"]`), the bwrap layer ensures the file
-literally doesn't exist in the child's filesystem view.
-
-Flip the policy's `[subprocess].sandbox` setting between `"none"`
-and `"bwrap"` to feel the difference.
+`read_allow`. The argv path-gate also rejects
+`subprocess.exec(["cat", "/etc/shadow"])`. If your threat model
+includes a permitted interpreter (`python3 -c`) constructing paths
+inside its heap to bypass the argv path-gate, the WSL2 VM boundary
+is what walls those calls off from the Windows host — the Linux
+kernel namespace is what isolates the child process, not Denyx.
+The legacy `[subprocess].sandbox = "bwrap"` field is deprecated in
+v0.4.0.
 
 ## Performance notes
 
@@ -268,8 +282,10 @@ Ubuntu 24.04 inside WSL2:
 
 - WSL distro cold-start: 1–3 s.
 - First `wsl.exe -e` after boot: ~50 ms.
-- Subsequent `denyx_run` calls: dominated by Starlark + bwrap, the
-  pipe overhead is <5 ms.
+- Subsequent `denyx_run` calls: dominated by Starlark evaluation
+  (~16 ms cold-call for the wasm runner on a fresh process; ~4 µs
+  amortised per call inside `denyx-mcp`); the pipe overhead is
+  <5 ms.
 - File reads through `/mnt/c/...` (Windows drive): noticeably
   slower than Linux-native I/O. For policy files this is fine; for
   large `read_allow` trees, prefer the Linux-side filesystem.
@@ -299,8 +315,10 @@ If WSL itself ships a kernel update on the Windows side, run
 
 What you get:
 
-- ✅ Real OS-level isolation (bwrap + Linux namespaces) on a
-  Microsoft-blessed kernel.
+- ✅ VM-level isolation around the host process via WSL2. The
+  wasm sandbox contains the Starlark interpreter on either side;
+  WSL2 additionally walls off the host kernel from the Windows
+  host.
 - ✅ Same audit log, same policy file, same MCP surface as Linux.
 - ✅ No native Windows code paths to maintain in Denyx.
 - ✅ Future-proof — WSL2 is a strategic Microsoft product with

@@ -171,20 +171,49 @@ JSON Lines record you can later verify with `denyx audit verify`.
 Starlark runner, and host wiring run natively on Linux, macOS, and
 Windows. No platform-specific code paths in the primary install.
 
-### Advanced / optional
+### Isolation model
 
-- **`bubblewrap` (Linux only)** — enables `[subprocess].sandbox = "bwrap"`,
-  an OS-level namespace jail wrapping each subprocess the script spawns.
-  This addresses a different threat from the wasm sandbox: bwrap isolates
-  child processes (so a permitted `python3` can't read paths outside the
-  policy's bind-mount layout), the wasm sandbox isolates the Starlark
-  interpreter itself. They are not substitutes. Off by default; install
-  via `apt install bubblewrap` / `dnf install bubblewrap` if your threat
-  model includes subprocess escape via path-gate misconfiguration.
-- **Claude Code v2's OS sandbox** — Linux/WSL2-side only. Install Denyx
-  *inside* a Lima VM (macOS) or WSL2 distro (Windows) to use it. See
-  [docs/macos-deployment.md](docs/macos-deployment.md) and
-  [docs/windows-deployment.md](docs/windows-deployment.md).
+Denyx enforces in two layers; neither relies on the model behaving:
+
+- **Policy gate (Rust).** Every `fs.*` / `net.*` / `subprocess.exec` /
+  `env.read` call is checked against the parsed policy before any
+  side effect. Default-deny; deny wins over allow. This is the
+  primary enforcement.
+- **Wasm-sandboxed Starlark interpreter.** The `starlark-rust`
+  interpreter is compiled to `wasm32-wasip1` and executed inside
+  `wasmtime`. The interpreter's memory and import surface are
+  contained at the wasm boundary; a starlark-rust bug stays inside
+  the guest, and a pure-CPU runaway in the script is preempted by
+  wasmtime fuel. Default in v0.4.0+; pass `--no-wasm` to fall back
+  to the in-process runner. Full parity table and the wasmtime
+  attack surface added are in
+  [docs/wasm-sandbox.md](docs/wasm-sandbox.md).
+
+What the wasm sandbox does **not** isolate: subprocesses the script
+spawns. A permitted `python3` runs as a normal child of the host
+process — bounded by the policy's `allow_commands`, argv path-gate,
+and `subprocess.deny_args`, **not** by a kernel namespace. The LLM's
+reasoning is also outside scope: Denyx enforces at the script's
+runtime, not on the model.
+
+Empirical basis: Round 1 (`run_exfil.py`, 12 hand-written probes:
+10 REDACTED / 2 WEAK_LEAK / 0 LEAK) and Round 2 (LLM-driven, Opus
+4.7 n=3 + Sonnet 4.6 n=2, 5 independent runs, 112 attempts:
+**0 LEAK / 0 DERIVED_LEAK / 0 WEAK_LEAK**, 7 of 8 designed defense
+layers exercised by the panel). White-box harness, single-shot per
+shape, n=5 runs — results don't generalise past the panel.
+Layer-by-layer accounting and caveats in
+[docs/wasm-sandbox.md](docs/wasm-sandbox.md).
+
+### Optional: Claude Code v2's OS sandbox
+
+Claude Code v2 ships its own OS-level sandbox stanza (Seatbelt on
+macOS, bubblewrap on Linux/WSL2). `denyx host-config --sandbox auto`
+emits it derived from the policy's allow lists. This is Claude
+Code's feature; Denyx wires its config, it doesn't enforce it. See
+[docs/macos-deployment.md](docs/macos-deployment.md) and
+[docs/windows-deployment.md](docs/windows-deployment.md) for VM-
+hosted setups that exercise the Linux-side variant.
 
 ## What Denyx actually does
 
@@ -343,13 +372,17 @@ table in mind before deciding where to deploy it:
   above, and [`cargo-fuzz` + a 200 000-iteration regression
   sweep](fuzz/README.md). All empirical, none of which substitutes for a
   human reviewer.
-- **OS-level subprocess isolation is opt-in.** The wasm sandbox contains
-  the Starlark interpreter; it does not isolate subprocesses the script
-  spawns. For OS-level isolation of child processes, enable
-  `[subprocess].sandbox = "bwrap"` (Linux) or run inside the recommended
-  VM (macOS / Windows). Without one of these layers, a permitted
-  subprocess (e.g. `python3`) is bounded only by the argv path-gate, not
-  by a kernel namespace.
+- **Denyx does not isolate subprocesses the script spawns.** The wasm
+  sandbox contains the Starlark interpreter — it does not extend to
+  child processes a permitted `subprocess.exec` call starts. A
+  permitted `python3` runs in the host kernel, bounded only by
+  `allow_commands`, the argv path-gate, and `subprocess.deny_args`. If
+  your threat model includes kernel-level isolation of child processes
+  (a permitted interpreter constructing paths in its own heap that
+  bypass the argv path-gate), run Denyx inside a VM or container. The
+  previous `[subprocess].sandbox = "bwrap"` integration is deprecated
+  in v0.4.0; the code remains for runtime compat and may be removed in
+  a future release.
 - **`requires_approval` is not always a real user prompt.** The CLI prompts
   on stdin. The MCP server's default `auto` mode sends an MCP elicitation
   when the host advertises the capability and falls back to `auto-deny`

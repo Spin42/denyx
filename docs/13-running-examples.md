@@ -76,7 +76,6 @@ The full per-failure breakdown for the orchestrated run lives in
 | **`nomic-embed-text`** | Embedding-based RAG retrieval (~270 MB) | `ollama pull nomic-embed-text` |
 | **Python 3.11+** | Drive the harnesses (uses stdlib `tomllib`) | OS package manager |
 | **Claude Code CLI** *(orchestrated harness only)* | Sonnet/Opus driving `delegate_to_local` | See [claude.com/claude-code](https://claude.com/claude-code) |
-| **`bubblewrap`** *(optional, for sandbox tests)* | OS-level subprocess isolation | `apt install bubblewrap` (Debian/Ubuntu) or `dnf install bubblewrap` (Fedora) |
 
 Confirm Ollama is running:
 

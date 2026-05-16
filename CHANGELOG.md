@@ -94,6 +94,14 @@ breaking API changes between minor versions until they hit `1.0.0`.
   Amortized per-call cost inside an already-instantiated runner is
   ~4 µs vs ~3 µs for the in-process runner — statistically
   indistinguishable. Measured by `scripts/bench-wasm-runner.py`.
+- The `[subprocess].sandbox = "bwrap"` field is **deprecated in
+  docs** in this release. The field is still parsed and the
+  runtime still wraps `subprocess.exec` calls with bubblewrap
+  when it's set, so existing policies keep working; the README
+  and `docs/` no longer present it as a recommended layer. The
+  wasm-sandboxed Starlark runner is the primary isolation
+  documented going forward. Code removal is a separate decision
+  for a future release.
 
 ### Validation status at the 0.4.0 cut
 

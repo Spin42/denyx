@@ -60,8 +60,8 @@ The index below lists everything in both groups in one place.
 | [security-pentest-report](security-pentest-report.md)        | Round 1 (2026-05-06): AI-driven (Sonnet + Opus) penetration test against the local-only IFC layer. Findings categorised Critical/High/Medium/Low, mitigations, closure verification. |
 | [security-pentest-r2-tool-poisoning](security-pentest-r2-tool-poisoning.md) | Round 2 (2026-05-11): step-parameter injection on `delegate_to_local`, encoding-bypass attempt, deny-by-default audit, and a v3 follow-up that expanded the probe set to 47 across 12 categories and compared detection rates against llm-guard and NeMo Guardrails. |
 | [mutation-testing](mutation-testing.md)                      | How `cargo-mutants` runs against the security-critical core (policy gate, IFC, verifier). Triage workflow, schedule, honest limits. |
-| [macos-deployment](macos-deployment.md)                      | Run `denyx-mcp` on macOS via Lima + bubblewrap inside a Linux VM. Setup, MCP wiring, verification, alternatives. |
-| [windows-deployment](windows-deployment.md)                  | Run `denyx-mcp` on Windows via WSL2 + bubblewrap inside the Linux subsystem. Setup, MCP wiring, verification, alternatives. |
+| [macos-deployment](macos-deployment.md)                      | Run `denyx-mcp` on macOS, native or inside a Lima VM. The native path is the recommended default in v0.4.0+; the VM shape is for operators who want Claude Code v2's OS-sandbox stanza exercised against a real Linux kernel or VM-level isolation around the host process. |
+| [windows-deployment](windows-deployment.md)                  | Run `denyx-mcp` on Windows, native or inside WSL2. The native path is the recommended default in v0.4.0+; the WSL2 shape is for operators who want Claude Code v2's OS-sandbox stanza exercised against a real Linux kernel or VM-level isolation around the host process. |
 | [conclusions](conclusions.md)                                | The Sigil retrospective notes Denyx was built from. Background reading for `02-from-sigil`. |
 | [project-plan](project-plan.md)                              | Initial design plan, kept as a historical artifact. |
 

@@ -250,8 +250,9 @@ differ.
 | Embedding model (~270 MB)       | RAG retrieval over the example library. Without it the executor writes worse Starlark.    | `ollama pull nomic-embed-text` (Ollama) or equivalent.   |
 | Claude Code 2.x or opencode     | The cloud orchestrator.                                                                   | See [09-claude-code.md](09-claude-code.md) / [10-opencode.md](10-opencode.md) |
 
-`bubblewrap` is not required for this flow unless your `denyx.toml`
-opts into the Linux kernel sandbox.
+`bubblewrap` is not required for this flow. The legacy
+`[subprocess].sandbox = "bwrap"` field is deprecated in v0.4.0;
+see [06-policy-file.md](06-policy-file.md#subprocess-is-a-privilege-boundary).
 
 #### Provider selection
 

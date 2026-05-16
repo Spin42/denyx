@@ -3,21 +3,33 @@
 > ← [Back to docs README](README.md) · [Install](07-install.md) · [Architecture](03-architecture.md)
 
 > ⚠️ **Not yet exhaustively tested — feedback wanted.** Denyx's CI runs
-> on Linux only. The macOS / Lima path below is the project's
-> recommended approach for getting bubblewrap on macOS, but it has not
-> been validated across many macOS versions, Lima versions, or
-> Apple-Silicon vs Intel hardware. If something doesn't work, please
+> on Linux only. The macOS / Lima path below has not been validated
+> across many macOS versions, Lima versions, or Apple-Silicon vs Intel
+> hardware. Native (no-VM) macOS builds also compile but are similarly
+> untested. If something doesn't work, please
 > [open an issue](https://github.com/Spin42/denyx/issues) or send a
-> PR — feedback from real macOS users is exactly what hardens this
-> path. Native (no-VM) macOS builds also compile but are similarly
-> untested; see the [README's Prerequisites table](../README.md#prerequisites)
-> for the trade-off.
+> PR. See the [README's Prerequisites table](../README.md#prerequisites)
+> for the native-vs-VM trade-off.
+>
+> **As of v0.4.0, the native install is the recommended path on
+> macOS** — the wasm-sandboxed Starlark runner ships in the host
+> binary and runs natively. The Lima-VM shape below is still useful
+> if you want Claude Code v2's OS sandbox stanza exercised against a
+> real Linux kernel (its `bwrap` backend is Linux-only), or VM-level
+> isolation around the host process itself. The legacy
+> `[subprocess].sandbox = "bwrap"` field is deprecated in v0.4.0;
+> Denyx does not isolate child processes the script spawns regardless
+> of whether the host is in a VM.
 
-This is the supported macOS deployment shape: **run `denyx-mcp`
+This is the **VM-hosted** macOS deployment shape: **run `denyx-mcp`
 inside a lightweight Linux VM (Lima) and let your host's MCP client
 talk to it through `limactl shell`.** No native macOS code, no
-deprecated APIs, no Apple-vendor entitlements. Same isolation
-guarantees as a Linux deployment because it *is* a Linux deployment.
+deprecated APIs, no Apple-vendor entitlements. It's an option, not
+the default — for the native install (which is the recommended
+path in v0.4.0+), see [07-install.md](07-install.md). Use the
+VM shape below when you specifically want either Claude Code v2's
+OS-sandbox stanza exercised against a real Linux kernel, or
+VM-level isolation around the whole host process.
 
 If you'd rather skip the rationale, the
 [four-command quickstart](#quickstart) below gets you running.
@@ -49,8 +61,11 @@ special.
 The cost of this shape is one-time setup (install Lima, boot a VM)
 and the Linux kernel running on your machine. The benefit is that
 **the macOS deployment behaves identically to a Linux deployment**:
-bubblewrap real, namespaces real, audit log on a real ext4
-filesystem, no platform-specific code paths to maintain.
+audit log on a real ext4 filesystem, Claude Code v2's bubblewrap-
+backed sandbox stanza actually fires (it's a no-op on macOS
+otherwise), no platform-specific code paths to maintain. Denyx's
+wasm sandbox runs natively on macOS too — the VM is not what
+contains the Starlark interpreter.
 
 ## Quickstart
 
@@ -88,8 +103,8 @@ This writes `./.mcp.json`, `./.claude/settings.json`, and
 command shape baked in, plus the lockdown of every built-in
 effecting tool. The agent calls `denyx_run` from the host; the
 call traverses `limactl shell` (stdio JSON-RPC), lands in the VM,
-the script runs under bubblewrap, the printed output flows back
-up the pipe. Path arguments resolve identically on both sides
+the script runs under the wasm sandbox inside `denyx-mcp`, the
+printed output flows back up the pipe. Path arguments resolve identically on both sides
 because Lima mirrors the host's `$HOME` at the same absolute
 path inside the VM — `~/.cargo/bin/denyx-mcp` is reachable as a
 single absolute path from both macOS and Linux.
@@ -127,17 +142,17 @@ limactl start --name=denyx examples/macos/denyx.lima.yaml
 ```
 
 First boot takes ~2 minutes (downloading the Ubuntu cloud image,
-installing bubblewrap and the build toolchain). Subsequent
-`limactl start denyx` calls bring the VM up in 5–10 s.
+installing the build toolchain). Subsequent `limactl start denyx`
+calls bring the VM up in 5–10 s.
 
 The template:
 
-- Uses Ubuntu 24.04 LTS (recent kernel, bwrap in apt).
+- Uses Ubuntu 24.04 LTS.
 - Mirrors `~/` on the host into the VM at the same absolute path.
-- Provisions `bubblewrap` and the Rust toolchain.
-- Verifies user namespaces work before declaring provisioning
-  complete — if the kernel can't run bwrap, the VM refuses to come
-  up rather than silently degrading.
+- Provisions the Rust toolchain. (Earlier versions of the template
+  also installed `bubblewrap` for the deprecated
+  `[subprocess].sandbox = "bwrap"` field; the package is no longer
+  required for current deployments.)
 - Runs CPU/memory at 2 cores / 2 GiB by default. Bump in the YAML
   if you run heavy local-executor evals inside the VM.
 
@@ -204,10 +219,9 @@ If the VM is stopped when Claude Code calls the MCP server,
 `limactl shell` will boot it. There's a one-time ~5 s cold-start
 cost for the first call; subsequent calls are stdio-pipe-fast.
 
-### 5. Verify the sandbox actually fired
+### 5. Verify the gate actually fired
 
-The whole point is OS-level isolation. Confirm bwrap is in the
-chain:
+Confirm the policy denial path works inside the VM:
 
 ```sh
 limactl shell denyx -- bash -lc \
@@ -215,9 +229,7 @@ limactl shell denyx -- bash -lc \
    ~/.cargo/bin/denyx run --policy ~/Projects/myapp/denyx.toml /tmp/check.star"
 ```
 
-You should see the `id` output. Now flip the policy's
-`[subprocess].sandbox = "bwrap"` setting and add a path the agent
-shouldn't reach (e.g. `/etc/shadow`) to a script:
+You should see the `id` output. Now try a denied path:
 
 ```sh
 limactl shell denyx -- bash -lc \
@@ -226,13 +238,14 @@ limactl shell denyx -- bash -lc \
 ```
 
 You should see a typed Policy denial — the path isn't in
-`read_allow`. If you bypass that gate via subprocess (`["cat",
-"/etc/shadow"]`), the bwrap layer ensures the file literally doesn't
-exist in the child's filesystem view.
-
-If the policy mode is `"none"` instead of `"bwrap"`, the language
-gate still fires but the OS-level layer is off. Use `"bwrap"` for
-real production workloads on this VM.
+`read_allow`. The argv path-gate also rejects `subprocess.exec(["cat",
+"/etc/shadow"])` because `/etc/shadow` is not in `read_allow`. If
+your threat model includes a permitted interpreter (e.g.
+`python3 -c`) that constructs paths inside its heap to bypass the
+argv path-gate, the VM boundary is the layer that catches it —
+the Linux kernel namespace is what isolates the child process, not
+Denyx. The legacy `[subprocess].sandbox = "bwrap"` field is
+deprecated in v0.4.0.
 
 ## Performance notes
 
@@ -241,8 +254,10 @@ Numbers from a 2024 M2 MacBook Pro (Apple Silicon native), Ubuntu
 
 - VM boot from stopped: 5–10 s.
 - First `limactl shell` after boot: ~200 ms.
-- Subsequent `denyx_run` calls: dominated by Starlark + bwrap, the
-  pipe overhead is <5 ms.
+- Subsequent `denyx_run` calls: dominated by Starlark evaluation
+  (~16 ms cold-call for the wasm runner on a fresh process; ~4 µs
+  amortised per call inside `denyx-mcp`); the pipe overhead is
+  <5 ms.
 - File reads through virtiofs (host's `~`): within ~10% of native.
 - Builds inside the VM: comparable to native macOS Rust builds for
   the same code (the kernel is Linux but the CPU is the same
@@ -266,7 +281,7 @@ limactl shell denyx -- bash -lc \
 The binary path doesn't change, so your Claude Code MCP config
 keeps working.
 
-To update the VM's base OS or bwrap version:
+To update the VM's base OS:
 
 ```sh
 limactl shell denyx -- bash -lc 'sudo apt-get update && sudo apt-get upgrade -y'
@@ -276,7 +291,9 @@ limactl shell denyx -- bash -lc 'sudo apt-get update && sudo apt-get upgrade -y'
 
 What you get with this setup:
 
-- ✅ Real OS-level isolation (bwrap + Linux namespaces).
+- ✅ VM-level isolation around the host process. The wasm sandbox
+  contains the Starlark interpreter on either side; the VM
+  additionally walls off the host kernel from the macOS host.
 - ✅ Same audit log, same policy file, same MCP surface as Linux.
 - ✅ No native macOS code paths to maintain in Denyx.
 - ✅ Future-proof — Lima sits on Apple's blessed
@@ -302,7 +319,7 @@ If those tradeoffs are unacceptable for your environment, see
 | **Lima**            | Yes (recommended)  | Default: smallest dependency footprint, OSS.     |
 | **Colima**          | Yes (Lima fork)    | If you also use Docker; Colima ships both.       |
 | **OrbStack**        | Yes (Lima-compatible) | Commercial; better UI; faster boot; $99/yr after trial. |
-| **Docker Desktop**  | Yes, via container | If your team already standardised on Docker. Build a Dockerfile that installs bwrap + Denyx; run `denyx-mcp` as a long-running container. |
+| **Docker Desktop**  | Yes, via container | If your team already standardised on Docker. Build a Dockerfile that installs Denyx; run `denyx-mcp` as a long-running container. |
 | **Multipass**       | Yes               | Canonical's tool; simpler setup than Lima but less flexible mounts. |
 | **Native Virtualization.framework integration** | Future (Denyx v0.2+) | When the project sees enough Mac demand to justify embedding the VM in the binary. |
 

@@ -561,18 +561,17 @@ Tell the user:
         and document the env var in the project README. Note:
         `.claude/settings.json` is still safe to commit because it
         doesn't reference the binary path.
-  - **Two sandbox layers, separately configurable.** With
-    `--sandbox auto` you already opted into Claude Code's own
-    OS-level sandbox (covers all built-in tools and any
-    subprocess they spawn). On top of that, Denyx has its own
-    `subprocess.sandbox = "bwrap"` mode that wraps every
-    `subprocess.exec` call from inside Starlark in a fresh
-    namespaced jail. They're complementary; running both at
-    once on Linux requires nested user namespaces, which is
-    fragile — pick one. For most workflows the Claude Code
-    sandbox is enough; reserve Denyx's bwrap mode for cases
-    where you want fine-grained per-call isolation of subprocess
-    invocations the agent makes from Starlark.
+  - **Sandbox layering.** With `--sandbox auto` you opted into
+    Claude Code v2's own OS-level sandbox stanza (Seatbelt on
+    macOS, bubblewrap on Linux/WSL2). That's Claude Code's
+    feature wrapping its own built-in tools. Denyx's primary
+    isolation is the wasm-sandboxed Starlark runner that ships
+    in `denyx-host` (default in v0.4.0+) — it contains the
+    Starlark interpreter, not the child processes a permitted
+    `subprocess.exec` spawns. The legacy
+    `[subprocess].sandbox = "bwrap"` field is deprecated in
+    v0.4.0; if you need kernel-level isolation of permitted
+    subprocesses, run inside a VM or container.
   - Audit logs default to `./.denyx/audit.jsonl` (set by
     host-config) and stay out of the policy's `write_allow`,
     so the agent can't tamper with the record. To rotate to
