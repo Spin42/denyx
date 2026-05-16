@@ -161,7 +161,27 @@ for crate in "${CRATES[@]}"; do
         echo "    OK: ${n_files} files would be packaged."
     else
         echo "==> Publishing ${crate}..."
-        cargo publish -p "${crate}" ${DRY_RUN} ${ALLOW_DIRTY} --locked
+        # Capture stdout+stderr to a tempfile while still streaming
+        # to the terminal, so we can re-run the script after a
+        # partial publish: if cargo refuses because the crate@version
+        # is already on crates.io, treat that as "skip and continue"
+        # rather than aborting. Any other non-zero status still
+        # aborts. Dry-run doesn't need this — `already exists` is a
+        # publish-only failure mode.
+        publish_log="$(mktemp)"
+        set +e
+        cargo publish -p "${crate}" ${DRY_RUN} ${ALLOW_DIRTY} --locked 2>&1 | tee "${publish_log}"
+        publish_status=${PIPESTATUS[0]}
+        set -e
+        if [[ ${publish_status} -ne 0 ]]; then
+            if grep -q "already exists on crates.io index" "${publish_log}"; then
+                echo "==> ${crate}: skipping (already published)."
+            else
+                rm -f "${publish_log}"
+                exit ${publish_status}
+            fi
+        fi
+        rm -f "${publish_log}"
     fi
 
     if [[ -z "${DRY_RUN}" && "${crate}" != "${CRATES[-1]}" ]]; then
