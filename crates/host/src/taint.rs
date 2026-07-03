@@ -85,7 +85,23 @@ const CHUNKING_MIN_LEN: usize = 8;
 /// run_exfil.py (40-char secret across ~250 bytes of output), density
 /// is ~0.16 — well above this bound. Random English text has density
 /// ~0.004 against a 40-char dashed/digit secret — well below.
-const CHUNKING_MIN_DENSITY: f64 = 0.05;
+///
+/// **This is a mitigation, not a boundary.** Round-3 pentest finding:
+/// for roughly-uniform per-character padding, density ≈ 1 / average
+/// gap between consecutive matched characters — so an attacker who
+/// pads every printed character with enough off-alphabet cover text
+/// can drive density arbitrarily close to zero. There is no fixed
+/// threshold a script with unbounded output length cannot eventually
+/// dilute below; lowering the constant only raises the amount of
+/// cover text (and therefore the script's output size and audit
+/// footprint) an attacker must produce. The value was moved from
+/// 0.05 (required ~20 bytes of padding per character) to 0.005
+/// (requires ~200 bytes per character — a 40-char credential now
+/// needs an 8 KB script output to smuggle past this layer alone,
+/// versus 800 bytes before). This is the same class of residual risk
+/// as the script-generated-crypto-key gap: documented, not claimed
+/// closed. See docs/security-pentest-r3-chunking-bypass.md.
+const CHUNKING_MIN_DENSITY: f64 = 0.005;
 
 /// One registered tainted value plus the mechanically-derived sibling
 /// forms we also redact.
@@ -422,13 +438,26 @@ pub fn redact(input: &str, taints: &[String]) -> String {
 }
 
 /// Per-line redaction with chunking detection. The standard substring
-/// scan runs first (catches reverse / hex / XOR / original); then a
-/// subsequence pass catches the case where a script prints the secret
-/// one character at a time interleaved with cover text — no per-line
-/// scrub would catch that, but the joined output reveals the pattern.
+/// scan runs first (catches reverse / hex / XOR / original as
+/// contiguous occurrences); then a subsequence pass catches the case
+/// where a script prints a tainted value one character at a time
+/// interleaved with cover text — no per-line scrub would catch that,
+/// but the joined output reveals the pattern.
 ///
-/// When chunking is detected for a registered taint, every line that
-/// participates in the matched subsequence is replaced with
+/// The subsequence pass runs against the ORIGINAL of each registered
+/// taint AND every mechanically-derived sibling transform (hex,
+/// reverse, XOR, base64, ROT-N) — not just the original. Round-3
+/// pentest finding: chunking only the original left every enumerated
+/// transform unprotected once printed non-contiguously (e.g. hex-
+/// encode the secret, then print one nibble per line — the per-line
+/// substring scrub never sees a full hex run, and the old chunking
+/// pass was only looking for the *original* secret's characters,
+/// which never appear in a hex stream). Checking every sibling closes
+/// that: whatever encoding the script picks from the enumerated set,
+/// chunking it is caught the same way as chunking the original.
+///
+/// When chunking is detected for a registered pattern, every line
+/// that participates in the matched subsequence is replaced with
 /// `[REDACTED]`. Lines that don't participate pass through unchanged
 /// so an unrelated `print("starting...")` still surfaces.
 pub fn redact_lines(lines: Vec<String>, registry: &TaintRegistry) -> Vec<String> {
@@ -438,18 +467,6 @@ pub fn redact_lines(lines: Vec<String>, registry: &TaintRegistry) -> Vec<String>
     let snapshot = registry.redaction_snapshot();
     // Phase 1: per-line substring (covers original + all transforms).
     let scrubbed: Vec<String> = lines.into_iter().map(|l| redact(&l, &snapshot)).collect();
-
-    // Phase 2: chunking detection across the joined output. We only
-    // need to test against the ORIGINAL of each registered taint —
-    // the transforms (reverse, hex, xor) are caught by per-line
-    // substring; chunking specifically targets char-by-char prints
-    // of the unmodified secret.
-    let originals: Vec<String> = registry
-        .inner
-        .borrow()
-        .iter()
-        .map(|e| e.original.clone())
-        .collect();
 
     // Precompute line spans in the joined buffer so we can map matched
     // byte indexes back to line indexes without rescanning.
@@ -463,8 +480,10 @@ pub fn redact_lines(lines: Vec<String>, registry: &TaintRegistry) -> Vec<String>
     }
     let joined = scrubbed.join("\n");
 
+    // Phase 2: chunking detection against every registered pattern —
+    // original AND transforms (see doc comment above for why).
     let mut clobber: Vec<bool> = vec![false; scrubbed.len()];
-    for taint in originals.iter() {
+    for taint in snapshot.iter() {
         if taint.len() < CHUNKING_MIN_LEN {
             continue;
         }
@@ -922,17 +941,20 @@ mod tests {
         //   not < threshold → mutant doesn't skip → wrong clobber.
         let r = TaintRegistry::default();
         // 12 distinctive chars; each appears once in the prose,
-        // spread across ~600 bytes.
+        // spread across a large filler span. Repeat counts scaled up
+        // from the original (2, 2, 2, 8) to stay well below the
+        // tightened CHUNKING_MIN_DENSITY (0.005, was 0.05 pre-
+        // round-3) — see that constant's doc comment.
         r.add("ABCDEFGHIJKL");
         let prose: Vec<String> = vec![
-            "Acrobats and bears (B) chase clowns (C) ".repeat(2),
-            "while Ducks (D) eat Eels (E) For Free (F) ".repeat(2),
-            "Generously Hosting Imps (I) and Jovial (J) Kids ".repeat(2),
-            "all Loving the show ".repeat(8),
+            "Acrobats and bears (B) chase clowns (C) ".repeat(40),
+            "while Ducks (D) eat Eels (E) For Free (F) ".repeat(40),
+            "Generously Hosting Imps (I) and Jovial (J) Kids ".repeat(40),
+            "all Loving the show ".repeat(160),
         ];
         // Compute expected total span.
         let total: usize = prose.iter().map(|s| s.len() + 1).sum();
-        // Sanity: span large enough that density 12/total < 0.05.
+        // Sanity: span large enough that density 12/total < threshold.
         assert!(
             12.0 / (total as f64) < CHUNKING_MIN_DENSITY,
             "test fixture must put us below the density threshold; \
@@ -952,33 +974,30 @@ mod tests {
 
     #[test]
     fn redact_lines_chunking_runs_at_exact_density_threshold() {
-        // Targets `< with <=` on line 480 (`if density <
-        // CHUNKING_MIN_DENSITY { continue; }`). At density EXACTLY
-        // 0.05 the original `<` is false (don't skip → clobber)
-        // while the mutant `<=` is true (skip → no clobber). So a
-        // test where matches.len() / span equals 0.05 EXACTLY
-        // catches this mutation.
+        // Targets `< with <=` on the `if density < CHUNKING_MIN_DENSITY
+        // { continue; }` check. At density EXACTLY CHUNKING_MIN_DENSITY
+        // the original `<` is false (don't skip → clobber) while the
+        // mutant `<=` is true (skip → no clobber). So a test where
+        // matches.len() / span equals the threshold EXACTLY catches
+        // this mutation.
         //
-        // Construction: 8 chars at positions 0 and 160 (span = 160)
-        // with 6 more at intermediate positions. matches.len() = 8,
-        // span = 160 - 0 = 160, density = 8 / 160 = 0.05 (which
-        // shares its IEEE-754 bit pattern with the literal 0.05f64
-        // because both come from the same division/representation
-        // path). Strict `<` rejects this → clobber. `<=` accepts →
-        // skip.
+        // The span is derived from the live constant (rather than a
+        // hardcoded literal) so this test keeps testing the exact
+        // boundary if CHUNKING_MIN_DENSITY is retuned again — see its
+        // doc comment for why round 3 lowered it from 0.05 to 0.005.
         let r = TaintRegistry::default();
         r.add("ABCDEFGH"); // 8 chars
 
-        // Place A..H at positions [0, 23, 46, 68, 91, 114, 137, 160]
-        // with 'z' filler in between. The exact intermediate
-        // positions don't matter for span/density — only the FIRST
-        // (0) and LAST (160) matter, plus the count (8).
-        let positions: [usize; 8] = [0, 23, 46, 68, 91, 114, 137, 160];
-        let chars: [char; 8] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
-        let total_len = 161;
-        let mut bytes = vec![b'z'; total_len];
-        for (i, &p) in positions.iter().enumerate() {
-            bytes[p] = chars[i] as u8;
+        let count = 8usize;
+        let span = (count as f64 / CHUNKING_MIN_DENSITY).round() as usize;
+        // Place A..H evenly across [0, span] with 'z' filler between
+        // (never in the secret) so subsequence_match lands exactly on
+        // these positions and first/last give byte-identical span.
+        let chars: [u8; 8] = *b"ABCDEFGH";
+        let mut bytes = vec![b'z'; span + 1];
+        for (i, &c) in chars.iter().enumerate() {
+            let pos = i * span / (count - 1);
+            bytes[pos] = c;
         }
         let line = String::from_utf8(bytes).unwrap();
         // Sanity: subsequence_match should land at exactly these
@@ -987,7 +1006,7 @@ mod tests {
         let out = redact_lines(prose, &r);
         assert!(
             out[0].contains("[REDACTED]"),
-            "exact-threshold density (0.05) MUST trigger chunking; \
+            "exact-threshold density MUST trigger chunking; \
              with `<=` mutant it skips, leaving prose unredacted. got: {:?}",
             out[0]
         );
