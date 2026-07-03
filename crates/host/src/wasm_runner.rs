@@ -45,7 +45,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use wasmtime::{Caller, Config, Engine, Extern, Linker, Module, Store};
+use wasmtime::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store};
 use wasmtime_wasi::p1::{add_to_linker_sync, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::WasiCtxBuilder;
@@ -256,7 +256,8 @@ impl WasmRunner {
                         .get_export("memory")
                         .and_then(Extern::into_memory)
                         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-                    let mut buf = vec![0u8; len as usize];
+                    let len = checked_guest_len(&memory, &caller, ptr, len, "host_print")?;
+                    let mut buf = vec![0u8; len];
                     memory.read(&caller, ptr as usize, &mut buf).map_err(|e| {
                         wasmtime::Error::msg(format!("host_print: memory read: {e}"))
                     })?;
@@ -294,7 +295,8 @@ impl WasmRunner {
                         .get_export("memory")
                         .and_then(Extern::into_memory)
                         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-                    let mut path_buf = vec![0u8; path_len as usize];
+                    let path_len = checked_guest_len(&memory, &caller, path_ptr, path_len, "path")?;
+                    let mut path_buf = vec![0u8; path_len];
                     memory
                         .read(&caller, path_ptr as usize, &mut path_buf)
                         .map_err(|e| {
@@ -608,7 +610,8 @@ impl WasmRunner {
                         .get_export("memory")
                         .and_then(Extern::into_memory)
                         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-                    let mut path_buf = vec![0u8; path_len as usize];
+                    let path_len = checked_guest_len(&memory, &caller, path_ptr, path_len, "path")?;
+                    let mut path_buf = vec![0u8; path_len];
                     memory
                         .read(&caller, path_ptr as usize, &mut path_buf)
                         .map_err(|e| {
@@ -622,7 +625,9 @@ impl WasmRunner {
                             )));
                         }
                     };
-                    let mut content_buf = vec![0u8; content_len as usize];
+                    let content_len =
+                        checked_guest_len(&memory, &caller, content_ptr, content_len, "content")?;
+                    let mut content_buf = vec![0u8; content_len];
                     memory
                         .read(&caller, content_ptr as usize, &mut content_buf)
                         .map_err(|e| {
@@ -768,7 +773,8 @@ impl WasmRunner {
                         .get_export("memory")
                         .and_then(Extern::into_memory)
                         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-                    let mut path_buf = vec![0u8; path_len as usize];
+                    let path_len = checked_guest_len(&memory, &caller, path_ptr, path_len, "path")?;
+                    let mut path_buf = vec![0u8; path_len];
                     memory
                         .read(&caller, path_ptr as usize, &mut path_buf)
                         .map_err(|e| {
@@ -922,7 +928,8 @@ impl WasmRunner {
                         .get_export("memory")
                         .and_then(Extern::into_memory)
                         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-                    let mut name_buf = vec![0u8; name_len as usize];
+                    let name_len = checked_guest_len(&memory, &caller, name_ptr, name_len, "name")?;
+                    let mut name_buf = vec![0u8; name_len];
                     memory
                         .read(&caller, name_ptr as usize, &mut name_buf)
                         .map_err(|e| {
@@ -1075,7 +1082,9 @@ impl WasmRunner {
                         .get_export("memory")
                         .and_then(Extern::into_memory)
                         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-                    let mut argv_buf = vec![0u8; argv_json_len as usize];
+                    let argv_json_len =
+                        checked_guest_len(&memory, &caller, argv_json_ptr, argv_json_len, "argv")?;
+                    let mut argv_buf = vec![0u8; argv_json_len];
                     memory
                         .read(&caller, argv_json_ptr as usize, &mut argv_buf)
                         .map_err(|e| {
@@ -1276,13 +1285,34 @@ impl WasmRunner {
                     //    returns the (name, value) pairs the child should
                     //    see, honouring `allow_vars` plus the local-only
                     //    overlay when the command is itself local-only.
-                    let mut cmd = std::process::Command::new(&argv[0]);
-                    cmd.args(&argv[1..]);
-                    cmd.env_clear();
-                    for (name, value) in subprocess_policy.subprocess_env(&argv[0]) {
-                        cmd.env(name, value);
-                    }
-                    let output = match cmd.output() {
+                    //    `[subprocess].sandbox = "bwrap"` mirrors the native
+                    //    Runner: bubblewrap builds a fresh namespaced jail
+                    //    per call (bind mounts derived from the policy,
+                    //    network namespace dropped when no HTTP verb is
+                    //    allowed), so a legitimately-allowed command can't
+                    //    reach paths or network the policy didn't grant it
+                    //    via ambient OS access. Without this branch that
+                    //    isolation was silently absent on the wasm path.
+                    let env_pairs = subprocess_policy.subprocess_env(&argv[0]);
+                    let output = match subprocess_policy.sandbox_mode() {
+                        denyx_policy::SandboxMode::None => {
+                            let mut cmd = std::process::Command::new(&argv[0]);
+                            cmd.args(&argv[1..]);
+                            cmd.env_clear();
+                            for (name, value) in &env_pairs {
+                                cmd.env(name, value);
+                            }
+                            cmd.output()
+                        }
+                        denyx_policy::SandboxMode::Bwrap => {
+                            let bwrap_argv = subprocess_policy.bwrap_argv(&argv, &env_pairs);
+                            let mut cmd = std::process::Command::new(&bwrap_argv[0]);
+                            cmd.args(&bwrap_argv[1..]);
+                            cmd.env_clear();
+                            cmd.output()
+                        }
+                    };
+                    let output = match output {
                         Ok(o) => o,
                         Err(e) => {
                             let step = caller
@@ -1388,21 +1418,47 @@ impl WasmRunner {
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
-                    if let Err(e) = http_get_policy.check_http_get(&url) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        http_get_audit.emit(AuditEvent::denied(
-                            &http_get_task_id,
-                            step,
-                            "net.http_get",
-                            &url,
-                            &format!("{e}"),
-                        ));
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
-                        return Err(wasmtime::Error::msg("net.http_get denied"));
+                    let parsed = match http_get_policy.check_http_get(&url) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_get_audit.emit(AuditEvent::denied(
+                                &http_get_task_id,
+                                step,
+                                "net.http_get",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_get denied"));
+                        }
+                    };
+                    // Hostname-based `[network].deny_ips` — a literal-IP URL is
+                    // already covered by check_http_get itself; this catches a
+                    // hostname that resolves to a denied IP (SSRF / cloud
+                    // metadata / RFC1918 targets reached via an allow-listed
+                    // hostname).
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_get_policy, "http_get", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_get_audit.emit(AuditEvent::denied(
+                                &http_get_task_id,
+                                step,
+                                "net.http_get",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_get denied"));
+                        }
                     }
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
@@ -1469,7 +1525,11 @@ impl WasmRunner {
                         }
                     }
 
-                    let body = match crate::no_redirect_agent().get(&url).call() {
+                    let body = match crate::no_redirect_agent()
+                        .get(&url)
+                        .timeout(http_get_policy.network_timeout())
+                        .call()
+                    {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
@@ -1551,21 +1611,42 @@ impl WasmRunner {
                     check_wasm_deadline(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
-                    if let Err(e) = http_post_policy.check_http_post(&url) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        http_post_audit.emit(AuditEvent::denied(
-                            &http_post_task_id,
-                            step,
-                            "net.http_post",
-                            &url,
-                            &format!("{e}"),
-                        ));
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
-                        return Err(wasmtime::Error::msg("net.http_post denied"));
+                    let parsed = match http_post_policy.check_http_post(&url) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_post_audit.emit(AuditEvent::denied(
+                                &http_post_task_id,
+                                step,
+                                "net.http_post",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_post denied"));
+                        }
+                    };
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_post_policy, "http_post", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_post_audit.emit(AuditEvent::denied(
+                                &http_post_task_id,
+                                step,
+                                "net.http_post",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_post denied"));
+                        }
                     }
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
@@ -1632,7 +1713,11 @@ impl WasmRunner {
                         }
                     }
 
-                    let body = match crate::no_redirect_agent().post(&url).send_string(&req_body) {
+                    let body = match crate::no_redirect_agent()
+                        .post(&url)
+                        .timeout(http_post_policy.network_timeout())
+                        .send_string(&req_body)
+                    {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
@@ -1714,21 +1799,42 @@ impl WasmRunner {
                     check_wasm_deadline(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
-                    if let Err(e) = http_put_policy.check_http_put(&url) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        http_put_audit.emit(AuditEvent::denied(
-                            &http_put_task_id,
-                            step,
-                            "net.http_put",
-                            &url,
-                            &format!("{e}"),
-                        ));
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
-                        return Err(wasmtime::Error::msg("net.http_put denied"));
+                    let parsed = match http_put_policy.check_http_put(&url) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_put_audit.emit(AuditEvent::denied(
+                                &http_put_task_id,
+                                step,
+                                "net.http_put",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_put denied"));
+                        }
+                    };
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_put_policy, "http_put", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_put_audit.emit(AuditEvent::denied(
+                                &http_put_task_id,
+                                step,
+                                "net.http_put",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_put denied"));
+                        }
                     }
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
@@ -1795,7 +1901,11 @@ impl WasmRunner {
                         }
                     }
 
-                    let body = match crate::no_redirect_agent().put(&url).send_string(&req_body) {
+                    let body = match crate::no_redirect_agent()
+                        .put(&url)
+                        .timeout(http_put_policy.network_timeout())
+                        .send_string(&req_body)
+                    {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
@@ -1877,21 +1987,42 @@ impl WasmRunner {
                     check_wasm_deadline(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
-                    if let Err(e) = http_patch_policy.check_http_patch(&url) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        http_patch_audit.emit(AuditEvent::denied(
-                            &http_patch_task_id,
-                            step,
-                            "net.http_patch",
-                            &url,
-                            &format!("{e}"),
-                        ));
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
-                        return Err(wasmtime::Error::msg("net.http_patch denied"));
+                    let parsed = match http_patch_policy.check_http_patch(&url) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_patch_audit.emit(AuditEvent::denied(
+                                &http_patch_task_id,
+                                step,
+                                "net.http_patch",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_patch denied"));
+                        }
+                    };
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_patch_policy, "http_patch", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_patch_audit.emit(AuditEvent::denied(
+                                &http_patch_task_id,
+                                step,
+                                "net.http_patch",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_patch denied"));
+                        }
                     }
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
@@ -1960,6 +2091,7 @@ impl WasmRunner {
 
                     let body = match crate::no_redirect_agent()
                         .request("PATCH", &url)
+                        .timeout(http_patch_policy.network_timeout())
                         .send_string(&req_body)
                     {
                         Ok(resp) => match crate::finalize_http_response(resp) {
@@ -2041,21 +2173,42 @@ impl WasmRunner {
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
-                    if let Err(e) = http_delete_policy.check_http_delete(&url) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        http_delete_audit.emit(AuditEvent::denied(
-                            &http_delete_task_id,
-                            step,
-                            "net.http_delete",
-                            &url,
-                            &format!("{e}"),
-                        ));
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
-                        return Err(wasmtime::Error::msg("net.http_delete denied"));
+                    let parsed = match http_delete_policy.check_http_delete(&url) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_delete_audit.emit(AuditEvent::denied(
+                                &http_delete_task_id,
+                                step,
+                                "net.http_delete",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_delete denied"));
+                        }
+                    };
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_delete_policy, "http_delete", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            http_delete_audit.emit(AuditEvent::denied(
+                                &http_delete_task_id,
+                                step,
+                                "net.http_delete",
+                                &url,
+                                &format!("{e}"),
+                            ));
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_delete denied"));
+                        }
                     }
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
@@ -2122,7 +2275,11 @@ impl WasmRunner {
                         }
                     }
 
-                    let body = match crate::no_redirect_agent().delete(&url).call() {
+                    let body = match crate::no_redirect_agent()
+                        .delete(&url)
+                        .timeout(http_delete_policy.network_timeout())
+                        .call()
+                    {
                         Ok(resp) => match crate::finalize_http_response(resp) {
                             Ok(s) => s,
                             Err(e) => {
@@ -2273,10 +2430,41 @@ impl WasmRunner {
     }
 }
 
-/// State carried by wasmtime's `Store<T>`. Holds the WASI ctx so WASI
-/// imports can find it, plus the print accumulator the `host_print`
-/// import writes into, plus a slot for import closures to surface a
-/// typed [`DenyxError`] across the trap boundary.
+/// Validate `(ptr, len)` against the guest's actual linear memory size
+/// *before* allocating a host-side buffer of that size. Every guest
+/// import takes `len` as a raw, attacker-controlled `u32` — without
+/// this check a script could pass a length up to `u32::MAX` and force
+/// a large host-heap allocation before the out-of-bounds `Memory::read`
+/// that would otherwise catch it ever runs. The guest's own memory is
+/// already bounded by wasmtime's configured limit, so capping the
+/// allocation to "at most what the guest actually has" closes the gap
+/// without adding a new policy knob.
+fn checked_guest_len(
+    memory: &Memory,
+    caller: &Caller<'_, WasmState>,
+    ptr: u32,
+    len: u32,
+    tag: &str,
+) -> Result<usize, wasmtime::Error> {
+    validate_guest_len(ptr, len, memory.data_size(caller) as u64)
+        .map_err(|msg| wasmtime::Error::msg(format!("{tag}: {msg}")))
+}
+
+/// Pure arithmetic core of [`checked_guest_len`], split out so the
+/// overflow/bounds logic can be unit-tested without spinning up a real
+/// wasmtime `Memory`.
+fn validate_guest_len(ptr: u32, len: u32, mem_size: u64) -> Result<usize, String> {
+    let end = (ptr as u64)
+        .checked_add(len as u64)
+        .ok_or_else(|| "ptr+len overflow".to_string())?;
+    if end > mem_size {
+        return Err(format!(
+            "(ptr={ptr}, len={len}) out of bounds of guest memory (size={mem_size})"
+        ));
+    }
+    Ok(len as usize)
+}
+
 /// Read a UTF-8 string from guest linear memory at `(ptr, len)`.
 /// Used by every import that takes a string arg. The `tag` is for
 /// the error message — "url", "path", "body" etc.
@@ -2290,7 +2478,8 @@ fn read_string_from_guest(
         .get_export("memory")
         .and_then(Extern::into_memory)
         .ok_or_else(|| wasmtime::Error::msg("guest missing `memory` export"))?;
-    let mut buf = vec![0u8; len as usize];
+    let len = checked_guest_len(&memory, caller, ptr, len, tag)?;
+    let mut buf = vec![0u8; len];
     memory
         .read(&*caller, ptr as usize, &mut buf)
         .map_err(|e| wasmtime::Error::msg(format!("read {tag}: {e}")))?;
@@ -2330,6 +2519,10 @@ fn write_string_to_guest(
     Ok(((dest_ptr as u64) << 32) | (bytes.len() as u64))
 }
 
+/// State carried by wasmtime's `Store<T>`. Holds the WASI ctx so WASI
+/// imports can find it, plus the print accumulator the `host_print`
+/// import writes into, plus a slot for import closures to surface a
+/// typed [`DenyxError`] across the trap boundary.
 struct WasmState {
     wasi: WasiP1Ctx,
     printed: Vec<String>,
@@ -3413,5 +3606,177 @@ fs.write({:?}, "hello")
             !printed.contains(&probe_name),
             "probe var leaked into child env: {printed:?}"
         );
+    }
+
+    // ---- Round 4 wasm-path regressions (dns_check, bwrap sandbox,
+    // HTTP timeout, guest-length bounds) — the wasm sandbox became
+    // the default execution path in v0.4.0 without carrying over
+    // four properties the in-process Runner already had. See
+    // docs/security-pentest-r4-wasm-path-regressions.md.
+
+    /// Mirrors `denyx_host::tests::host::dns_resolves_hostname_through_deny_cidr`
+    /// but against `WasmRunner`. `localhost` reliably resolves to
+    /// 127.0.0.1 / ::1 on every POSIX system, so this exercises the
+    /// full DNS-then-policy path without a real network round-trip.
+    #[test]
+    fn dns_resolves_hostname_through_deny_cidr() {
+        let policy_path = write_temp_policy(
+            "dns_deny_cidr",
+            "[network]\nhttp_get_allow = [\"localhost\"]\ndeny_ips = [\"127.0.0.0/8\", \"::1/128\"]\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let err = runner
+            .run("t1", r#"net.http_get("http://localhost:1/")"#, "test.star")
+            .expect_err("hostname resolving to a denied IP must be refused");
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(
+            matches!(err, DenyxError::Policy(_)),
+            "expected policy violation from DNS-resolved deny, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("127.") || msg.contains("::1"),
+            "expected resolved-IP diagnostic, got: {msg}"
+        );
+    }
+
+    /// A hung backend must not hang the wasm path indefinitely — the
+    /// per-request `.timeout(policy.network_timeout())` that the
+    /// in-process Runner always set was missing on every wasm HTTP
+    /// verb. Binds an ephemeral port, accepts but never responds,
+    /// and asserts the call fails within a few seconds against a
+    /// 1-second `[network].timeout_seconds`.
+    #[test]
+    fn http_get_aborts_within_timeout_against_unresponsive_backend() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let _bg = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in listener.incoming().flatten() {
+                held.push(conn);
+            }
+        });
+
+        let policy_path = write_temp_policy(
+            "http_timeout",
+            "[network]\nhttp_get_allow = [\"127.0.0.1\"]\ntimeout_seconds = 1\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src = format!(r#"net.http_get("http://127.0.0.1:{port}/never-responds")"#);
+
+        let started = std::time::Instant::now();
+        let err = runner
+            .run("t1", &src, "test.star")
+            .expect_err("unresponsive backend must not hang forever");
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_file(&policy_path);
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "timeout should fire within ~1s; took {elapsed:?}"
+        );
+        assert!(
+            !err.to_string().is_empty(),
+            "expected an error message, got empty: {err:?}"
+        );
+    }
+
+    /// `[subprocess].sandbox = "bwrap"` must be honored on the wasm
+    /// path exactly as it is on the native Runner: a policy that
+    /// permits a command AND (accidentally or not) allow-lists a
+    /// host-only path must still have that path hidden inside the
+    /// sandbox, because the jail — not the argv path-gate — is what's
+    /// under test here. Skips cleanly where bubblewrap can't run
+    /// (e.g. restricted CI runners without user namespaces).
+    #[test]
+    fn bwrap_sandbox_hides_host_only_path_even_when_argv_gate_allows_it() {
+        fn bwrap_works() -> bool {
+            std::process::Command::new("bwrap")
+                .args([
+                    "--ro-bind",
+                    "/usr",
+                    "/usr",
+                    "--ro-bind",
+                    "/bin",
+                    "/bin",
+                    "--unshare-all",
+                    "--",
+                    "/bin/true",
+                ])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        if !bwrap_works() {
+            eprintln!(
+                "skipping: bwrap is not installed or cannot create a working \
+                 sandbox in this environment"
+            );
+            return;
+        }
+
+        let policy_path = write_temp_policy(
+            "bwrap_sandbox",
+            "[filesystem]\nread_allow = [\"/etc/**\"]\n\n[environment]\nallow_vars = [\"PATH\"]\n\n[subprocess]\nallow_commands = [\"cat\"]\nsandbox = \"bwrap\"\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        // The argv path-gate accepts /etc/<file> because read_allow
+        // covers it; the sandbox doesn't bind-mount /etc at all, so
+        // the child fails to find a path that's host-real but not
+        // jail-real. Without the bwrap branch wired into WasmRunner,
+        // this would succeed (real ambient filesystem access).
+        let result = runner.run(
+            "t1",
+            r#"subprocess.exec(["cat", "/etc/denyx_does_not_exist_in_sandbox.txt"])"#,
+            "test.star",
+        );
+        let _ = std::fs::remove_file(&policy_path);
+        assert!(
+            result.is_err(),
+            "subprocess inside the wasm-path bwrap sandbox should fail to find a host-only path"
+        );
+    }
+
+    /// Pure arithmetic unit tests for `validate_guest_len`, the core
+    /// of the guest-length bounds check every `(ptr, len)` guest
+    /// import argument goes through before a host-side `vec![0u8; len]`
+    /// allocation. Exercises the property directly rather than via a
+    /// live wasmtime `Memory`, since a legitimate Starlark script
+    /// can't fabricate an out-of-bounds `(ptr, len)` pair itself — the
+    /// compiled interpreter always passes the real length of the
+    /// string it's marshalling. The defect this closes is a
+    /// hypothetical corrupted/malicious raw guest module calling a
+    /// host import directly with a length that doesn't match its
+    /// actual memory size.
+    #[test]
+    fn validate_guest_len_accepts_in_bounds_request() {
+        assert_eq!(validate_guest_len(0, 100, 65536).unwrap(), 100);
+        assert_eq!(validate_guest_len(65436, 100, 65536).unwrap(), 100);
+    }
+
+    #[test]
+    fn validate_guest_len_rejects_length_past_end_of_memory() {
+        assert!(validate_guest_len(0, 65537, 65536).is_err());
+        assert!(validate_guest_len(65437, 100, 65536).is_err());
+    }
+
+    #[test]
+    fn validate_guest_len_rejects_max_u32_length_against_small_memory() {
+        // The exact shape of the pre-fix bug: a script-controlled
+        // `len` near `u32::MAX` against a guest that only actually has
+        // one 64KiB page of linear memory.
+        assert!(validate_guest_len(0, u32::MAX, 65536).is_err());
+    }
+
+    #[test]
+    fn validate_guest_len_rejects_max_ptr_and_len_against_small_memory() {
+        // ptr and len are both u32, promoted to u64 before adding, so
+        // the sum can never itself overflow u64 — this exercises the
+        // realistic failure mode instead (huge ptr+len against a
+        // guest that only has a small amount of actual memory).
+        assert!(validate_guest_len(u32::MAX, u32::MAX, 65536).is_err());
     }
 }
