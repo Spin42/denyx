@@ -534,8 +534,14 @@ fn resolve_host_to_ips(host: &str) -> Vec<IpAddr> {
 /// Run each resolved IP for `host` through `policy.check_resolved_ip`
 /// and return the first denial. No-op when `host` is itself an IP
 /// literal (the policy's URL-level check already covered it).
-fn dns_check(
-    ctx: &HostCtx,
+///
+/// Shared by both the native `Runner` and the `WasmRunner` — this is
+/// the hostname-based half of `[network].deny_ips` (a literal-IP URL
+/// is caught by `check_http_*` itself). A resolver used by only one
+/// of the two execution paths is exactly the kind of divergence that
+/// let this check quietly not apply on the wasm default in v0.4.0.
+pub(crate) fn dns_check(
+    policy: &Policy,
     action: &'static str,
     host: &str,
 ) -> Result<(), denyx_policy::PolicyError> {
@@ -543,7 +549,7 @@ fn dns_check(
         return Ok(());
     }
     for ip in resolve_host_to_ips(host) {
-        ctx.policy.check_resolved_ip(action, host, ip)?;
+        policy.check_resolved_ip(action, host, ip)?;
     }
     Ok(())
 }
@@ -927,7 +933,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         match ctx.policy.check_http_get(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
-                    if let Err(e) = dns_check(ctx, "http_get", host) {
+                    if let Err(e) = dns_check(&ctx.policy, "http_get", host) {
                         let msg = e.to_string();
                         ctx.emit(AuditEvent::denied(
                             &ctx.task_id,
@@ -997,7 +1003,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         match ctx.policy.check_http_post(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
-                    if let Err(e) = dns_check(ctx, "http_post", host) {
+                    if let Err(e) = dns_check(&ctx.policy, "http_post", host) {
                         let msg = e.to_string();
                         ctx.emit(AuditEvent::denied(
                             &ctx.task_id,
@@ -1070,7 +1076,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         match ctx.policy.check_http_put(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
-                    if let Err(e) = dns_check(ctx, "http_put", host) {
+                    if let Err(e) = dns_check(&ctx.policy, "http_put", host) {
                         let msg = e.to_string();
                         ctx.emit(AuditEvent::denied(
                             &ctx.task_id,
@@ -1143,7 +1149,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         match ctx.policy.check_http_patch(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
-                    if let Err(e) = dns_check(ctx, "http_patch", host) {
+                    if let Err(e) = dns_check(&ctx.policy, "http_patch", host) {
                         let msg = e.to_string();
                         ctx.emit(AuditEvent::denied(
                             &ctx.task_id,
@@ -1215,7 +1221,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         match ctx.policy.check_http_delete(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
-                    if let Err(e) = dns_check(ctx, "http_delete", host) {
+                    if let Err(e) = dns_check(&ctx.policy, "http_delete", host) {
                         let msg = e.to_string();
                         ctx.emit(AuditEvent::denied(
                             &ctx.task_id,
