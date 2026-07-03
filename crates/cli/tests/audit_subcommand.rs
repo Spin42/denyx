@@ -64,6 +64,79 @@ fn audit_verify_clean_chain_succeeds() {
 }
 
 #[test]
+fn audit_verify_min_seq_passes_when_met_and_fails_when_truncated() {
+    // Round-4 pentest finding: verify_chain alone can't distinguish
+    // an honestly-short log from one whose tail was truncated (both
+    // are internally consistent). --min-seq is the mitigation: an
+    // operator who remembers the log's previous length can catch a
+    // regression.
+    let dir = fresh_dir("verify_min_seq");
+    let log = dir.join("audit.jsonl");
+    let l1 = serde_json::json!({
+        "ts": "2026-05-05T00:00:00Z",
+        "task_id": "t", "step": 1, "capability": "env.read",
+        "status": "allowed", "detail": {"name": "PATH", "error": null},
+        "denyx_seq": 1,
+        "denyx_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    });
+    let l1s = serde_json::to_string(&l1).unwrap();
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(l1s.as_bytes());
+    let l1_hex: String = h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let l2 = serde_json::json!({
+        "ts": "2026-05-05T00:00:01Z",
+        "task_id": "t", "step": 2, "capability": "env.read",
+        "status": "allowed", "detail": {"name": "USER", "error": null},
+        "denyx_seq": 2,
+        "denyx_prev_hash": l1_hex,
+    });
+    let l2s = serde_json::to_string(&l2).unwrap();
+
+    // Full 2-line log: --min-seq 2 must pass.
+    std::fs::write(&log, format!("{l1s}\n{l2s}\n")).unwrap();
+    let out_full = Command::new(BIN)
+        .args(["audit", "verify", "--min-seq", "2"])
+        .arg(&log)
+        .output()
+        .expect("spawn");
+    assert!(
+        out_full.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_full.stderr)
+    );
+
+    // Truncated to just the first line (simulating a deleted last
+    // event): internally valid on its own, but now below the
+    // previously-recorded minimum of 2.
+    let truncated = dir.join("audit_truncated.jsonl");
+    std::fs::write(&truncated, format!("{l1s}\n")).unwrap();
+    let out_truncated_no_check = Command::new(BIN)
+        .args(["audit", "verify"])
+        .arg(&truncated)
+        .output()
+        .expect("spawn");
+    assert!(
+        out_truncated_no_check.status.success(),
+        "a truncated-but-internally-consistent log must still report \
+         valid without --min-seq — that's the whole point of the finding"
+    );
+
+    let out_truncated_checked = Command::new(BIN)
+        .args(["audit", "verify", "--min-seq", "2"])
+        .arg(&truncated)
+        .output()
+        .expect("spawn");
+    assert!(
+        !out_truncated_checked.status.success(),
+        "--min-seq 2 must fail against a log truncated down to seq 1"
+    );
+    let stderr = String::from_utf8_lossy(&out_truncated_checked.stderr);
+    assert!(stderr.contains("BELOW"), "stderr: {stderr}");
+}
+
+#[test]
 fn audit_verify_tampered_log_fails_with_specific_line_number() {
     let dir = fresh_dir("verify_fail");
     let log = dir.join("audit.jsonl");

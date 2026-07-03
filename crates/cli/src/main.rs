@@ -93,6 +93,27 @@ enum AuditCommand {
 struct AuditTargetArgs {
     /// Path to the JSONL audit log to verify.
     log: PathBuf,
+
+    /// Fail verification if the log's last `denyx_seq` is below this
+    /// value. The SHA-256 chain alone detects in-place tampering and
+    /// removal of a line from the MIDDLE of the log (both break the
+    /// chain and show up as a failure) — but truncating the TAIL
+    /// (deleting the most recent N events) produces a shorter, fully
+    /// self-consistent chain that `verify_chain` cannot distinguish
+    /// from an honestly-shorter log. `--min-seq` closes that only
+    /// when paired with external monitoring that remembers the
+    /// last-seen count (e.g. a CI step or cron job persisting the
+    /// previous `last_seq` and passing it back in on the next run).
+    /// It is a mitigation, not a boundary: an attacker with full
+    /// local file access can still delete the whole file or replace
+    /// it with a forged one at a plausible sequence number. The
+    /// actual boundary against a fully compromised local machine is
+    /// pushing events to a remote server in real time
+    /// (`HttpAuditSink` / `--audit-url`, see `11-denyx-for-teams.md`)
+    /// — a local truncation can't retroactively un-send an event
+    /// that already left the machine.
+    #[arg(long)]
+    min_seq: Option<u64>,
 }
 
 #[derive(Parser, Debug)]
@@ -964,6 +985,19 @@ fn emit_dry_run(policy: &Policy, opts: &Opts, _existing: Existing, no_mcp: bool,
 fn audit_verify(args: AuditTargetArgs) -> Result<(), CliError> {
     let report = denyx_host::verify_chain(&args.log).map_err(CliError::Io)?;
     if report.ok() {
+        if let Some(min_seq) = args.min_seq {
+            if report.last_seq < min_seq {
+                return Err(CliError::Other(format!(
+                    "audit log {:?} chain is internally valid but its last seq ({}) is \
+                     BELOW the expected minimum ({min_seq}) — this is consistent with the \
+                     tail of the log having been truncated (the most recent entries \
+                     deleted) since the minimum was last recorded. A valid chain alone \
+                     cannot rule this out; --min-seq exists specifically to catch it \
+                     when paired with an externally-remembered count.",
+                    args.log, report.last_seq
+                )));
+            }
+        }
         println!(
             "OK: {} entries, chain valid (last seq = {}).",
             report.total_lines, report.last_seq

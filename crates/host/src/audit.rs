@@ -413,23 +413,29 @@ impl AuditSink for HttpAuditSink {
 /// any line whose `denyx_prev_hash` doesn't match the SHA-256 of
 /// the previous line (or whose `denyx_seq` isn't monotonic +1).
 ///
-/// What this catches:
+/// What this catches on its own, from the file's contents alone:
 /// - In-place mutation of any line ⇒ chain breaks at the next line.
 /// - Insertion of a line in the middle ⇒ subsequent prev_hashes mismatch.
-/// - Removal of a line in the middle ⇒ subsequent prev_hashes mismatch.
-/// - Truncation past a sequence number ⇒ if the operator has an
-///   external reference for the expected last seq (or the
-///   resume_from_tail behavior on a later run produces a
-///   detectable jump), tamper is observable.
+/// - Removal of a line in the middle ⇒ subsequent prev_hashes mismatch
+///   (shows up as a `denyx_seq` jump).
 ///
-/// What this does NOT catch:
-/// - Wholesale replacement with a fresh, internally-consistent
-///   chain. Defense: forward to syslog / immutable storage; or
-///   store the expected last seq externally.
+/// What this does NOT catch from the file's contents alone (round-4
+/// pentest finding, confirmed live: deleting the last N lines of an
+/// otherwise-valid chain produces a shorter chain that still reports
+/// "chain valid" — nothing in the remaining bytes proves more events
+/// once existed):
+/// - Truncation of the TAIL (deleting the most recent events).
+/// - Wholesale replacement with a fresh, internally-consistent chain.
 /// - An attacker with read access who can compute valid hash-chain
-///   prev_hash values for fake appends. Defense: ensure the agent
-///   can't read the audit log (the protected-path guard refuses
-///   any policy that grants read access).
+///   prev_hash values for fake appends (defense: ensure the agent
+///   can't read the audit log — the protected-path guard refuses any
+///   policy that grants read access).
+///
+/// Closing the tail-truncation gap requires an external reference for
+/// the expected last seq — `denyx audit verify --min-seq N` accepts
+/// one (see its CLI help for what "external" has to mean for this to
+/// actually work: monitoring that remembers the previous last_seq, or
+/// a remote `HttpAuditSink` push that already has its own copy).
 pub fn verify_chain(path: &Path) -> std::io::Result<VerifyReport> {
     let content = std::fs::read_to_string(path)?;
     let mut failures = Vec::new();
