@@ -57,6 +57,23 @@ deny = [
     "/etc/shadow",
     "/etc/sudoers",
     "/etc/sudoers.d/**",
+    # Linux virtual filesystems. `/proc/self/environ` (and
+    # `/proc/<pid>/environ` for any process the operator's user can
+    # read) is a "file" containing that process's ENTIRE environment,
+    # unfiltered by [environment].allow_vars / deny_vars — a script
+    # with a `read_allow` broad enough to reach it (e.g. an operator
+    # who wants the agent to introspect its own resource usage and
+    # writes `read_allow = ["/proc/**"]`) can read every env var the
+    # denyx process inherited, including ones never declared allowed
+    # and ones deny_vars is supposed to protect. `/proc/self/cmdline`
+    # and `/proc/self/maps` leak invocation arguments and memory
+    # layout the same way `/etc/shadow` leaks credentials — same
+    # belt-and-suspenders reasoning applies. `/sys` and `/dev` expose
+    # kernel/device state no Starlark script has a legitimate reason
+    # to read directly.
+    "/proc/**",
+    "/sys/**",
+    "/dev/**",
 ]
 
 [network]

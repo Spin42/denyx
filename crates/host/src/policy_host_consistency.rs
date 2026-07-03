@@ -477,6 +477,15 @@ fn classify_overbroad(pattern: &str) -> Option<BroadGlobRisk> {
         "/Users",
         "/Users/",
         "/Users/**",
+        "/proc",
+        "/proc/",
+        "/proc/**",
+        "/sys",
+        "/sys/",
+        "/sys/**",
+        "/dev",
+        "/dev/",
+        "/dev/**",
     ];
     if BROAD_SYSTEM_DIRS.contains(&p) {
         return Some(BroadGlobRisk::SystemDirectory);
@@ -1332,12 +1341,32 @@ write_allow = ["/var/log/myapp/**"]
             "/opt/**",
             "/home/**",
             "/Users/**",
+            "/proc/**",
+            "/sys/**",
+            "/dev/**",
         ] {
             assert_eq!(
                 classify_overbroad(p),
                 Some(BroadGlobRisk::SystemDirectory),
                 "expected {p:?} to be SystemDirectory"
             );
+        }
+    }
+
+    #[test]
+    fn classify_overbroad_flags_proc_sys_dev() {
+        // Round-4 pentest finding: `read_allow = ["/proc/**"]` let a
+        // script read `/proc/self/environ` — the process's entire
+        // environment, bypassing [environment].allow_vars/deny_vars
+        // entirely. Unlike /tmp, /proc, /sys, and /dev have no
+        // legitimate Starlark use case at all, but they're grouped
+        // with the "sometimes legitimate" SystemDirectory tier here
+        // because the actual security property is enforced by the
+        // secure-defaults deny list (see presets.rs), not by this
+        // doctor heads-up — this check exists so an operator notices
+        // even on a non-secure-defaults-inheriting policy.
+        for p in ["/proc/**", "/sys/**", "/dev/**"] {
+            assert_eq!(classify_overbroad(p), Some(BroadGlobRisk::SystemDirectory));
         }
     }
 

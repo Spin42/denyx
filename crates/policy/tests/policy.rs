@@ -608,6 +608,35 @@ allow = ["fs.read", "fs.write"]
 }
 
 #[test]
+fn inherits_secure_defaults_denies_proc_sys_dev_even_with_broad_read_allow() {
+    // Round-4 pentest finding: /proc/self/environ is a "file"
+    // containing the process's entire environment, unfiltered by
+    // [environment].allow_vars/deny_vars. An operator with a
+    // read_allow broad enough to reach /proc (e.g. wanting the agent
+    // to introspect its own resource usage) previously had no
+    // defense-in-depth backstop the way /etc/shadow already had one.
+    let user = r#"
+inherits = "secure-defaults"
+
+[filesystem]
+read_allow = ["/proc/**", "/sys/**", "/dev/**"]
+
+[functions]
+allow = ["fs.read"]
+"#;
+    let file = PolicyFile::from_toml_str(user)
+        .unwrap()
+        .resolve_inheritance()
+        .unwrap();
+    let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+
+    assert!(p.check_fs_read(Path::new("/proc/self/environ")).is_err());
+    assert!(p.check_fs_read(Path::new("/proc/1/environ")).is_err());
+    assert!(p.check_fs_read(Path::new("/sys/kernel/debug")).is_err());
+    assert!(p.check_fs_read(Path::new("/dev/mem")).is_err());
+}
+
+#[test]
 fn user_extends_preset_deny_lists() {
     let user = r#"
 inherits = "secure-defaults"
