@@ -219,8 +219,14 @@ deny       = ["/etc/passwd"]
     // Empty argv: ok.
     assert!(p.check_subprocess_argv_paths(&[]).is_ok());
 
-    // argv0 itself never gets the path-gate (it's just the binary name).
+    // Round-3 pentest fix: argv[0] IS now path-gated when it looks
+    // like a path, exactly like every other argv element. Before the
+    // fix this returned Ok — a path-shaped argv[0] was never checked
+    // against [filesystem] at all, so any executable whose basename
+    // matched an allowed command name could run regardless of where
+    // it actually lived. A path-shaped argv[0] matching
+    // [filesystem].deny must now be rejected too.
     assert!(p
         .check_subprocess_argv_paths(&argv(&["/etc/passwd"]))
-        .is_ok());
+        .is_err());
 }

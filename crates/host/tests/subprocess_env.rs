@@ -171,11 +171,31 @@ fn empty_allow_vars_means_empty_child_env() {
     // The subprocess must be runnable when its argv[0] is an
     // absolute path (so PATH lookup isn't needed), even with NO
     // allow_vars — which produces a fully empty child env.
-    let toml = r#"
+    //
+    // Round-3 pentest fix: a path-shaped argv[0] is now path-gated
+    // the same as any other argv path element (previously only
+    // argv[1..] was checked, which let a script point argv[0] at an
+    // arbitrary executable outside every [filesystem] allow list as
+    // long as its basename matched an allowed command). Pinning a
+    // full path in [subprocess].allow_commands now also requires
+    // that path to be covered by [filesystem].read_allow — and the
+    // gate checks the CANONICALIZED path (`/bin/sh` is a symlink to
+    // e.g. `/usr/bin/dash` on this system), so the test resolves it
+    // the same way to stay portable.
+    let sh_real = std::fs::canonicalize("/bin/sh")
+        .unwrap_or_else(|_| PathBuf::from("/bin/sh"))
+        .to_string_lossy()
+        .to_string();
+    let toml = format!(
+        r#"
+[filesystem]
+read_allow = ["/bin/sh", "{sh_real}"]
+
 [subprocess]
 allow_commands = ["/bin/sh"]
-"#;
-    let runner = runner_for(toml);
+"#
+    );
+    let runner = runner_for(&toml);
     // /bin/sh -c "echo HOME=$HOME" — HOME isn't in allow_vars so it
     // should be absent (hence "HOME=" with nothing after).
     let src = r#"out = subprocess.exec(["/bin/sh", "-c", "echo HOME=$HOME"])

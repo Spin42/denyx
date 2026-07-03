@@ -148,8 +148,69 @@ fn cidr_blocks_rfc1918_range() {
 #[test]
 fn literal_ip_in_deny_ips_works() {
     let p = cidr_policy();
-    assert!(p.check_http_get("https://127.0.0.1/").is_err());
-    assert!(p.check_http_get("https://[::1]/").is_err());
+    let err_v4 = p
+        .check_http_get("https://127.0.0.1/")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err_v4.contains("deny_ips"),
+        "expected a deny_ips rejection, got: {err_v4}"
+    );
+    let err_v6 = p.check_http_get("https://[::1]/").unwrap_err().to_string();
+    assert!(
+        err_v6.contains("deny_ips"),
+        "expected a deny_ips rejection, got: {err_v6}"
+    );
+}
+
+#[test]
+fn ipv6_literal_cidr_deny_fires_even_with_a_wildcard_allow_list() {
+    // Round-4 pentest finding: `check_http` used to re-parse
+    // `Url::host_str()` (which always brackets IPv6 literals, e.g.
+    // "[::1]") as an `IpAddr`, which always fails to parse — so the
+    // CIDR-aware deny_ips check silently never ran for ANY IPv6
+    // literal URL. `literal_ip_in_deny_ips_works` above didn't catch
+    // this because its narrow `http_get_allow = ["api.github.com"]`
+    // rejects the bracketed host string for an unrelated reason
+    // (not in the allow list), masking the missing CIDR check. A
+    // wildcard allow-list — entirely plausible, e.g. an operator
+    // building a general-purpose HTTP proxy tool — removes that
+    // accidental cover and exposes the real gap: every RFC1918 /
+    // loopback / link-local / ULA IPv6 address in `deny_ips` was
+    // reachable by simply writing it as a literal IPv6 URL.
+    let toml = r#"
+[network]
+http_get_allow = ["*"]
+deny_ips = [
+    "169.254.0.0/16",
+    "127.0.0.0/8",
+    "::1/128",
+    "fc00::/7",
+]
+
+[functions]
+allow = ["net.http_get"]
+"#;
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+
+    for url in [
+        "https://[::1]/",
+        "https://[fc00::1]/",
+        "https://[::ffff:169.254.169.254]/latest/meta-data/",
+        "https://[::ffff:127.0.0.1]/",
+    ] {
+        match p.check_http_get(url) {
+            Ok(_) => panic!("expected {url} to be denied by deny_ips"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("deny_ips"),
+                    "expected a deny_ips rejection for {url}, got: {msg}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -210,6 +271,41 @@ fn subprocess_command_deny_wins() {
     assert!(p.check_subprocess_command("rm").is_err());
     assert!(p.check_subprocess_command("/bin/rm").is_err());
     assert!(p.check_subprocess_command("dd").is_err());
+}
+
+#[test]
+fn subprocess_command_full_path_deny_blocks_bare_name_bypass() {
+    // Round-3 pentest finding: a full-path deny_commands entry used
+    // to be matched by exact string equality only, so a bare-name
+    // invocation of the SAME binary (resolved via $PATH at exec time)
+    // sailed straight past it. deny_commands is the safe direction to
+    // over-match on basename — allow_commands intentionally is not.
+    let p = build(
+        r#"
+[subprocess]
+allow_commands = ["cat"]
+deny_commands  = ["/usr/bin/cat"]
+"#,
+    );
+    assert!(
+        p.check_subprocess_command("/usr/bin/cat").is_err(),
+        "exact path match must still deny"
+    );
+    assert!(
+        p.check_subprocess_command("cat").is_err(),
+        "bare-name invocation of the same basename must ALSO be denied, \
+         even though allow_commands separately permits bare \"cat\" — \
+         deny must win regardless of which spelling reaches the same binary"
+    );
+    assert!(
+        p.check_subprocess_command("/opt/other/cat").is_err(),
+        "a different full path with the same basename must also be denied"
+    );
+}
+
+fn build(toml: &str) -> Policy {
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    Policy::from_file(file, PathBuf::from("/work")).unwrap()
 }
 
 #[test]
@@ -286,6 +382,46 @@ fn deny_args_command_with_no_entry_is_allowed() {
 }
 
 #[test]
+fn deny_args_full_path_key_also_catches_bare_name_invocation() {
+    // Round-4 pentest finding: a full-path deny_args key (e.g. an
+    // operator pinning `"/usr/bin/git"` specifically) used to be
+    // matched by exact key lookup only — a bare-name invocation of
+    // the SAME binary (`"git"`, resolved via $PATH) never collided
+    // with that key textually, so the pattern was silently skipped.
+    // Mirrors the round-3 fix to deny_commands: deny-side lookups
+    // should match by basename in both directions.
+    let toml = r#"
+[subprocess]
+allow_commands = ["git"]
+
+[subprocess.deny_args]
+"/usr/bin/git" = ["push --force"]
+"#;
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+
+    assert!(
+        p.check_subprocess_args(&argv(&["/usr/bin/git", "push", "--force"]))
+            .is_err(),
+        "exact full-path invocation must still be denied"
+    );
+    assert!(
+        p.check_subprocess_args(&argv(&["git", "push", "--force"]))
+            .is_err(),
+        "bare-name invocation of the same binary must ALSO be denied"
+    );
+    assert!(
+        p.check_subprocess_args(&argv(&["/opt/other/git", "push", "--force"]))
+            .is_err(),
+        "a different full path with the same basename must also be denied"
+    );
+    assert!(
+        p.check_subprocess_args(&argv(&["git", "log"])).is_ok(),
+        "an unrelated argument must still be allowed"
+    );
+}
+
+#[test]
 fn deny_args_empty_argv_is_noop() {
     let p = deny_args_policy();
     assert!(p.check_subprocess_args(&[]).is_ok());
@@ -351,6 +487,34 @@ fn approval_args_returns_none_when_no_match() {
     assert!(p
         .subprocess_argv_requires_approval(&argv(&["git", "log", "--oneline"]))
         .is_none());
+}
+
+#[test]
+fn approval_args_full_path_key_also_catches_bare_name_invocation() {
+    // Round-4 pentest finding: same asymmetry as deny_args — a
+    // full-path requires_approval_args key used to be matched by
+    // exact key lookup only, so a bare-name invocation of the same
+    // binary silently skipped the human-approval prompt entirely.
+    let toml = r#"
+[subprocess]
+allow_commands = ["git"]
+
+[subprocess.requires_approval_args]
+"/usr/bin/git" = ["push --force"]
+"#;
+    let file = PolicyFile::from_toml_str(toml).unwrap();
+    let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
+
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["/usr/bin/git", "push", "--force"])),
+        Some("push --force"),
+        "exact full-path invocation must still require approval"
+    );
+    assert_eq!(
+        p.subprocess_argv_requires_approval(&argv(&["git", "push", "--force"])),
+        Some("push --force"),
+        "bare-name invocation of the same binary must ALSO require approval"
+    );
 }
 
 #[test]
@@ -1129,4 +1293,34 @@ rails = ["db:drop"]
     assert!(git_args.contains(&"reset --hard".to_string()));
     let rails_args = merged.subprocess.deny_args.get("rails").unwrap();
     assert!(rails_args.contains(&"db:drop".to_string()));
+}
+
+#[test]
+fn check_resolved_ip_catches_ipv4_mapped_ipv6_form_of_a_denied_ip() {
+    // Round-4 pentest finding: ::ffff:169.254.169.254 is the
+    // IPv4-mapped IPv6 representation of 169.254.169.254 (the IMDS
+    // metadata IP, denied via the IPv4 CIDR 169.254.0.0/16). Before
+    // the fix, a hostname whose AAAA record resolved to this literal
+    // sailed past the deny list entirely: ipnet::IpNet::contains()
+    // treats V4 and V6 as separate address families with no
+    // normalization, so an Ipv4Net never matches a V6-typed IpAddr
+    // even when it carries the same host. check_resolved_ip now
+    // normalizes an IPv4-mapped V6 address to its V4 form before
+    // matching.
+    let p = cidr_policy();
+    let mapped: std::net::IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+    assert!(p
+        .check_resolved_ip("http_get", "evil.example.com", mapped)
+        .is_err());
+
+    let mapped_rfc1918: std::net::IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+    assert!(p
+        .check_resolved_ip("http_get", "evil.example.com", mapped_rfc1918)
+        .is_err());
+
+    // A genuinely non-mapped, non-denied V6 address must still pass.
+    let benign_v6: std::net::IpAddr = "2606:4700:4700::1111".parse().unwrap();
+    assert!(p
+        .check_resolved_ip("http_get", "one.one.one.one", benign_v6)
+        .is_ok());
 }

@@ -779,10 +779,13 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
             ctx.capture(CapturedKind::Policy, &msg);
             return Err(e.into());
         }
-        // Path-gate every argv element that looks like a path — closes
-        // the "cat /etc/passwd" loophole where an allowed binary could
-        // be used to reach files the script itself couldn't reach via
-        // fs.read/fs.write.
+        // Path-gate every argv element that looks like a path,
+        // INCLUDING argv[0] itself — closes both the "cat /etc/passwd"
+        // loophole (an allowed binary reaching files the script
+        // couldn't via fs.read/fs.write) and the round-3 pentest
+        // finding where a path-shaped argv[0] (e.g.
+        // "/tmp/attacker/cat") matched `allow_commands` on basename
+        // alone and executed an arbitrary file.
         if let Err(e) = ctx.policy.check_subprocess_argv_paths(&argv) {
             let msg = e.to_string();
             ctx.emit(AuditEvent::denied(

@@ -99,6 +99,32 @@ local_only_commands  = ["printf"]
 }
 
 #[test]
+fn subprocess_is_local_only_full_path_entry_also_matches_bare_invocation() {
+    // Round-4 pentest finding: a full-path local_only_commands entry
+    // (an operator marking one specific binary's output as sensitive)
+    // used to be matched by exact key lookup only. If that same
+    // basename is ALSO reachable via a bare allow_commands entry,
+    // check_subprocess_command's allow branch matches first and the
+    // bare invocation succeeds as a REGULAR command — so if
+    // subprocess_is_local_only then fails to recognize it too, the
+    // operator's sensitive-output binary runs with its output
+    // completely untainted.
+    let p = build(
+        r#"
+[subprocess]
+allow_commands      = ["special-tool"]
+local_only_commands = ["/opt/special-tool"]
+"#,
+    );
+    assert!(p.subprocess_is_local_only("/opt/special-tool"));
+    assert!(
+        p.subprocess_is_local_only("special-tool"),
+        "bare-name invocation of the same binary must ALSO be treated as local-only"
+    );
+    assert!(p.subprocess_is_local_only("/usr/local/bin/special-tool"));
+}
+
+#[test]
 fn host_is_local_only_matches_only_listed_hosts() {
     let p = build(
         r#"
@@ -183,6 +209,89 @@ allow_commands = ["whoami"]
 "#,
     );
     let argv: Vec<String> = vec!["whoami".into()];
+    p.check_subprocess_argv_paths(&argv).unwrap();
+}
+
+// ---- argv[0] path-gating (round-3 pentest finding) ------------------------
+//
+// `check_subprocess_command` matches `allow_commands` against argv[0]'s
+// BASENAME only, by design (so a bare "cat" entry resolves via the
+// operator's own trusted $PATH). Before this fix, that was the ONLY
+// check on argv[0]: a path-shaped argv[0] (containing a `/`) whose
+// basename happened to match an allowed command name would pass,
+// regardless of what that path actually resolved to — including an
+// executable the agent (or an installed dependency) planted somewhere
+// entirely outside every [filesystem] allow list. That's full code
+// execution, not merely a scoped command-argument bypass. These tests
+// pin the fix: a path-shaped argv[0] must now clear the same
+// [filesystem] gate as any other argv path element.
+
+#[test]
+fn check_subprocess_argv_paths_rejects_path_shaped_argv0_outside_allow() {
+    let dir = std::env::temp_dir().join(format!("denyx_argv0_gate_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let planted = dir.join("cat"); // basename matches an allowed command
+    std::fs::write(&planted, "#!/bin/sh\necho pwned\n").unwrap();
+    let p = build(
+        r#"
+[filesystem]
+read_allow = ["/tmp/nowhere-near-the-plant/**"]
+
+[subprocess]
+allow_commands = ["cat"]
+"#,
+    );
+    let argv: Vec<String> = vec![planted.to_string_lossy().to_string()];
+    let err = p
+        .check_subprocess_argv_paths(&argv)
+        .expect_err("a path-shaped argv[0] outside every allow list must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("command") || msg.contains("cat"),
+        "denial should identify argv[0] as the offending element; got: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_subprocess_argv_paths_accepts_path_shaped_argv0_inside_allow() {
+    // An operator who deliberately pins a full path is still fine, as
+    // long as that path is itself within the policy's allow surface.
+    let dir = std::env::temp_dir().join(format!("denyx_argv0_gate_ok_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("mytool");
+    std::fs::write(&tool, "#!/bin/sh\necho ok\n").unwrap();
+    let abs = dir.to_string_lossy().replace('\\', "/");
+    let p = build(&format!(
+        r#"
+[filesystem]
+read_allow = ["{abs}/**"]
+
+[subprocess]
+allow_commands = ["mytool"]
+"#
+    ));
+    let argv: Vec<String> = vec![tool.to_string_lossy().to_string()];
+    p.check_subprocess_argv_paths(&argv).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_subprocess_argv_paths_accepts_bare_name_argv0_regardless_of_read_allow() {
+    // The common case: a bare command name with no path separator is
+    // NOT path-gated — it's resolved via the host process's own
+    // inherited $PATH at exec time, which the script never controls.
+    // This must keep working exactly as before the round-3 fix.
+    let p = build(
+        r#"
+[filesystem]
+read_allow = ["/tmp/unrelated/**"]
+
+[subprocess]
+allow_commands = ["cat"]
+"#,
+    );
+    let argv: Vec<String> = vec!["cat".into()];
     p.check_subprocess_argv_paths(&argv).unwrap();
 }
 

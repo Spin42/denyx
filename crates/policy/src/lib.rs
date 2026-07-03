@@ -1097,8 +1097,31 @@ impl Policy {
             .to_string();
         // If the host is itself an IP literal, run it through the
         // CIDR-aware deny check immediately (no DNS step needed).
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            self.check_resolved_ip(verb.as_str(), &host, ip)?;
+        //
+        // Round-4 pentest finding: this used to re-parse `host`
+        // (the string from `Url::host_str()`) as an `IpAddr`. For
+        // EVERY IPv6 literal, `host_str()` returns the bracketed
+        // form (`"[::1]"`, `"[::ffff:169.254.169.254]"`) — and
+        // `IpAddr::from_str` never accepts brackets, so
+        // `host.parse::<IpAddr>()` always failed silently for IPv6
+        // literals. This branch never ran for any IPv6 literal URL;
+        // whether the request was denied depended entirely on
+        // whether the bracketed string happened to also fail the
+        // hostname allow-list match below — coincidentally true for
+        // narrow allow-lists (masking the bug), false the moment an
+        // operator's allow-list is a wildcard or an IPv6-shaped
+        // pattern. `Url::host()` returns the already-typed
+        // `url::Host` the parser built internally — no string
+        // round-trip, no bracket-stripping needed, and it's what we
+        // should have used from the start.
+        match parsed.host() {
+            Some(url::Host::Ipv4(v4)) => {
+                self.check_resolved_ip(verb.as_str(), &host, IpAddr::V4(v4))?;
+            }
+            Some(url::Host::Ipv6(v6)) => {
+                self.check_resolved_ip(verb.as_str(), &host, IpAddr::V6(v6))?;
+            }
+            _ => {}
         }
         if self.net_deny_hosts.is_match(&host) {
             return Err(PolicyError::HostDenied {
@@ -1138,6 +1161,25 @@ impl Policy {
         host_label: &str,
         ip: IpAddr,
     ) -> Result<(), PolicyError> {
+        // Normalize an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to
+        // its IPv4 form before matching. `ipnet::IpNet::contains`
+        // matches strictly within one address family — an `Ipv4Net`
+        // never matches a V6-typed `IpAddr`, even one that encodes
+        // the exact same host. Without this, a hostname whose AAAA
+        // record resolves to `::ffff:169.254.169.254` sails past a
+        // `169.254.0.0/16` deny entirely: same metadata-service host,
+        // different Rust type, silently unmatched. This is a known
+        // SSRF blocklist-bypass class (IPv4-mapped-IPv6 evading an
+        // IPv4-only denylist); normalizing here closes it for every
+        // caller of this function (both DNS-resolved and literal-IP
+        // URLs route through it).
+        let ip = match ip {
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6)),
+            v4 => v4,
+        };
         for net in &self.net_deny_ips {
             if net.contains(&ip) {
                 return Err(PolicyError::HostDenied {
@@ -1210,9 +1252,21 @@ impl Policy {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(argv0);
-        self.subprocess_local_only
-            .iter()
-            .any(|c| c == basename || c == argv0)
+        // Round-4 pentest finding: same asymmetry as deny_commands /
+        // deny_args. A full-path local_only_commands entry (an
+        // operator marking one specific binary's output as sensitive)
+        // must also match a bare-name invocation of the same binary,
+        // or a policy that ALSO allows that basename via
+        // allow_commands lets the bare spelling through as a
+        // regular, untainted command — silently defeating the
+        // operator's intent to have its output scrubbed. Tainting
+        // more broadly is the safe direction here, mirroring why
+        // deny_commands/deny_args scan by either side's basename.
+        self.subprocess_local_only.iter().any(|c| {
+            c == basename
+                || c == argv0
+                || std::path::Path::new(c).file_name().and_then(|s| s.to_str()) == Some(basename)
+        })
     }
 
     /// Whether HTTP response bodies from this host should be tainted
@@ -1427,11 +1481,31 @@ impl Policy {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(argv0);
-        if self
-            .subprocess_deny
-            .iter()
-            .any(|c| c == basename || c == argv0)
-        {
+        // Deny matches if: the deny entry equals argv0's basename, OR
+        // equals argv0 verbatim, OR — and this is the round-3 fix —
+        // the deny entry's OWN basename equals argv0's basename. That
+        // last arm is what makes a full-path deny entry
+        // (`deny_commands = ["/usr/bin/cat"]`) actually block the
+        // binary it names, however the script invokes it (bare "cat",
+        // a different absolute path, a symlink alias). Without it, a
+        // full-path deny entry was matched by exact string equality
+        // only, so `subprocess.exec(["cat", ...])` sailed straight
+        // past a deny_commands entry that named that exact binary by
+        // its full path — an operator's attempt to carve out a
+        // specific denial was silently ineffective the moment the
+        // script (or the model writing it) used the bare form
+        // instead, which is the *ordinary*, unremarkable way to
+        // invoke an allowed command, not an adversarial trick.
+        // `allow_commands` deliberately keeps the narrower, exact-
+        // match semantics for full-path entries (an operator pinning
+        // one specific binary means exactly that one); the safe
+        // direction for `deny_commands` is the opposite — broader is
+        // safer, so deny goes fail-closed here on purpose.
+        if self.subprocess_deny.iter().any(|c| {
+            c == basename
+                || c == argv0
+                || std::path::Path::new(c).file_name().and_then(|s| s.to_str()) == Some(basename)
+        }) {
             return Err(PolicyError::CommandDenied {
                 command: argv0.to_string(),
                 reason: "matches [subprocess].deny_commands".into(),
@@ -1478,21 +1552,33 @@ impl Policy {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(argv0);
-        let patterns = self
-            .subprocess_deny_args
-            .get(basename)
-            .or_else(|| self.subprocess_deny_args.get(argv0));
-        let Some(patterns) = patterns else {
-            return Ok(());
-        };
         let joined = argv[1..].join(" ");
-        for pattern in patterns {
-            if joined.contains(pattern) {
-                return Err(PolicyError::ArgsDenied {
-                    command: argv0.clone(),
-                    pattern: pattern.clone(),
-                    reason: format!("argument matches [subprocess.deny_args].{}", basename),
-                });
+        // Round-4 pentest finding: looking up only the exact basename
+        // or literal argv0 as a map key misses a full-path deny_args
+        // key (e.g. `"/usr/bin/git" = ["push --force"]`) when the
+        // script invokes the SAME binary by bare name (`"git"`,
+        // resolved via $PATH) — the two spellings never collide via a
+        // direct key lookup, so the pattern was silently never
+        // checked. Mirrors the round-3 fix to `deny_commands`'
+        // basename matching: deny_args is deny-side, so we scan every
+        // key whose own basename matches argv0's basename too, not
+        // just keys textually identical to argv0 or its basename.
+        for (key, patterns) in &self.subprocess_deny_args {
+            let key_basename = std::path::Path::new(key)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(key.as_str());
+            if key != basename && key != argv0.as_str() && key_basename != basename {
+                continue;
+            }
+            for pattern in patterns {
+                if joined.contains(pattern) {
+                    return Err(PolicyError::ArgsDenied {
+                        command: argv0.clone(),
+                        pattern: pattern.clone(),
+                        reason: format!("argument matches [subprocess.deny_args].{key}"),
+                    });
+                }
             }
         }
         Ok(())
@@ -1517,27 +1603,58 @@ impl Policy {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(argv0);
-        let patterns = self
-            .subprocess_requires_approval_args
-            .get(basename)
-            .or_else(|| self.subprocess_requires_approval_args.get(argv0))?;
         let joined = argv[1..].join(" ");
-        for pattern in patterns {
-            if joined.contains(pattern) {
-                return Some(pattern.as_str());
+        // Same round-4 fix as check_subprocess_args: a full-path key
+        // (e.g. an operator pinning `"/usr/bin/git"`) must also match
+        // a bare-name invocation of the same binary, or the human-
+        // approval prompt silently never fires for that spelling.
+        for (key, patterns) in &self.subprocess_requires_approval_args {
+            let key_basename = std::path::Path::new(key)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(key.as_str());
+            if key != basename && key != argv0.as_str() && key_basename != basename {
+                continue;
+            }
+            for pattern in patterns {
+                if joined.contains(pattern) {
+                    return Some(pattern.as_str());
+                }
             }
         }
         None
     }
 
-    /// Walk argv (skipping argv[0]) and reject the call if any
-    /// argument *that looks like a path* would point at a resource
-    /// the script itself couldn't reach via the fs builtins. This is
-    /// what stops `subprocess.exec(["cat", "/etc/passwd"])` from
-    /// being a bypass for `[filesystem]`-denied paths.
+    /// Walk argv — INCLUDING argv[0], the command itself — and reject
+    /// the call if any element *that looks like a path* would point
+    /// at a resource the script itself couldn't reach via the fs
+    /// builtins. This is what stops `subprocess.exec(["cat",
+    /// "/etc/passwd"])` from being a bypass for `[filesystem]`-denied
+    /// paths.
     ///
-    /// Rules per argument:
-    /// 1. Skip arguments that don't look like paths (flags starting
+    /// argv[0] is in scope for a reason found by the round-3 pentest:
+    /// `check_subprocess_command` matches `allow_commands` against
+    /// argv[0]'s *basename only* (`Path::new(argv0).file_name()`), by
+    /// design, so that a bare `"cat"` entry resolves through the
+    /// operator's own trusted `$PATH` at exec time. But that basename
+    /// check alone let a script pass a *path-shaped* argv[0] — e.g.
+    /// `/tmp/attacker-controlled/cat` — straight through: the
+    /// basename `"cat"` matched `allow_commands`, and nothing checked
+    /// where that path actually pointed. Any executable file whose
+    /// filename happened to match an allowed command name, anywhere
+    /// on the filesystem, was one `subprocess.exec` call away from
+    /// running — full code execution, not merely a policy bypass on
+    /// what that command could read/write. Folding argv[0] into this
+    /// same path gate closes it: a path-shaped command must resolve
+    /// inside the same `[filesystem]` allow surface as any other path
+    /// the script touches. A bare command name (no path separator,
+    /// e.g. `"cat"`) is unaffected — it's still resolved by the OS via
+    /// the host process's own inherited `$PATH`, which the script
+    /// never gets to redefine (only the *child's* env is rebuilt from
+    /// `[environment]`, after resolution).
+    ///
+    /// Rules per argv element:
+    /// 1. Skip elements that don't look like paths (flags starting
     ///    with `-`, `-` itself meaning stdin/stdout, bare names that
     ///    don't exist as files at the policy root, anything not
     ///    containing `/` and not starting with a path-like prefix).
@@ -1565,21 +1682,34 @@ impl Policy {
     ///   access to those env vars (`[environment].allow_vars`
     ///   filtering already covers env; stdin is the operator's
     ///   problem).
+    /// - **Residual risk, still real after this fix**: if the
+    ///   operator's `read_allow`/`write_allow` covers a directory an
+    ///   allowed package manager (`npm`, `pip`, `cargo`, `make`, ...)
+    ///   writes into, an executable dropped there by that tool (a
+    ///   dependency's postinstall script, a build artifact) with a
+    ///   basename matching another allowed command *is* reachable by
+    ///   this check, because it's genuinely inside the policy's own
+    ///   allow surface. This is the same class of risk as an
+    ///   over-broad `**` glob: an operator-side scoping decision, not
+    ///   a gap this check can close without banning build tooling
+    ///   outright. Scope `allow_commands` and `read_allow`/
+    ///   `write_allow` narrowly if this is in your threat model.
     pub fn check_subprocess_argv_paths(&self, argv: &[String]) -> Result<(), PolicyError> {
-        if argv.len() < 2 {
+        if argv.is_empty() {
             return Ok(());
         }
-        for arg in &argv[1..] {
+        for (i, arg) in argv.iter().enumerate() {
             if !looks_like_path_arg(arg, &self.root) {
                 continue;
             }
             let resolved = resolve_path(&self.root, Path::new(arg));
+            let what = if i == 0 { "command" } else { "argv element" };
             if self.fs_deny.is_match(&resolved) {
                 return Err(PolicyError::PathDenied {
                     action: "subprocess.exec",
                     path: resolved,
                     reason: format!(
-                        "argv element {arg:?} resolves to a path matched by \
+                        "{what} {arg:?} resolves to a path matched by \
                          [filesystem].deny — subprocess cannot reach what \
                          the script itself cannot reach"
                     ),
@@ -1594,7 +1724,7 @@ impl Policy {
                     action: "subprocess.exec",
                     path: resolved,
                     reason: format!(
-                        "argv element {arg:?} resolves to a path that's not in any \
+                        "{what} {arg:?} resolves to a path that's not in any \
                          [filesystem] allow list (read_allow, local_only_read, \
                          write_allow, delete_allow) — subprocess cannot reach what \
                          the script itself cannot reach"
