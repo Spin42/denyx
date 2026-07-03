@@ -17,6 +17,7 @@
 //!   6 — runtime cap exceeded (wall-time deadline / call-stack)
 
 mod doctor;
+mod hook;
 mod host_config;
 mod init;
 
@@ -70,6 +71,15 @@ enum Command {
     /// project state). Single entry point for "is my Denyx setup
     /// right?". Defaults to the cwd; pass `--project-path <PATH>`.
     Doctor(doctor::DoctorArgs),
+    /// PreToolUse-shaped hook endpoint: reads one tool-call request
+    /// as JSON on stdin, checks it against the same policy `denyx
+    /// run` enforces, and exits 0 (allow, JSON decision on stdout)
+    /// or 2 (deny — for any reason, including internal errors).
+    /// Lets Claude Code / opencode delegate native tool-call
+    /// authorization to Denyx without routing through the Starlark
+    /// MCP surface. See `crates/cli/src/hook.rs` module docs for the
+    /// trade-offs (no cross-call IFC, shell composition refused).
+    Hook(hook::HookArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -538,6 +548,7 @@ fn dispatch() -> Result<(), CliError> {
             let code = doctor::run(args);
             std::process::exit(code);
         }
+        Command::Hook(args) => hook::run_and_exit(args),
     }
 }
 

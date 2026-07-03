@@ -707,6 +707,7 @@ name = "denyx-cli"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "denyx-host",
  "denyx-policy",

@@ -70,7 +70,7 @@ pub(crate) fn finalize_http_response(resp: ureq::Response) -> anyhow::Result<Str
 }
 
 pub use audit::{
-    verify_chain, AuditEvent, AuditSink, HttpAuditSink, JsonlAuditSink, NullAuditSink,
+    verify_chain, AuditEvent, AuditSink, AuditStatus, HttpAuditSink, JsonlAuditSink, NullAuditSink,
     VerifyFailure, VerifyReport, GENESIS_PREV_HASH,
 };
 pub use confirm::{AllowAllConfirm, ConfirmDecision, ConfirmHook, ConfirmRequest, DenyAllConfirm};
