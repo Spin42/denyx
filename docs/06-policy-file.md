@@ -438,7 +438,24 @@ blocks the inline-execution flags (`-c`, `-e`, `-p`).
 > the runtime still wraps `subprocess.exec` calls with bubblewrap
 > when it's set, so existing policies keep working — but new
 > policies should not set it. The code path may be removed in a
-> future release. The wasm-sandboxed Starlark runner
+> future release.
+>
+> **Round 4 pentest correction (2026-07-03):** for a window between
+> wasm becoming the default runner and this fix, "existing policies
+> keep working" was false by default — the wasm path never wired
+> `sandbox = "bwrap"` in at all, so an operator not passing
+> `--no-wasm` got silent, total loss of the jail with no error or
+> warning. This is now fixed
+> (`crates/host/src/wasm_runner.rs::host_subprocess_exec` mirrors the
+> native `Runner`'s `sandbox_mode()` branch); bwrap applies uniformly
+> on both paths again, consistent with the promise above. See
+> [security-pentest-r4-wasm-path-regressions.md](security-pentest-r4-wasm-path-regressions.md#aeg-pen-r4-002--subprocesssandbox--bwrap-unenforced-on-the-wasm-path).
+> This does not change the deprecation itself — the recommended path
+> for kernel-level subprocess isolation is still a VM/container, not
+> this field — it only restores the field to actually doing what its
+> own deprecation note already claimed it did.
+>
+> The wasm-sandboxed Starlark runner
 > ([`wasm-sandbox.md`](wasm-sandbox.md)) is now the primary
 > interpreter-containment layer; the empirical evidence that
 > backs it (Round 1 + Round 2 v4/v5/v6 pentests, 112 LLM-driven

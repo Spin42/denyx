@@ -166,21 +166,23 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   Fork-bomb-class subprocess exhaustion is out of scope at the
   Denyx layer — run inside a container or VM if your threat model
   includes it.
-- **Denyx does not isolate subprocesses the script spawns.** The
-  WasmRunner contains the Starlark interpreter — a runtime bug in
-  the interpreter, or a runaway pure-CPU loop, stays inside the
-  wasmtime guest. It does **not** isolate child processes a
-  permitted `subprocess.exec` call starts: a permitted `python3`
-  runs as a normal child of the host process, bounded only by the
-  policy's `allow_commands`, argv path-gate, and
-  `subprocess.deny_args`. If your threat model includes a permitted
-  interpreter constructing paths inside its own heap that bypass
-  the argv path-gate (e.g. `python3 -c "open(chr(47)+...)"`), run
-  Denyx inside a container or VM — the kernel namespace is outside
-  Denyx's scope. The previous `[subprocess].sandbox = "bwrap"`
-  field is deprecated in v0.4.0; see
+- **Denyx does not isolate subprocesses the script spawns, by
+  default.** The WasmRunner contains the Starlark interpreter — a
+  runtime bug in the interpreter, or a runaway pure-CPU loop, stays
+  inside the wasmtime guest. It does **not** isolate child processes
+  a permitted `subprocess.exec` call starts: with the default
+  `[subprocess].sandbox = "none"`, a permitted `python3` runs as a
+  normal child of the host process, bounded only by the policy's
+  `allow_commands`, argv path-gate, and `subprocess.deny_args`. If
+  your threat model includes a permitted interpreter constructing
+  paths inside its own heap that bypass the argv path-gate (e.g.
+  `python3 -c "open(chr(47)+...)"`), run Denyx inside a container or
+  VM — the kernel namespace is outside Denyx's scope. The (deprecated
+  as of v0.4.0, still functional) `[subprocess].sandbox = "bwrap"`
+  field applies the same bind-mount jail on both the wasm and native
+  execution paths as of the Round 4 pentest fix — see
   [policy-file `[subprocess]`](06-policy-file.md#subprocess-is-a-privilege-boundary)
-  for the deprecation note.
+  for the deprecation note and what changed.
 - **OS-level kernel bugs / sandbox escape.** Denyx is a *language-runtime*
   gate. Even with the wasm sandbox containing the Starlark
   interpreter, a kernel-level exploit reachable from a permitted
