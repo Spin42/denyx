@@ -104,6 +104,23 @@ pub enum ConsistencyIssue {
         host_configs: Vec<String>,
         max_seconds: u64,
     },
+    /// A `denyx-local-mcp` entry shares a host-config file with other
+    /// (non-Denyx, or `denyx-mcp`) MCP server entries. The local-
+    /// executor architecture's core property — "the cloud
+    /// orchestrator's MCP tool list contains only `delegate_to_local`,
+    /// so third-party tool descriptions can't reach its context" —
+    /// depends on `denyx-local-mcp` being the ONLY MCP server the host
+    /// launches. `denyx host-config --strict-mcp` can refuse to WRITE
+    /// a file that violates this at generation time, but nothing
+    /// re-checks the file afterward: an operator (or another tool)
+    /// adding a second MCP server later silently defeats the property
+    /// with no runtime signal. See
+    /// docs/security-pentest-r2-tool-poisoning.md's "two side
+    /// observations" and docs/security-pentest-r3-argv0-and-chunking.md.
+    LocalExecutorNotIsolated {
+        host_config: String,
+        other_servers: Vec<String>,
+    },
 }
 
 /// Classification of an overly-permissive allow-list entry. Two
@@ -171,6 +188,12 @@ impl ConsistencyIssue {
                 BroadGlobRisk::SystemDirectory => Severity::Info,
             },
             Self::WasmRunnerDeadlineUnenforced { .. } => Severity::Warning,
+            // The runtime gate still enforces correctly — this is a
+            // structural-prevention claim about what the cloud model
+            // can even SEE quietly not holding, same tier as sandbox
+            // drift: a real gap in a documented property, but not an
+            // active bypass of the running policy.
+            Self::LocalExecutorNotIsolated { .. } => Severity::Warning,
         }
     }
 
@@ -274,6 +297,16 @@ impl ConsistencyIssue {
                     hc = host_configs.join(", "),
                 )
             }
+            Self::LocalExecutorNotIsolated {
+                host_config,
+                other_servers,
+            } => format!(
+                "{host_config} wires denyx-local-mcp alongside other MCP server{} ({}) — \
+                 the cloud model can see their tool descriptions directly, defeating the \
+                 local-executor's tool-poisoning isolation",
+                if other_servers.len() == 1 { "" } else { "s" },
+                other_servers.join(", ")
+            ),
         }
     }
 
@@ -317,15 +350,20 @@ impl ConsistencyIssue {
                 "Either (1) drop `--use-wasm` from the host-config launch so the in-process Runner (which enforces wall-time) is used, (2) remove `[runtime].max_seconds` from the policy if Wasm fuel alone is acceptable (fuel caps instruction count not wall-clock — a script blocked on a slow HTTP call will not trip it), or (3) wait for WasmRunner deadline enforcement to land. Tracked in the wasm-sandbox doc \"What this round did NOT exercise\" section."
                     .to_string()
             }
+            Self::LocalExecutorNotIsolated { other_servers, .. } => format!(
+                "Remove the other MCP server entr{} ({}) from this host-config, or move \
+                 denyx-local-mcp to a host-config file of its own. If the cloud model needs \
+                 those other tools too, re-run `denyx host-config --strict-mcp` to have it \
+                 refuse to write a config that mixes them in the first place.",
+                if other_servers.len() == 1 { "y" } else { "ies" },
+                other_servers.join(", ")
+            ),
         }
     }
 }
 
 // ─────────────────────────── public API ───────────────────────────
 
-/// Run every cross-cutting consistency check. The policy is optional:
-/// when `None`, only checks that don't require policy data run
-/// (currently just "conflicting policy paths across host-configs").
 /// True when `args` contain `--use-wasm` anywhere. The flag is a
 /// bare switch (no value), so split / combined forms don't apply.
 fn has_use_wasm_flag(server: &DetectedDenyxServer) -> bool {
@@ -363,9 +401,14 @@ fn check_wasm_runner_deadline(
     }]
 }
 
+/// Run every cross-cutting consistency check. The policy is optional:
+/// when `None`, only checks that don't require policy data run
+/// (currently "conflicting policy paths across host-configs" and
+/// "local-executor isolation" — both are pure host-config checks).
 pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<ConsistencyIssue> {
     let mut out = Vec::new();
     out.extend(check_conflicting_policy_paths(diagnosis));
+    out.extend(check_local_executor_isolation(diagnosis));
     if let Some(p) = policy {
         let file = p.file_snapshot();
         out.extend(check_tool_urls_against_network(file));
@@ -639,6 +682,41 @@ fn check_conflicting_policy_paths(diagnosis: &ProjectDiagnosis) -> Vec<Consisten
     } else {
         Vec::new()
     }
+}
+
+/// Flag any host-config file that wires `denyx-local-mcp` alongside
+/// at least one other MCP server entry (another `denyx-local-mcp` is
+/// fine and not flagged; `denyx-mcp` or any third-party server is
+/// not). Round 2 documented this as an operator-setup precondition
+/// the runtime doesn't enforce; Round 3 confirmed `denyx host-config`
+/// still doesn't emit `--strict-mcp` by default and nothing re-checks
+/// the file after generation. Unlike a policy-file check, this needs
+/// no `Policy` at all — it's purely about what a host-config file
+/// declares — so it runs even when no `denyx.toml` was found.
+fn check_local_executor_isolation(diagnosis: &ProjectDiagnosis) -> Vec<ConsistencyIssue> {
+    let mut out = Vec::new();
+    for hc in &diagnosis.host_configs {
+        let has_local_mcp = hc
+            .denyx_servers
+            .iter()
+            .any(|s| s.flavor == DenyxFlavor::DenyxLocalMcp);
+        if !has_local_mcp {
+            continue;
+        }
+        let other_servers: Vec<String> = hc
+            .denyx_servers
+            .iter()
+            .filter(|s| s.flavor != DenyxFlavor::DenyxLocalMcp)
+            .map(|s| s.name.clone())
+            .collect();
+        if !other_servers.is_empty() {
+            out.push(ConsistencyIssue::LocalExecutorNotIsolated {
+                host_config: hc.host.label().to_string(),
+                other_servers,
+            });
+        }
+    }
+    out
 }
 
 fn extract_policy_path(server: &DetectedDenyxServer) -> Option<String> {
@@ -937,6 +1015,162 @@ mod tests {
             out[0],
             ConsistencyIssue::ConflictingPolicyPaths { .. }
         ));
+    }
+
+    // ---- check_local_executor_isolation (round-3 pentest finding) --------
+
+    #[test]
+    fn check_local_executor_isolation_ok_when_local_mcp_is_alone() {
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![server(
+                "denyx",
+                "denyx-local-mcp",
+                vec!["serve"],
+                DenyxFlavor::DenyxLocalMcp,
+            )],
+        ));
+        let out = check_local_executor_isolation(&diag);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn check_local_executor_isolation_ok_when_no_local_mcp_present() {
+        // denyx-mcp alone, or any non-local setup, isn't in scope for
+        // this check — the isolation property only applies to the
+        // local-executor architecture.
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![
+                server("denyx", "denyx-mcp", vec![], DenyxFlavor::DenyxMcp),
+                server(
+                    "other",
+                    "some-other-mcp-server",
+                    vec![],
+                    DenyxFlavor::Other("some-other-mcp-server".to_string()),
+                ),
+            ],
+        ));
+        let out = check_local_executor_isolation(&diag);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn check_local_executor_isolation_flags_third_party_server_alongside_local_mcp() {
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![
+                server(
+                    "denyx",
+                    "denyx-local-mcp",
+                    vec!["serve"],
+                    DenyxFlavor::DenyxLocalMcp,
+                ),
+                server(
+                    "github",
+                    "github-mcp-server",
+                    vec![],
+                    DenyxFlavor::Other("github-mcp-server".to_string()),
+                ),
+            ],
+        ));
+        let out = check_local_executor_isolation(&diag);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConsistencyIssue::LocalExecutorNotIsolated {
+                host_config,
+                other_servers,
+            } => {
+                assert_eq!(host_config, "Claude Code");
+                assert_eq!(other_servers, &vec!["github".to_string()]);
+            }
+            other => panic!("expected LocalExecutorNotIsolated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_local_executor_isolation_flags_denyx_mcp_mixed_with_local_mcp() {
+        // Mixing denyx-mcp and denyx-local-mcp in the same host-config
+        // is also a violation: the cloud model sees denyx-mcp's own
+        // tool surface directly, not just delegate_to_local.
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![
+                server(
+                    "local",
+                    "denyx-local-mcp",
+                    vec!["serve"],
+                    DenyxFlavor::DenyxLocalMcp,
+                ),
+                server("direct", "denyx-mcp", vec![], DenyxFlavor::DenyxMcp),
+            ],
+        ));
+        let out = check_local_executor_isolation(&diag);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ConsistencyIssue::LocalExecutorNotIsolated { other_servers, .. }
+                if other_servers == &vec!["direct".to_string()]
+        ));
+    }
+
+    #[test]
+    fn check_local_executor_isolation_two_local_mcp_entries_is_fine() {
+        // Two denyx-local-mcp entries (e.g. one per workspace) don't
+        // violate the property — neither exposes a third-party tool
+        // surface to the cloud model.
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![
+                server(
+                    "a",
+                    "denyx-local-mcp",
+                    vec!["serve"],
+                    DenyxFlavor::DenyxLocalMcp,
+                ),
+                server(
+                    "b",
+                    "denyx-local-mcp",
+                    vec!["serve"],
+                    DenyxFlavor::DenyxLocalMcp,
+                ),
+            ],
+        ));
+        let out = check_local_executor_isolation(&diag);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn check_local_executor_isolation_runs_without_a_policy() {
+        // This check needs no Policy at all — confirm `check()` still
+        // runs it when policy is None (e.g. denyx.toml is missing).
+        let mut diag = empty_diagnosis();
+        diag.host_configs.push(host_config(
+            HostName::Claude,
+            vec![
+                server(
+                    "denyx",
+                    "denyx-local-mcp",
+                    vec!["serve"],
+                    DenyxFlavor::DenyxLocalMcp,
+                ),
+                server(
+                    "other",
+                    "some-other-mcp-server",
+                    vec![],
+                    DenyxFlavor::Other("some-other-mcp-server".to_string()),
+                ),
+            ],
+        ));
+        let out = check(None, &diag);
+        assert!(out
+            .iter()
+            .any(|i| matches!(i, ConsistencyIssue::LocalExecutorNotIsolated { .. })));
     }
 
     fn parse_policy(toml: &str) -> Policy {

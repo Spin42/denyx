@@ -439,6 +439,7 @@ reflects the post-fix state.
 | `wired denyx-mcp but local-executor expected` | WARN — standalone shape wired where the bridge was expected. | No. Re-run `host-config --no-mcp` and follow [12-local-executor.md](12-local-executor.md). |
 | `audit-dir not in .gitignore` | WARN — audit logs may end up committed. | **Yes** — appends `.denyx/`. |
 | `.denyx/ missing` | WARN — audit dir doesn't exist. | **Yes** — `mkdir`. |
+| `local-executor isolation broken` | WARN — a host-config wires `denyx-local-mcp` alongside another MCP server (or `denyx-mcp`), so the cloud model can see that server's tool descriptions directly — defeating the local-executor's tool-poisoning isolation. Added after [Round 3](security-pentest-r3-argv0-and-chunking.md) confirmed this precondition still isn't enforced by `denyx host-config`. | No (operator decision). Remove the other server, split it into its own host-config file, or re-run `denyx host-config --strict-mcp`. |
 
 ## See also
 

@@ -463,6 +463,9 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
                 ConsistencyIssue::WasmRunnerDeadlineUnenforced { .. } => {
                     "wasm runner ignores [runtime].max_seconds"
                 }
+                ConsistencyIssue::LocalExecutorNotIsolated { .. } => {
+                    "local-executor isolation broken"
+                }
             };
             match sev {
                 Severity::Critical => {
