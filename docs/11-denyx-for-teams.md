@@ -219,7 +219,7 @@ tampering is detectable on later verification.
 | Pros | Cons |
 |------|------|
 | **Zero infrastructure.** | **Scattered.** Each developer has their own log. "What did all our agents do this week?" is N separate file-walks. |
-| **Tamper-detectable.** The hash chain catches insertions, deletions, and modifications. `denyx audit verify` reports mismatches. | **Local resilience only.** A developer can delete the file. Hash chain detects the deletion; doesn't recover the data. |
+| **Tamper-detectable, with one gap.** The hash chain catches in-place modification and insertion/removal of a line from the *middle* — both break the chain. It does **not**, by itself, catch truncation of the *tail* (deleting the most recent events): a shorter chain is still internally consistent. `denyx audit verify --min-seq N` closes that only if something external remembers the log's previous length. | **Local resilience only.** A developer can delete the whole file (obviously detectable — it's gone) or truncate its tail (not detectable from the file alone; doesn't recover the data either way). |
 | **Full history retained** (subject to disk space). | **Hard to query.** JSONL is a stream, not a database. Filtering across many machines requires shipping the data first. |
 | **No network round-trip.** Audit POST never delays a capability call. | **No real-time visibility.** Compliance / security can't see what's happening today without manually pulling the logs. |
 

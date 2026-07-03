@@ -230,10 +230,13 @@ Hash-chained or signed per-action audit, the rare slice.
 
 **Where Denyx differs:** Denyx's audit ([06-policy-file.md](06-policy-file.md))
 is SHA-256-chained per event with `denyx audit verify` for post-hoc
-detection of tampering, removal, or insertion. Closest peer set is
-OpenFang / nono / Pipelock; none of those combine the audit with the
-cross-host config translator and the value-tier IFC the way the
-default Denyx setup does.
+detection of in-place tampering and mid-log removal or insertion
+(`--min-seq` additionally catches tail truncation when paired with
+externally-remembered log length — see
+[04-security-threat-model.md](04-security-threat-model.md)). Closest
+peer set is OpenFang / nono / Pipelock; none of those combine the
+audit with the cross-host config translator and the value-tier IFC
+the way the default Denyx setup does.
 
 ## Code-execution sandboxes
 

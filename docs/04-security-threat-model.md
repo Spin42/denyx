@@ -11,10 +11,14 @@ accountable to.
 
 For the systematic post-implementation bypass review, see
 [security-audit.md](security-audit.md). For the AI-driven adversarial
-pentest against the IFC layer specifically (Sonnet + Opus, with risk
-ratings and closure verification), see
-[security-pentest-report.md](security-pentest-report.md). For the
-policy file reference, see [06-policy-file.md](06-policy-file.md).
+pentests (Round 1: Sonnet + Opus against the IFC layer; Round 2: local
+models against step-injection; Round 3: Sonnet 5 + Fable 5 against the
+IFC layer and the subprocess command gate), see
+[security-pentest-report.md](security-pentest-report.md),
+[security-pentest-r2-tool-poisoning.md](security-pentest-r2-tool-poisoning.md),
+and
+[security-pentest-r3-argv0-and-chunking.md](security-pentest-r3-argv0-and-chunking.md).
+For the policy file reference, see [06-policy-file.md](06-policy-file.md).
 
 ## What Denyx is
 
@@ -48,12 +52,14 @@ result on the wasm path.
 |--------|-----|
 | **Prompt-injection telling the agent to run a destructive command** | The script can only call namespaced builtins, each gated against the policy in Rust before any side effect. A natural-language prompt cannot reach `os.system`, `subprocess.Popen`, or `eval` because the language has none of them. |
 | **Agent reading credentials it has no business reading** | `[filesystem].deny` (e.g. `**/.env*`, `~/.aws/**`) and `[environment].deny_vars` (e.g. `AWS_SECRET_ACCESS_KEY`) fail the call at the Rust gate. `secure-defaults` ships with a curated baseline of these. |
-| **Agent exfiltrating local-only secrets to a cloud orchestrator via printed output** | `[environment].local_only_vars`, `[filesystem].local_only_read`, `[network].local_only_hosts`, and `[subprocess].local_only_commands` mark values as tainted. Enforcement runs in two layers: a pre-execution verifier check refuses scripts whose literal-argument `env.read`/`fs.read` of a local-only value is paired with an output-producing call; the runtime IFC scrubs values that flow through variable-argument reads against a documented transform set (reverse, hex, single-byte XOR + hex(XOR), base64 std + url-safe ± padding, ROT-1..25) plus a chunking detector, and refuses tainted bytes at every outbound argument (`fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec` to non-local-only commands). The transform set is finite by intent. **Limited — see "Known limitations" below.** |
+| **Agent exfiltrating local-only secrets to a cloud orchestrator via printed output** | `[environment].local_only_vars`, `[filesystem].local_only_read`, `[network].local_only_hosts`, and `[subprocess].local_only_commands` mark values as tainted. Enforcement runs in two layers: a pre-execution verifier check refuses scripts whose literal-argument `env.read`/`fs.read` of a local-only value is paired with an output-producing call; the runtime IFC scrubs values that flow through variable-argument reads against a documented transform set (reverse, hex, single-byte XOR + hex(XOR), base64 std + url-safe ± padding, ROT-1..25) plus a chunking detector, and refuses tainted bytes at every outbound argument (`fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec` to non-local-only commands). The chunking detector's subsequence pass runs against the original value AND every one of those transforms (round-3 fix — see below), not just the original. The transform set is finite by intent. **Limited — see "Known limitations" below.** |
 | **Agent spawning a shell to escape the policy** (`subprocess.exec(["bash", "-c", "cat /etc/passwd"])`) | `secure-defaults` denies shells, interpreters, and generic command runners (`bash`, `sh`, `python`, `node`, `ruby`, `env`, `xargs`, ...). Argv path-arguments to allowed commands are also checked against `[filesystem]` rules — `subprocess.exec(["cat", "/etc/passwd"])` is rejected. |
+| **Agent (or a prompt-injected script) pointing `subprocess.exec`'s argv[0] at a planted executable to escape the command allowlist** | `allow_commands` entries with no path separator (e.g. `"cat"`) still match on argv[0]'s basename — by design, so the operator's own trusted `$PATH` resolves it. But a *path-shaped* argv[0] (containing `/`) is now path-gated the same as every other argv element: it must resolve inside `[filesystem]`'s allow surface, same as `argv[1..]` already was. Round-3 pentest finding: before this fix, argv[0] was checked by basename only, so a script could point it at any executable anywhere on the filesystem — full code execution, not merely a scoped bypass. See [Round 3 report](security-pentest-r3-argv0-and-chunking.md). |
+| **An operator's `deny_commands` entry for one specific dangerous binary being bypassed by an ordinary bare-name invocation** | `deny_commands` full-path entries (e.g. `"/usr/bin/cat"`) now also match by basename, same as bare entries already did — deny is deliberately more aggressive than allow, since broader is the safe direction for a denylist. Round-3 pentest finding: before this fix, a full-path deny entry only matched that exact string, so a script invoking the plain bare form of the same allowed command sailed past it. See [Round 3 report](security-pentest-r3-argv0-and-chunking.md). |
 | **Agent following an HTTP redirect to a denied host** | `net.http_*` does not auto-follow 3xx; the call returns a typed error and the script must re-issue against the new URL (which gets gated again). |
 | **Agent reading a denied path via a symlink the operator allowed** | `fs.*` canonicalize paths before the policy check; the symlink target — not the symlink itself — is what the policy sees. |
 | **Agent modifying its own policy or audit log** | `Policy::guard_audit_log` and the self-writable guard refuse to start if the policy file or audit log is reachable to the agent under any of `write_allow` / `delete_allow`. |
-| **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutations, line removals, and seq jumps. |
+| **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutation and removal of a line from the *middle* of the log (both break the chain). **It does not, by itself, detect truncation of the tail** — deleting the most recent N events produces a shorter chain that still reports valid, since nothing in the remaining bytes proves more events once existed (round-4 pentest finding, confirmed live). `denyx audit verify --min-seq N` closes this only when paired with external monitoring that remembers the log's previous length, or with the `HttpAuditSink` / `--audit-url` team mode, where a remote copy already exists before local truncation could happen. |
 | **MCP tool definition poisoning reaching the cloud orchestrator (local-executor deployment)** | In the `denyx-local-mcp` architecture the cloud orchestrator's MCP tool list contains only `delegate_to_local`, so other servers' tool descriptions cannot reach its context — **provided** the host is launched with `--strict-mcp-config` (or equivalent) and denyx-local-mcp is the only MCP server configured. This is a precondition on operator setup, not enforced by Denyx itself. The local executor model receives tool routing metadata only from the operator-controlled policy file. See [Round 2 pentest report](security-pentest-r2-tool-poisoning.md). |
 | **Reads of resources the policy doesn't mention** | Default-deny: `fs.read` of a path not in `read_allow` or `local_only_read` returns `PolicyError::PathDenied`; `env.read` of a name not in `allow_vars` or `local_only_vars` returns `PolicyError::EnvDenied`; `subprocess.exec` of a command not in `allow_commands` or `local_only_commands` returns `PolicyError::SubprocessDenied`. **Operator caveat:** a too-broad rooted glob in `read_allow` (e.g. `["**"]` or `["/tmp/**"]`) silently defeats the property. Narrow allow-lists are the operator's responsibility. |
 | **Pure-CPU runaway in the agent script** *(wasm path only — default in v0.4.0+, opt out with `--no-wasm`)* | wasmtime fuel budget (`DEFAULT_WASM_FUEL = 200_000_000`) traps `for _ in range(10**9): pass` within ~1 sec of CPU as `DenyxError::RuntimeLimit` (exit 6). The in-process runner has no equivalent — `[runtime].max_seconds` is wall-time, not instruction count, so it doesn't catch pure-CPU loops that finish before the deadline. This is a wasm-path-only addition. |
@@ -82,20 +88,54 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   Empirical: the exfil probe in
   [examples/local_executor/run_exfil.py](../examples/local_executor/run_exfil.py)
   runs 12 hand-written attack scripts and currently records
-  **0 LEAK / 3 WEAK_LEAK / 9 REDACTED**. Every full-secret
+  **0 LEAK / 2 WEAK_LEAK / 10 REDACTED**. Every full-secret
   exfil shape in the probe (raw print, byte-reverse, hex,
   XOR + hex, per-char chunking, `fs.write` to a host-readable
   path, `subprocess.exec` argv to a non-local-only command,
   `fail()` with a mutated form) is now caught — either at the
-  output boundary (transform-aware scrub or chunking detection)
-  or at the arg-side gate (refused before any bytes leave the
-  runtime). The 3 remaining WEAK_LEAK side-channels are
-  inherent non-byte channels: `len(secret)`, single-character
-  comparison oracle (`secret[0] == "s"`), and substring-guess
-  oracle (`"MNOP" in secret`). Each reveals at most O(log L)
-  bits per query; defeating them requires forbidding `len()`,
-  comparison, and `in` on tainted values, which would break
-  every legitimate use of a secret as a string.
+  output boundary (transform-aware scrub or chunking detection),
+  the arg-side gate (refused before any bytes leave the runtime),
+  or — for the probe's `length_leak` technique specifically — the
+  Round 2 pre-execution verifier, since that technique's literal
+  `env.read` argument now gets refused before the script runs at
+  all (one fewer WEAK_LEAK than earlier revisions of this doc
+  reported, from an unrelated layer catching it first, not from
+  a change to the length-oracle property itself). The 2 remaining
+  WEAK_LEAK side-channels are inherent non-byte channels:
+  single-character comparison oracle (`secret[0] == "s"`) and
+  substring-guess oracle (`"MNOP" in secret`). Each reveals at
+  most O(log L) bits per query; defeating them requires
+  forbidding comparison and `in` on tainted values, which would
+  break every legitimate use of a secret as a string.
+  **Round-3 addition:** the chunking detector originally only ran
+  its subsequence check against the *original* secret value, not
+  its sibling transforms — so chunk-printing an already-enumerated
+  transform (e.g. one hex nibble per line) evaded both the
+  substring scrub (no contiguous match) and chunking (looking for
+  the wrong string) simultaneously. Separately, the chunking
+  density threshold was a fixed ratio, gameable by padding every
+  printed character with enough off-alphabet cover text — the
+  threat model already anticipated this as future work but it had
+  never been verified against the runtime. Both were found live by
+  Sonnet 5 and Fable 5 pentesting this runtime and are fixed as of
+  this doc; see [Round 3 report](security-pentest-r3-argv0-and-chunking.md)
+  for reproducers and the honest limits of the fix (the density
+  threshold is a raised bar, not a closed class).
+- **A planted executable inside the policy's own allow surface.**
+  Round 3 closed the case where a path-shaped `subprocess.exec`
+  argv[0] pointed at an executable *outside* every `[filesystem]`
+  allow list. It did not, and structurally cannot without banning
+  build tooling outright, close the narrower case where an operator
+  allows a package manager or build tool (`npm`, `pip`, `cargo`,
+  `make`, ...) that legitimately writes new executables (dependency
+  postinstall scripts, build artifacts) *inside* an already-allowed
+  `read_allow`/`write_allow` tree, with a basename that happens to
+  collide with another allowed command. That executable is genuinely
+  reachable under the policy's own allow surface, the same way an
+  over-broad `**` glob is genuinely permitted rather than a runtime
+  bug. Scope `allow_commands` and the filesystem allow lists narrowly
+  if a supply-chain-planted binary is in your threat model. See
+  [Round 3 report](security-pentest-r3-argv0-and-chunking.md).
 - **MCP tool definition poisoning (direct `denyx-mcp` deployment).** When
   `denyx-mcp` is configured as one MCP server among several, the cloud model
   reads all co-installed servers' tool descriptions directly — before Denyx
@@ -245,6 +285,8 @@ files:
 | **This doc** (`04-security-threat-model.md`) | What Denyx claims to defend; what it doesn't. Read first. |
 | [security-audit.md](security-audit.md) | The 16-surface bypass assessment that triggered the recent security work. Findings + fixes. |
 | [security-pentest-report.md](security-pentest-report.md) | Round-1 AI-driven pentest report (Sonnet + Opus). Two High findings (base64, ROT-N), both remediated and closure-verified. Methodology + scope + residual risk. |
+| [security-pentest-r2-tool-poisoning.md](security-pentest-r2-tool-poisoning.md) | Round-2: step-parameter injection, encoding-bypass attempt, deny-by-default audit, detector comparison. |
+| [security-pentest-r3-argv0-and-chunking.md](security-pentest-r3-argv0-and-chunking.md) | Round-3 AI-driven pentest report (Sonnet 5 + Fable 5). One Critical finding (`subprocess.exec` argv[0] basename-only matching → arbitrary code execution) and three High findings (chunk-a-transform, chunking-density dilution, deny/allow basename asymmetry), all remediated and closure-verified. Also added a new `denyx doctor` check for local-executor MCP isolation. |
 | [06-policy-file.md](06-policy-file.md) | Policy file reference (operator-facing). |
 | [wasm-sandbox.md](wasm-sandbox.md) | What the wasm runner adds (default in v0.4.0+; opt out with `--no-wasm`), what it doesn't change, what's still open. |
 | [03-architecture.md](03-architecture.md) | How the runtime is structured (developer-facing). |
