@@ -89,9 +89,11 @@ fn check_wasm_deadline(
         "wall-time deadline of {max_seconds}s exceeded ({:.1}s elapsed) at {capability}",
         elapsed.as_secs_f64()
     );
-    audit.emit(crate::AuditEvent::denied(
-        task_id, step, capability, "deadline", &msg,
-    ));
+    emit_scrubbed(
+        caller,
+        audit,
+        crate::AuditEvent::denied(task_id, step, capability, "deadline", &msg),
+    );
     caller.data_mut().captured_error = Some(crate::DenyxError::RuntimeLimit(msg));
     Err(wasmtime::Error::msg("deadline exceeded"))
 }
@@ -123,15 +125,45 @@ fn check_wasm_no_output_after_local_only_read(
          output-producing call) is refused regardless of whether its specific \
          arguments are tainted"
     );
-    audit.emit(crate::AuditEvent::denied(
-        task_id,
-        step,
-        capability,
-        "no-output-after-local-only-read",
-        &msg,
-    ));
+    emit_scrubbed(
+        caller,
+        audit,
+        crate::AuditEvent::denied(
+            task_id,
+            step,
+            capability,
+            "no-output-after-local-only-read",
+            &msg,
+        ),
+    );
     caller.data_mut().captured_error = Some(crate::DenyxError::Policy(msg));
     Err(wasmtime::Error::msg("output refused after local-only read"))
+}
+
+/// Emit an audit event after scrubbing any known-tainted substring
+/// from its detail payload — the wasm-path equivalent of the
+/// in-process Runner's `HostCtx::emit` (`crates/host/src/lib.rs`).
+///
+/// EVERY wasm audit emission must go through this, never
+/// `audit.emit(...)` directly: several denial paths (outbound-taint
+/// refusal in particular) build their event detail from the RAW
+/// argument value — exactly the local-only bytes the taint layer
+/// exists to keep off the runtime boundary. The audit log is itself
+/// an outbound channel (it can be forwarded to a remote
+/// `HttpAuditSink`), so it needs the same scrub every other output
+/// boundary already gets. Before this function existed, wasm's audit
+/// emission bypassed scrubbing entirely — a tainted value flowing
+/// through an outbound-taint-refusal denial's `target` field was
+/// written to the audit log unredacted, in plaintext, on the (default)
+/// wasm path, while the native `Runner` correctly redacted the same
+/// case via `HostCtx::emit`. Found during the Phase 3 wasm/native
+/// parity review; see the fix's commit for a live reproducer.
+fn emit_scrubbed(
+    caller: &Caller<'_, WasmState>,
+    audit: &Arc<dyn crate::AuditSink>,
+    event: crate::AuditEvent,
+) {
+    crate::emit_with_taint_scrub(audit, &caller.data().taint_registry, event);
 }
 
 /// Wasm-path mirror of `HostCtx::check_call_limits` (native runner,
@@ -198,13 +230,11 @@ fn deny_wasm_call_limit(
         .data()
         .step_counter
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    audit.emit(crate::AuditEvent::denied(
-        task_id,
-        step,
-        capability,
-        "call-limit",
-        &msg,
-    ));
+    emit_scrubbed(
+        caller,
+        audit,
+        crate::AuditEvent::denied(task_id, step, capability, "call-limit", &msg),
+    );
     caller.data_mut().captured_error = Some(crate::DenyxError::RuntimeLimit(msg));
     wasmtime::Error::msg("call limit reached")
 }
@@ -449,13 +479,17 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        fs_read_audit.emit(AuditEvent::denied(
-                            &fs_read_task_id,
-                            step,
-                            "fs.read",
-                            &path,
-                            &format!("{e}"),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &fs_read_audit,
+                            AuditEvent::denied(
+                                &fs_read_task_id,
+                                step,
+                                "fs.read",
+                                &path,
+                                &format!("{e}"),
+                            ),
+                        );
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.read denied by policy"));
@@ -476,13 +510,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_read_audit.emit(AuditEvent::denied(
-                                &fs_read_task_id,
-                                step,
-                                "fs.read",
-                                &path,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &fs_read_audit,
+                                AuditEvent::denied(
+                                    &fs_read_task_id,
+                                    step,
+                                    "fs.read",
+                                    &path,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "fs.read denied by confirm hook".to_string(),
                             ));
@@ -498,14 +536,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_read_audit.emit(AuditEvent::fs(
-                                &fs_read_task_id,
-                                step,
-                                "fs.read",
-                                path_obj,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &fs_read_audit,
+                                AuditEvent::fs(
+                                    &fs_read_task_id,
+                                    step,
+                                    "fs.read",
+                                    path_obj,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::Io(e));
                             return Err(wasmtime::Error::msg("fs.read: io error"));
                         }
@@ -514,14 +556,11 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    fs_read_audit.emit(AuditEvent::fs(
-                        &fs_read_task_id,
-                        step,
-                        "fs.read",
-                        path_obj,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &fs_read_audit,
+                        AuditEvent::fs(&fs_read_task_id, step, "fs.read", path_obj, true, None),
+                    );
 
                     // 3b. Register content as tainted if the path is
                     //     declared local-only — its bytes must not
@@ -608,13 +647,17 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        fs_read_range_audit.emit(AuditEvent::denied(
-                            &fs_read_range_task_id,
-                            step,
-                            "fs.read",
-                            &path,
-                            &format!("{e}"),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &fs_read_range_audit,
+                            AuditEvent::denied(
+                                &fs_read_range_task_id,
+                                step,
+                                "fs.read",
+                                &path,
+                                &format!("{e}"),
+                            ),
+                        );
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.read denied by policy"));
@@ -632,13 +675,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_read_range_audit.emit(AuditEvent::denied(
-                                &fs_read_range_task_id,
-                                step,
-                                "fs.read",
-                                &path,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &fs_read_range_audit,
+                                AuditEvent::denied(
+                                    &fs_read_range_task_id,
+                                    step,
+                                    "fs.read",
+                                    &path,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "fs.read denied by confirm hook".to_string(),
                             ));
@@ -662,14 +709,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_read_range_audit.emit(AuditEvent::fs(
-                                &fs_read_range_task_id,
-                                step,
-                                "fs.read",
-                                path_obj,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &fs_read_range_audit,
+                                AuditEvent::fs(
+                                    &fs_read_range_task_id,
+                                    step,
+                                    "fs.read",
+                                    path_obj,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::Io(e));
                             return Err(wasmtime::Error::msg("fs.read_range: io error"));
                         }
@@ -680,14 +731,18 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    fs_read_range_audit.emit(AuditEvent::fs(
-                        &fs_read_range_task_id,
-                        step,
-                        "fs.read",
-                        path_obj,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &fs_read_range_audit,
+                        AuditEvent::fs(
+                            &fs_read_range_task_id,
+                            step,
+                            "fs.read",
+                            path_obj,
+                            true,
+                            None,
+                        ),
+                    );
 
                     // 6. Taint registration if path is local-only.
                     if fs_read_range_policy.fs_read_is_local_only(path_obj) {
@@ -742,9 +797,27 @@ impl WasmRunner {
                       content_ptr: u32,
                       content_len: u32|
                       -> Result<(), wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
-                    check_wasm_call_limits(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &fs_write_policy,
+                        &fs_write_audit,
+                        &fs_write_task_id,
+                        "fs.write",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &fs_write_policy,
+                        &fs_write_audit,
+                        &fs_write_task_id,
+                        "fs.write",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &fs_write_policy,
+                        &fs_write_audit,
+                        &fs_write_task_id,
+                        "fs.write",
+                    )?;
                     // 1. Read path and content from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -781,47 +854,43 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        fs_write_audit.emit(AuditEvent::denied(
-                            &fs_write_task_id,
-                            step,
-                            "fs.write",
-                            &path,
-                            &format!("{e}"),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &fs_write_audit,
+                            AuditEvent::denied(
+                                &fs_write_task_id,
+                                step,
+                                "fs.write",
+                                &path,
+                                &format!("{e}"),
+                            ),
+                        );
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.write({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.write denied by policy"));
                     }
 
-                    // Outbound taint refusal — matches the in-process Runner's
-                    // `enforce_outbound_taint`. Refuses if any arg value matches a
-                    // tainted substring (or documented sibling transform), preventing
-                    // local-only data from leaking across the runtime boundary.
-                    for (label, value) in [
-                        ("path", path.as_str()),
-                        ("content", std::str::from_utf8(&content_buf).unwrap_or("")),
-                    ] {
-                        if let Some(reason) = caller.data().taint_registry.arg_taint_reason(value) {
-                            let step = caller
+                    // Outbound taint refusal. Shared with the native Runner via
+                    // `crate::check_outbound_taint` — see that function's doc for
+                    // why this used to be hand-duplicated per runner.
+                    let content_str = std::str::from_utf8(&content_buf).unwrap_or("");
+                    let summary = format!("write {path} ({} bytes)", content_buf.len());
+                    if let Some(msg) = crate::check_outbound_taint(
+                        &caller.data().taint_registry,
+                        &fs_write_audit,
+                        &fs_write_task_id,
+                        "fs.write",
+                        &summary,
+                        &[("path", path.as_str()), ("content", content_str)],
+                        || {
+                            caller
                                 .data()
                                 .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_write_audit.emit(AuditEvent::denied(
-                                &fs_write_task_id,
-                                step,
-                                "fs.write",
-                                value,
-                                &format!(
-                                    "outbound taint via arg {:?} (matched form: {reason})",
-                                    label
-                                ),
-                            ));
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
-                                "policy denies fs.write: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                label
-                            )));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
-                        }
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        },
+                    ) {
+                        caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                        return Err(wasmtime::Error::msg("outbound taint refused"));
                     }
 
                     // 3. Perform the IO. We accept arbitrary bytes
@@ -846,13 +915,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_write_audit.emit(AuditEvent::denied(
-                                &fs_write_task_id,
-                                step,
-                                "fs.write",
-                                &path,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &fs_write_audit,
+                                AuditEvent::denied(
+                                    &fs_write_task_id,
+                                    step,
+                                    "fs.write",
+                                    &path,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "fs.write denied by confirm hook".to_string(),
                             ));
@@ -865,14 +938,18 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        fs_write_audit.emit(AuditEvent::fs(
-                            &fs_write_task_id,
-                            step,
-                            "fs.write",
-                            path_obj,
-                            false,
-                            Some(format!("io: {e}")),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &fs_write_audit,
+                            AuditEvent::fs(
+                                &fs_write_task_id,
+                                step,
+                                "fs.write",
+                                path_obj,
+                                false,
+                                Some(format!("io: {e}")),
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Io(e));
                         return Err(wasmtime::Error::msg("fs.write: io error"));
                     }
@@ -880,14 +957,11 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    fs_write_audit.emit(AuditEvent::fs(
-                        &fs_write_task_id,
-                        step,
-                        "fs.write",
-                        path_obj,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &fs_write_audit,
+                        AuditEvent::fs(&fs_write_task_id, step, "fs.write", path_obj, true, None),
+                    );
 
                     Ok(())
                 },
@@ -907,9 +981,27 @@ impl WasmRunner {
                       path_ptr: u32,
                       path_len: u32|
                       -> Result<(), wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
-                    check_wasm_call_limits(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &fs_delete_policy,
+                        &fs_delete_audit,
+                        &fs_delete_task_id,
+                        "fs.delete",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &fs_delete_policy,
+                        &fs_delete_audit,
+                        &fs_delete_task_id,
+                        "fs.delete",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &fs_delete_policy,
+                        &fs_delete_audit,
+                        &fs_delete_task_id,
+                        "fs.delete",
+                    )?;
                     // 1. Read path from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -938,44 +1030,41 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        fs_delete_audit.emit(AuditEvent::denied(
-                            &fs_delete_task_id,
-                            step,
-                            "fs.delete",
-                            &path,
-                            &format!("{e}"),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &fs_delete_audit,
+                            AuditEvent::denied(
+                                &fs_delete_task_id,
+                                step,
+                                "fs.delete",
+                                &path,
+                                &format!("{e}"),
+                            ),
+                        );
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("fs.delete({path:?}): {e}")));
                         return Err(wasmtime::Error::msg("fs.delete denied by policy"));
                     }
 
-                    // Outbound taint refusal — matches the in-process Runner's
-                    // `enforce_outbound_taint`. Refuses if any arg value matches a
-                    // tainted substring (or documented sibling transform), preventing
-                    // local-only data from leaking across the runtime boundary.
-                    for (label, value) in [("path", path.as_str())] {
-                        if let Some(reason) = caller.data().taint_registry.arg_taint_reason(value) {
-                            let step = caller
+                    // Outbound taint refusal. Shared with the native Runner via
+                    // `crate::check_outbound_taint`.
+                    let summary = format!("delete {path}");
+                    if let Some(msg) = crate::check_outbound_taint(
+                        &caller.data().taint_registry,
+                        &fs_delete_audit,
+                        &fs_delete_task_id,
+                        "fs.delete",
+                        &summary,
+                        &[("path", path.as_str())],
+                        || {
+                            caller
                                 .data()
                                 .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_delete_audit.emit(AuditEvent::denied(
-                                &fs_delete_task_id,
-                                step,
-                                "fs.delete",
-                                value,
-                                &format!(
-                                    "outbound taint via arg {:?} (matched form: {reason})",
-                                    label
-                                ),
-                            ));
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
-                                "policy denies fs.delete: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                label
-                            )));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
-                        }
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        },
+                    ) {
+                        caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                        return Err(wasmtime::Error::msg("outbound taint refused"));
                     }
 
                     // 3. Perform the IO. remove_file matches the
@@ -997,13 +1086,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            fs_delete_audit.emit(AuditEvent::denied(
-                                &fs_delete_task_id,
-                                step,
-                                "fs.delete",
-                                &path,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &fs_delete_audit,
+                                AuditEvent::denied(
+                                    &fs_delete_task_id,
+                                    step,
+                                    "fs.delete",
+                                    &path,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "fs.delete denied by confirm hook".to_string(),
                             ));
@@ -1016,14 +1109,18 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        fs_delete_audit.emit(AuditEvent::fs(
-                            &fs_delete_task_id,
-                            step,
-                            "fs.delete",
-                            path_obj,
-                            false,
-                            Some(format!("io: {e}")),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &fs_delete_audit,
+                            AuditEvent::fs(
+                                &fs_delete_task_id,
+                                step,
+                                "fs.delete",
+                                path_obj,
+                                false,
+                                Some(format!("io: {e}")),
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Io(e));
                         return Err(wasmtime::Error::msg("fs.delete: io error"));
                     }
@@ -1031,14 +1128,11 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    fs_delete_audit.emit(AuditEvent::fs(
-                        &fs_delete_task_id,
-                        step,
-                        "fs.delete",
-                        path_obj,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &fs_delete_audit,
+                        AuditEvent::fs(&fs_delete_task_id, step, "fs.delete", path_obj, true, None),
+                    );
 
                     Ok(())
                 },
@@ -1099,13 +1193,17 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        env_read_audit.emit(AuditEvent::denied(
-                            &env_read_task_id,
-                            step,
-                            "env.read",
-                            &name,
-                            &format!("{e}"),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &env_read_audit,
+                            AuditEvent::denied(
+                                &env_read_task_id,
+                                step,
+                                "env.read",
+                                &name,
+                                &format!("{e}"),
+                            ),
+                        );
                         caller.data_mut().captured_error =
                             Some(DenyxError::Policy(format!("env.read({name:?}): {e}")));
                         return Err(wasmtime::Error::msg("env.read denied by policy"));
@@ -1130,13 +1228,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            env_read_audit.emit(AuditEvent::denied(
-                                &env_read_task_id,
-                                step,
-                                "env.read",
-                                &name,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &env_read_audit,
+                                AuditEvent::denied(
+                                    &env_read_task_id,
+                                    step,
+                                    "env.read",
+                                    &name,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "env.read denied by confirm hook".to_string(),
                             ));
@@ -1151,13 +1253,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            env_read_audit.emit(AuditEvent::env(
-                                &env_read_task_id,
-                                step,
-                                &name,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &env_read_audit,
+                                AuditEvent::env(
+                                    &env_read_task_id,
+                                    step,
+                                    &name,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("env.read({name:?}): {e}")));
                             return Err(wasmtime::Error::msg("env.read: lookup error"));
@@ -1167,13 +1273,11 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    env_read_audit.emit(AuditEvent::env(
-                        &env_read_task_id,
-                        step,
-                        &name,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &env_read_audit,
+                        AuditEvent::env(&env_read_task_id, step, &name, true, None),
+                    );
 
                     // Register tainted value if the var is declared
                     // local-only.
@@ -1225,9 +1329,27 @@ impl WasmRunner {
                       argv_json_ptr: u32,
                       argv_json_len: u32|
                       -> Result<u64, wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
-                    check_wasm_call_limits(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &subprocess_policy,
+                        &subprocess_audit,
+                        &subprocess_task_id,
+                        "subprocess.exec",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &subprocess_policy,
+                        &subprocess_audit,
+                        &subprocess_task_id,
+                        "subprocess.exec",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &subprocess_policy,
+                        &subprocess_audit,
+                        &subprocess_task_id,
+                        "subprocess.exec",
+                    )?;
                     // 1. Read argv JSON from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -1262,13 +1384,17 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        subprocess_audit.emit(AuditEvent::denied(
-                            &subprocess_task_id,
-                            step,
-                            "subprocess.exec",
-                            "",
-                            "empty argv",
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &subprocess_audit,
+                            AuditEvent::denied(
+                                &subprocess_task_id,
+                                step,
+                                "subprocess.exec",
+                                "",
+                                "empty argv",
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Policy(
                             "subprocess.exec: empty argv".to_string(),
                         ));
@@ -1285,14 +1411,18 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        subprocess_audit.emit(AuditEvent::subprocess(
-                            &subprocess_task_id,
-                            step,
-                            &argv,
-                            None,
-                            false,
-                            Some(format!("policy: {e}")),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &subprocess_audit,
+                            AuditEvent::subprocess(
+                                &subprocess_task_id,
+                                step,
+                                &argv,
+                                None,
+                                false,
+                                Some(format!("policy: {e}")),
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
                             "subprocess.exec({:?}): {e}",
                             argv[0]
@@ -1304,14 +1434,18 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        subprocess_audit.emit(AuditEvent::subprocess(
-                            &subprocess_task_id,
-                            step,
-                            &argv,
-                            None,
-                            false,
-                            Some(format!("policy: {e}")),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &subprocess_audit,
+                            AuditEvent::subprocess(
+                                &subprocess_task_id,
+                                step,
+                                &argv,
+                                None,
+                                false,
+                                Some(format!("policy: {e}")),
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
                             "subprocess.exec({:?}): {e}",
                             argv
@@ -1323,14 +1457,18 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        subprocess_audit.emit(AuditEvent::subprocess(
-                            &subprocess_task_id,
-                            step,
-                            &argv,
-                            None,
-                            false,
-                            Some(format!("policy: {e}")),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &subprocess_audit,
+                            AuditEvent::subprocess(
+                                &subprocess_task_id,
+                                step,
+                                &argv,
+                                None,
+                                false,
+                                Some(format!("policy: {e}")),
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
                             "subprocess.exec({:?}): {e}",
                             argv
@@ -1338,31 +1476,39 @@ impl WasmRunner {
                         return Err(wasmtime::Error::msg("subprocess.exec: argv path denied"));
                     }
 
-                    // Outbound taint refusal — matches the in-process Runner's
-                    // `enforce_outbound_taint`. Refuses if any argv element matches a
-                    // tainted substring (or documented sibling transform), preventing
-                    // local-only data from leaking across the runtime boundary.
-                    for (i, arg) in argv.iter().enumerate() {
-                        let label = format!("argv[{i}]");
-                        if let Some(reason) = caller.data().taint_registry.arg_taint_reason(arg) {
-                            let step = caller
-                                .data()
-                                .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            subprocess_audit.emit(AuditEvent::denied(
-                                &subprocess_task_id,
-                                step,
-                                "subprocess.exec",
-                                arg,
-                                &format!(
-                                    "outbound taint via arg {:?} (matched form: {reason})",
-                                    label
-                                ),
-                            ));
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(format!(
-                                "policy denies subprocess.exec: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                label
-                            )));
+                    // Outbound taint refusal. Shared with the native Runner via
+                    // `crate::check_outbound_taint`. Skipped when the command
+                    // itself is local-only (its output is also tainted, so a
+                    // secret passed to it can't escape via that channel) —
+                    // matches the native Runner's guard exactly. This closure
+                    // previously applied the check unconditionally, denying
+                    // legitimate local-only-command use that native allowed.
+                    if !subprocess_policy.subprocess_is_local_only(&argv[0]) {
+                        let cmd_summary = argv.join(" ");
+                        let pairs: Vec<(String, String)> = argv
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| (format!("argv[{i}]"), v.clone()))
+                            .collect();
+                        let pair_refs: Vec<(&str, &str)> = pairs
+                            .iter()
+                            .map(|(l, v)| (l.as_str(), v.as_str()))
+                            .collect();
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &subprocess_audit,
+                            &subprocess_task_id,
+                            "subprocess.exec",
+                            &format!("exec: {cmd_summary}"),
+                            &pair_refs,
+                            || {
+                                caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
                             return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
@@ -1382,13 +1528,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            subprocess_audit.emit(AuditEvent::denied(
-                                &subprocess_task_id,
-                                step,
-                                "subprocess.exec",
-                                &argv.join(" "),
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &subprocess_audit,
+                                AuditEvent::denied(
+                                    &subprocess_task_id,
+                                    step,
+                                    "subprocess.exec",
+                                    &argv.join(" "),
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "subprocess.exec denied by confirm hook".to_string(),
                             ));
@@ -1416,13 +1566,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            subprocess_audit.emit(AuditEvent::denied(
-                                &subprocess_task_id,
-                                step,
-                                "subprocess.exec",
-                                &argv.join(" "),
-                                &format!("confirm hook denied (pattern: {matched})"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &subprocess_audit,
+                                AuditEvent::denied(
+                                    &subprocess_task_id,
+                                    step,
+                                    "subprocess.exec",
+                                    &argv.join(" "),
+                                    &format!("confirm hook denied (pattern: {matched})"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::ConfirmDenied(format!(
                                     "subprocess.exec denied by confirm hook (pattern: {matched})"
@@ -1470,14 +1624,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            subprocess_audit.emit(AuditEvent::subprocess(
-                                &subprocess_task_id,
-                                step,
-                                &argv,
-                                None,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &subprocess_audit,
+                                AuditEvent::subprocess(
+                                    &subprocess_task_id,
+                                    step,
+                                    &argv,
+                                    None,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::Io(e));
                             return Err(wasmtime::Error::msg("subprocess.exec: spawn / io error"));
                         }
@@ -1493,14 +1651,18 @@ impl WasmRunner {
                             .data()
                             .step_counter
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        subprocess_audit.emit(AuditEvent::subprocess(
-                            &subprocess_task_id,
-                            step,
-                            &argv,
-                            output.status.code(),
-                            false,
-                            Some(format!("exit {code}: {stderr}")),
-                        ));
+                        emit_scrubbed(
+                            &caller,
+                            &subprocess_audit,
+                            AuditEvent::subprocess(
+                                &subprocess_task_id,
+                                step,
+                                &argv,
+                                output.status.code(),
+                                false,
+                                Some(format!("exit {code}: {stderr}")),
+                            ),
+                        );
                         caller.data_mut().captured_error = Some(DenyxError::Other(format!(
                             "subprocess.exec({:?}) exited {code}: {stderr}",
                             argv
@@ -1511,14 +1673,18 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    subprocess_audit.emit(AuditEvent::subprocess(
-                        &subprocess_task_id,
-                        step,
-                        &argv,
-                        output.status.code(),
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &subprocess_audit,
+                        AuditEvent::subprocess(
+                            &subprocess_task_id,
+                            step,
+                            &argv,
+                            output.status.code(),
+                            true,
+                            None,
+                        ),
+                    );
 
                     if subprocess_policy.subprocess_is_local_only(&argv[0]) {
                         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -1567,9 +1733,27 @@ impl WasmRunner {
                       url_ptr: u32,
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
-                    check_wasm_call_limits(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &http_get_policy,
+                        &http_get_audit,
+                        &http_get_task_id,
+                        "net.http_get",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &http_get_policy,
+                        &http_get_audit,
+                        &http_get_task_id,
+                        "net.http_get",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &http_get_policy,
+                        &http_get_audit,
+                        &http_get_task_id,
+                        "net.http_get",
+                    )?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let parsed = match http_get_policy.check_http_get(&url) {
                         Ok(parsed) => parsed,
@@ -1578,13 +1762,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_get_audit.emit(AuditEvent::denied(
-                                &http_get_task_id,
-                                step,
-                                "net.http_get",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_get_audit,
+                                AuditEvent::denied(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_get denied"));
@@ -1601,13 +1789,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_get_audit.emit(AuditEvent::denied(
-                                &http_get_task_id,
-                                step,
-                                "net.http_get",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_get_audit,
+                                AuditEvent::denied(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_get({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_get denied"));
@@ -1628,13 +1820,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_get_audit.emit(AuditEvent::denied(
-                                &http_get_task_id,
-                                step,
-                                "net.http_get",
-                                &url,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_get_audit,
+                                AuditEvent::denied(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    &url,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "net.http_get denied by confirm hook".to_string(),
                             ));
@@ -1650,31 +1846,22 @@ impl WasmRunner {
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
                         .unwrap_or_default();
                     if !http_get_policy.host_is_local_only(&parsed_host) {
-                        for (label, value) in [("url", url.as_str())] {
-                            if let Some(reason) =
-                                caller.data().taint_registry.arg_taint_reason(value)
-                            {
-                                let step = caller
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_get_audit,
+                            &http_get_task_id,
+                            "net.http_get",
+                            &format!("GET {parsed}"),
+                            &[("url", url.as_str())],
+                            || {
+                                caller
                                     .data()
                                     .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_get_audit.emit(AuditEvent::denied(
-                                    &http_get_task_id,
-                                    step,
-                                    "net.http_get",
-                                    value,
-                                    &format!(
-                                        "outbound taint via arg {:?} (matched form: {reason})",
-                                        label
-                                    ),
-                                ));
-                                caller.data_mut().captured_error =
-                                    Some(DenyxError::Policy(format!(
-                                        "policy denies net.http_get: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                        label
-                                    )));
-                                return Err(wasmtime::Error::msg("outbound taint refused"));
-                            }
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
 
@@ -1690,14 +1877,18 @@ impl WasmRunner {
                                     .data()
                                     .step_counter
                                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_get_audit.emit(AuditEvent::http(
-                                    &http_get_task_id,
-                                    step,
-                                    "net.http_get",
-                                    &url,
-                                    false,
-                                    Some(format!("io: {e}")),
-                                ));
+                                emit_scrubbed(
+                                    &caller,
+                                    &http_get_audit,
+                                    AuditEvent::http(
+                                        &http_get_task_id,
+                                        step,
+                                        "net.http_get",
+                                        &url,
+                                        false,
+                                        Some(format!("io: {e}")),
+                                    ),
+                                );
                                 caller.data_mut().captured_error =
                                     Some(DenyxError::Other(format!("net.http_get({url:?}): {e}")));
                                 return Err(wasmtime::Error::msg("net.http_get: finalize"));
@@ -1708,14 +1899,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_get_audit.emit(AuditEvent::http(
-                                &http_get_task_id,
-                                step,
-                                "net.http_get",
-                                &url,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_get_audit,
+                                AuditEvent::http(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_get({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_get: request failed"));
@@ -1725,14 +1920,11 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    http_get_audit.emit(AuditEvent::http(
-                        &http_get_task_id,
-                        step,
-                        "net.http_get",
-                        &url,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &http_get_audit,
+                        AuditEvent::http(&http_get_task_id, step, "net.http_get", &url, true, None),
+                    );
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -1761,9 +1953,27 @@ impl WasmRunner {
                       body_ptr: u32,
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
-                    check_wasm_call_limits(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &http_post_policy,
+                        &http_post_audit,
+                        &http_post_task_id,
+                        "net.http_post",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &http_post_policy,
+                        &http_post_audit,
+                        &http_post_task_id,
+                        "net.http_post",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &http_post_policy,
+                        &http_post_audit,
+                        &http_post_task_id,
+                        "net.http_post",
+                    )?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     let parsed = match http_post_policy.check_http_post(&url) {
@@ -1773,13 +1983,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_post_audit.emit(AuditEvent::denied(
-                                &http_post_task_id,
-                                step,
-                                "net.http_post",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_post_audit,
+                                AuditEvent::denied(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_post denied"));
@@ -1791,13 +2005,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_post_audit.emit(AuditEvent::denied(
-                                &http_post_task_id,
-                                step,
-                                "net.http_post",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_post_audit,
+                                AuditEvent::denied(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_post denied"));
@@ -1818,13 +2036,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_post_audit.emit(AuditEvent::denied(
-                                &http_post_task_id,
-                                step,
-                                "net.http_post",
-                                &url,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_post_audit,
+                                AuditEvent::denied(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    &url,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "net.http_post denied by confirm hook".to_string(),
                             ));
@@ -1840,31 +2062,22 @@ impl WasmRunner {
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
                         .unwrap_or_default();
                     if !http_post_policy.host_is_local_only(&parsed_host) {
-                        for (label, value) in [("url", url.as_str()), ("body", req_body.as_str())] {
-                            if let Some(reason) =
-                                caller.data().taint_registry.arg_taint_reason(value)
-                            {
-                                let step = caller
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_post_audit,
+                            &http_post_task_id,
+                            "net.http_post",
+                            &format!("POST {parsed} ({} bytes)", req_body.len()),
+                            &[("url", url.as_str()), ("body", req_body.as_str())],
+                            || {
+                                caller
                                     .data()
                                     .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_post_audit.emit(AuditEvent::denied(
-                                    &http_post_task_id,
-                                    step,
-                                    "net.http_post",
-                                    value,
-                                    &format!(
-                                        "outbound taint via arg {:?} (matched form: {reason})",
-                                        label
-                                    ),
-                                ));
-                                caller.data_mut().captured_error =
-                                    Some(DenyxError::Policy(format!(
-                                        "policy denies net.http_post: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                        label
-                                    )));
-                                return Err(wasmtime::Error::msg("outbound taint refused"));
-                            }
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
 
@@ -1880,14 +2093,18 @@ impl WasmRunner {
                                     .data()
                                     .step_counter
                                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_post_audit.emit(AuditEvent::http(
-                                    &http_post_task_id,
-                                    step,
-                                    "net.http_post",
-                                    &url,
-                                    false,
-                                    Some(format!("io: {e}")),
-                                ));
+                                emit_scrubbed(
+                                    &caller,
+                                    &http_post_audit,
+                                    AuditEvent::http(
+                                        &http_post_task_id,
+                                        step,
+                                        "net.http_post",
+                                        &url,
+                                        false,
+                                        Some(format!("io: {e}")),
+                                    ),
+                                );
                                 caller.data_mut().captured_error =
                                     Some(DenyxError::Other(format!("net.http_post({url:?}): {e}")));
                                 return Err(wasmtime::Error::msg("net.http_post: finalize"));
@@ -1898,14 +2115,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_post_audit.emit(AuditEvent::http(
-                                &http_post_task_id,
-                                step,
-                                "net.http_post",
-                                &url,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_post_audit,
+                                AuditEvent::http(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_post({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_post: request failed"));
@@ -1915,14 +2136,18 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    http_post_audit.emit(AuditEvent::http(
-                        &http_post_task_id,
-                        step,
-                        "net.http_post",
-                        &url,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &http_post_audit,
+                        AuditEvent::http(
+                            &http_post_task_id,
+                            step,
+                            "net.http_post",
+                            &url,
+                            true,
+                            None,
+                        ),
+                    );
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -1951,9 +2176,27 @@ impl WasmRunner {
                       body_ptr: u32,
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
-                    check_wasm_call_limits(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &http_put_policy,
+                        &http_put_audit,
+                        &http_put_task_id,
+                        "net.http_put",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &http_put_policy,
+                        &http_put_audit,
+                        &http_put_task_id,
+                        "net.http_put",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &http_put_policy,
+                        &http_put_audit,
+                        &http_put_task_id,
+                        "net.http_put",
+                    )?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     let parsed = match http_put_policy.check_http_put(&url) {
@@ -1963,13 +2206,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_put_audit.emit(AuditEvent::denied(
-                                &http_put_task_id,
-                                step,
-                                "net.http_put",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_put_audit,
+                                AuditEvent::denied(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_put denied"));
@@ -1981,13 +2228,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_put_audit.emit(AuditEvent::denied(
-                                &http_put_task_id,
-                                step,
-                                "net.http_put",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_put_audit,
+                                AuditEvent::denied(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_put denied"));
@@ -2008,13 +2259,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_put_audit.emit(AuditEvent::denied(
-                                &http_put_task_id,
-                                step,
-                                "net.http_put",
-                                &url,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_put_audit,
+                                AuditEvent::denied(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    &url,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "net.http_put denied by confirm hook".to_string(),
                             ));
@@ -2030,31 +2285,22 @@ impl WasmRunner {
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
                         .unwrap_or_default();
                     if !http_put_policy.host_is_local_only(&parsed_host) {
-                        for (label, value) in [("url", url.as_str()), ("body", req_body.as_str())] {
-                            if let Some(reason) =
-                                caller.data().taint_registry.arg_taint_reason(value)
-                            {
-                                let step = caller
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_put_audit,
+                            &http_put_task_id,
+                            "net.http_put",
+                            &format!("PUT {parsed} ({} bytes)", req_body.len()),
+                            &[("url", url.as_str()), ("body", req_body.as_str())],
+                            || {
+                                caller
                                     .data()
                                     .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_put_audit.emit(AuditEvent::denied(
-                                    &http_put_task_id,
-                                    step,
-                                    "net.http_put",
-                                    value,
-                                    &format!(
-                                        "outbound taint via arg {:?} (matched form: {reason})",
-                                        label
-                                    ),
-                                ));
-                                caller.data_mut().captured_error =
-                                    Some(DenyxError::Policy(format!(
-                                        "policy denies net.http_put: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                        label
-                                    )));
-                                return Err(wasmtime::Error::msg("outbound taint refused"));
-                            }
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
 
@@ -2070,14 +2316,18 @@ impl WasmRunner {
                                     .data()
                                     .step_counter
                                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_put_audit.emit(AuditEvent::http(
-                                    &http_put_task_id,
-                                    step,
-                                    "net.http_put",
-                                    &url,
-                                    false,
-                                    Some(format!("io: {e}")),
-                                ));
+                                emit_scrubbed(
+                                    &caller,
+                                    &http_put_audit,
+                                    AuditEvent::http(
+                                        &http_put_task_id,
+                                        step,
+                                        "net.http_put",
+                                        &url,
+                                        false,
+                                        Some(format!("io: {e}")),
+                                    ),
+                                );
                                 caller.data_mut().captured_error =
                                     Some(DenyxError::Other(format!("net.http_put({url:?}): {e}")));
                                 return Err(wasmtime::Error::msg("net.http_put: finalize"));
@@ -2088,14 +2338,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_put_audit.emit(AuditEvent::http(
-                                &http_put_task_id,
-                                step,
-                                "net.http_put",
-                                &url,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_put_audit,
+                                AuditEvent::http(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_put({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_put: request failed"));
@@ -2105,14 +2359,11 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    http_put_audit.emit(AuditEvent::http(
-                        &http_put_task_id,
-                        step,
-                        "net.http_put",
-                        &url,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &http_put_audit,
+                        AuditEvent::http(&http_put_task_id, step, "net.http_put", &url, true, None),
+                    );
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -2141,9 +2392,27 @@ impl WasmRunner {
                       body_ptr: u32,
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
-                    check_wasm_call_limits(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &http_patch_policy,
+                        &http_patch_audit,
+                        &http_patch_task_id,
+                        "net.http_patch",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &http_patch_policy,
+                        &http_patch_audit,
+                        &http_patch_task_id,
+                        "net.http_patch",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &http_patch_policy,
+                        &http_patch_audit,
+                        &http_patch_task_id,
+                        "net.http_patch",
+                    )?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     let parsed = match http_patch_policy.check_http_patch(&url) {
@@ -2153,13 +2422,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_patch_audit.emit(AuditEvent::denied(
-                                &http_patch_task_id,
-                                step,
-                                "net.http_patch",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_patch_audit,
+                                AuditEvent::denied(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_patch denied"));
@@ -2171,13 +2444,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_patch_audit.emit(AuditEvent::denied(
-                                &http_patch_task_id,
-                                step,
-                                "net.http_patch",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_patch_audit,
+                                AuditEvent::denied(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_patch denied"));
@@ -2198,13 +2475,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_patch_audit.emit(AuditEvent::denied(
-                                &http_patch_task_id,
-                                step,
-                                "net.http_patch",
-                                &url,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_patch_audit,
+                                AuditEvent::denied(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    &url,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "net.http_patch denied by confirm hook".to_string(),
                             ));
@@ -2220,31 +2501,22 @@ impl WasmRunner {
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
                         .unwrap_or_default();
                     if !http_patch_policy.host_is_local_only(&parsed_host) {
-                        for (label, value) in [("url", url.as_str()), ("body", req_body.as_str())] {
-                            if let Some(reason) =
-                                caller.data().taint_registry.arg_taint_reason(value)
-                            {
-                                let step = caller
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_patch_audit,
+                            &http_patch_task_id,
+                            "net.http_patch",
+                            &format!("PATCH {parsed} ({} bytes)", req_body.len()),
+                            &[("url", url.as_str()), ("body", req_body.as_str())],
+                            || {
+                                caller
                                     .data()
                                     .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_patch_audit.emit(AuditEvent::denied(
-                                    &http_patch_task_id,
-                                    step,
-                                    "net.http_patch",
-                                    value,
-                                    &format!(
-                                        "outbound taint via arg {:?} (matched form: {reason})",
-                                        label
-                                    ),
-                                ));
-                                caller.data_mut().captured_error =
-                                    Some(DenyxError::Policy(format!(
-                                        "policy denies net.http_patch: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                        label
-                                    )));
-                                return Err(wasmtime::Error::msg("outbound taint refused"));
-                            }
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
 
@@ -2260,14 +2532,18 @@ impl WasmRunner {
                                     .data()
                                     .step_counter
                                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_patch_audit.emit(AuditEvent::http(
-                                    &http_patch_task_id,
-                                    step,
-                                    "net.http_patch",
-                                    &url,
-                                    false,
-                                    Some(format!("io: {e}")),
-                                ));
+                                emit_scrubbed(
+                                    &caller,
+                                    &http_patch_audit,
+                                    AuditEvent::http(
+                                        &http_patch_task_id,
+                                        step,
+                                        "net.http_patch",
+                                        &url,
+                                        false,
+                                        Some(format!("io: {e}")),
+                                    ),
+                                );
                                 caller.data_mut().captured_error = Some(DenyxError::Other(
                                     format!("net.http_patch({url:?}): {e}"),
                                 ));
@@ -2279,14 +2555,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_patch_audit.emit(AuditEvent::http(
-                                &http_patch_task_id,
-                                step,
-                                "net.http_patch",
-                                &url,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_patch_audit,
+                                AuditEvent::http(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_patch({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_patch: request failed"));
@@ -2296,14 +2576,18 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    http_patch_audit.emit(AuditEvent::http(
-                        &http_patch_task_id,
-                        step,
-                        "net.http_patch",
-                        &url,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &http_patch_audit,
+                        AuditEvent::http(
+                            &http_patch_task_id,
+                            step,
+                            "net.http_patch",
+                            &url,
+                            true,
+                            None,
+                        ),
+                    );
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -2330,9 +2614,27 @@ impl WasmRunner {
                       url_ptr: u32,
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
-                    check_wasm_deadline(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
-                    check_wasm_call_limits(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
-                    check_wasm_no_output_after_local_only_read(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
+                    check_wasm_deadline(
+                        &mut caller,
+                        &http_delete_policy,
+                        &http_delete_audit,
+                        &http_delete_task_id,
+                        "net.http_delete",
+                    )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &http_delete_policy,
+                        &http_delete_audit,
+                        &http_delete_task_id,
+                        "net.http_delete",
+                    )?;
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &http_delete_policy,
+                        &http_delete_audit,
+                        &http_delete_task_id,
+                        "net.http_delete",
+                    )?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let parsed = match http_delete_policy.check_http_delete(&url) {
                         Ok(parsed) => parsed,
@@ -2341,13 +2643,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_delete_audit.emit(AuditEvent::denied(
-                                &http_delete_task_id,
-                                step,
-                                "net.http_delete",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_delete_audit,
+                                AuditEvent::denied(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_delete denied"));
@@ -2359,13 +2665,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_delete_audit.emit(AuditEvent::denied(
-                                &http_delete_task_id,
-                                step,
-                                "net.http_delete",
-                                &url,
-                                &format!("{e}"),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_delete_audit,
+                                AuditEvent::denied(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_delete denied"));
@@ -2386,13 +2696,17 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_delete_audit.emit(AuditEvent::denied(
-                                &http_delete_task_id,
-                                step,
-                                "net.http_delete",
-                                &url,
-                                "confirm hook denied",
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_delete_audit,
+                                AuditEvent::denied(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    &url,
+                                    "confirm hook denied",
+                                ),
+                            );
                             caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
                                 "net.http_delete denied by confirm hook".to_string(),
                             ));
@@ -2408,31 +2722,22 @@ impl WasmRunner {
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
                         .unwrap_or_default();
                     if !http_delete_policy.host_is_local_only(&parsed_host) {
-                        for (label, value) in [("url", url.as_str())] {
-                            if let Some(reason) =
-                                caller.data().taint_registry.arg_taint_reason(value)
-                            {
-                                let step = caller
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_delete_audit,
+                            &http_delete_task_id,
+                            "net.http_delete",
+                            &format!("DELETE {parsed}"),
+                            &[("url", url.as_str())],
+                            || {
+                                caller
                                     .data()
                                     .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_delete_audit.emit(AuditEvent::denied(
-                                    &http_delete_task_id,
-                                    step,
-                                    "net.http_delete",
-                                    value,
-                                    &format!(
-                                        "outbound taint via arg {:?} (matched form: {reason})",
-                                        label
-                                    ),
-                                ));
-                                caller.data_mut().captured_error =
-                                    Some(DenyxError::Policy(format!(
-                                        "policy denies net.http_delete: tainted local-only value would flow through argument {:?} (matched form: {reason})",
-                                        label
-                                    )));
-                                return Err(wasmtime::Error::msg("outbound taint refused"));
-                            }
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
 
@@ -2448,14 +2753,18 @@ impl WasmRunner {
                                     .data()
                                     .step_counter
                                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                http_delete_audit.emit(AuditEvent::http(
-                                    &http_delete_task_id,
-                                    step,
-                                    "net.http_delete",
-                                    &url,
-                                    false,
-                                    Some(format!("io: {e}")),
-                                ));
+                                emit_scrubbed(
+                                    &caller,
+                                    &http_delete_audit,
+                                    AuditEvent::http(
+                                        &http_delete_task_id,
+                                        step,
+                                        "net.http_delete",
+                                        &url,
+                                        false,
+                                        Some(format!("io: {e}")),
+                                    ),
+                                );
                                 caller.data_mut().captured_error = Some(DenyxError::Other(
                                     format!("net.http_delete({url:?}): {e}"),
                                 ));
@@ -2467,14 +2776,18 @@ impl WasmRunner {
                                 .data()
                                 .step_counter
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            http_delete_audit.emit(AuditEvent::http(
-                                &http_delete_task_id,
-                                step,
-                                "net.http_delete",
-                                &url,
-                                false,
-                                Some(format!("io: {e}")),
-                            ));
+                            emit_scrubbed(
+                                &caller,
+                                &http_delete_audit,
+                                AuditEvent::http(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    &url,
+                                    false,
+                                    Some(format!("io: {e}")),
+                                ),
+                            );
                             caller.data_mut().captured_error =
                                 Some(DenyxError::Other(format!("net.http_delete({url:?}): {e}")));
                             return Err(wasmtime::Error::msg("net.http_delete: request failed"));
@@ -2484,14 +2797,18 @@ impl WasmRunner {
                         .data()
                         .step_counter
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    http_delete_audit.emit(AuditEvent::http(
-                        &http_delete_task_id,
-                        step,
-                        "net.http_delete",
-                        &url,
-                        true,
-                        None,
-                    ));
+                    emit_scrubbed(
+                        &caller,
+                        &http_delete_audit,
+                        AuditEvent::http(
+                            &http_delete_task_id,
+                            step,
+                            "net.http_delete",
+                            &url,
+                            true,
+                            None,
+                        ),
+                    );
                     if let Some(host) = url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_owned()))
@@ -4148,5 +4465,100 @@ fs.write({:?}, "hello")
         let _ = std::fs::remove_file(&policy_path);
         let _ = std::fs::remove_file(&fixture);
         assert_eq!(outcome.printed, vec!["done".to_string()]);
+    }
+
+    // ---- Phase 3 (wasm/native parity review) regressions ----
+
+    /// Before the Phase 3 `check_outbound_taint` extraction, wasm's
+    /// subprocess.exec applied the outbound-taint refusal
+    /// unconditionally — unlike the native Runner, which skips it when
+    /// the command itself is `local_only_commands`-marked (that
+    /// command's own stdout/stderr is also tainted, so a secret passed
+    /// to it can't escape via that channel). This denied legitimate
+    /// local-only-command use on wasm that native allowed.
+    #[test]
+    fn subprocess_local_only_command_may_receive_tainted_argv() {
+        let secret_path = unique_tmp_path("local_only_cmd_secret");
+        std::fs::write(&secret_path, "secret-value-for-local-sink").expect("write fixture");
+        let path_lit = secret_path.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "local_only_cmd",
+            &format!(
+                "[filesystem]\nlocal_only_read = [\"{path_lit}\"]\n\n\
+                 [subprocess]\nallow_commands = [\"echo\"]\nlocal_only_commands = [\"echo\"]\n"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src = format!(
+            "p = \"{path_lit}\"\nsecret = fs.read(p)\nsubprocess.exec([\"echo\", secret])\nprint(\"subprocess succeeded\")\n"
+        );
+        let outcome = runner.run("t1", &src, "test.star").expect(
+            "a local-only command must be allowed to receive a tainted argv, matching native",
+        );
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&secret_path);
+        assert_eq!(outcome.printed, vec!["subprocess succeeded".to_string()]);
+    }
+
+    /// Before the `emit_scrubbed`/`emit_with_taint_scrub` fix, wasm's
+    /// audit emission bypassed taint scrubbing entirely — an
+    /// outbound-taint-refusal denial's `target` field (built from the
+    /// RAW argument value) was written to the audit log unredacted.
+    /// See crates/host/tests/audit_scrub_wasm_native_parity.rs for the
+    /// full integration-level reproducer against both runners; this is
+    /// a fast unit-level pin of the same property.
+    #[test]
+    fn denied_outbound_taint_audit_event_is_scrubbed() {
+        use crate::confirm::DenyAllConfirm;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Capture(Mutex<Vec<crate::AuditEvent>>);
+        impl crate::AuditSink for Capture {
+            fn emit(&self, event: crate::AuditEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let secret_path = unique_tmp_path("audit_scrub_secret");
+        std::fs::write(&secret_path, "TOPSECRET-must-not-leak").expect("write fixture");
+        let path_lit = secret_path.to_string_lossy().replace('\\', "/");
+        let out_path = unique_tmp_path("audit_scrub_out");
+        let out_path_lit = out_path.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "audit_scrub",
+            &format!(
+                "[filesystem]\nlocal_only_read = [\"{path_lit}\"]\nwrite_allow = [\"{out_path_lit}\"]\n"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let cap = std::sync::Arc::new(Capture::default());
+        let runner = WasmRunner::new(policy)
+            .with_audit(cap.clone())
+            .with_confirm_hook(std::sync::Arc::new(DenyAllConfirm));
+        let src = format!(
+            "p = \"{path_lit}\"\nsecret = fs.read(p)\nfs.write(\"{out_path_lit}\", secret)\n"
+        );
+        let result = runner.run("t1", &src, "test.star");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&secret_path);
+        let _ = std::fs::remove_file(&out_path);
+
+        assert!(
+            result.is_err(),
+            "outbound taint refusal must deny the write"
+        );
+        let events = cap.0.lock().unwrap();
+        assert!(!events.is_empty(), "expected at least one audit event");
+        for event in events.iter() {
+            let serialized = serde_json::to_string(&event.detail).unwrap();
+            assert!(
+                !serialized.contains("TOPSECRET-must-not-leak"),
+                "raw secret leaked into an audit event: {serialized}"
+            );
+        }
     }
 }

@@ -530,12 +530,8 @@ impl HostCtx {
         }
     }
 
-    fn emit(&self, mut event: AuditEvent) {
-        if !self.taint.is_empty() {
-            let taints = self.taint.redaction_snapshot();
-            taint::redact_json(&mut event.detail, &taints);
-        }
-        self.audit.emit(event);
+    fn emit(&self, event: AuditEvent) {
+        emit_with_taint_scrub(&self.audit, &self.taint, event);
     }
 
     fn capture(&self, kind: CapturedKind, message: &str) {
@@ -563,29 +559,19 @@ impl HostCtx {
         summary: &str,
         args: &[(&str, &str)],
     ) -> Result<(), DenyxError> {
-        if self.taint.is_empty() {
+        let Some(msg) = check_outbound_taint(
+            &self.taint,
+            &self.audit,
+            &self.task_id,
+            capability,
+            summary,
+            args,
+            || step,
+        ) else {
             return Ok(());
-        }
-        for (label, value) in args {
-            if let Some(reason) = self.taint.arg_taint_reason(value) {
-                let msg = format!(
-                    "policy denies {capability}: tainted local-only value would \
-                     flow through argument {label:?} (matched form: {reason}); \
-                     destination is not local-only, refusing to leak across the \
-                     runtime boundary"
-                );
-                self.emit(AuditEvent::denied(
-                    &self.task_id,
-                    step,
-                    capability,
-                    summary,
-                    &msg,
-                ));
-                self.capture(CapturedKind::Policy, &msg);
-                return Err(DenyxError::Policy(msg));
-            }
-        }
-        Ok(())
+        };
+        self.capture(CapturedKind::Policy, &msg);
+        Err(DenyxError::Policy(msg))
     }
 }
 
@@ -646,6 +632,86 @@ pub(crate) fn dns_check(
         policy.check_resolved_ip(action, host, ip)?;
     }
     Ok(())
+}
+
+/// Scrub any known-tainted substring from an audit event's detail
+/// payload before handing it to the sink, then emit it.
+///
+/// Shared by both the native `Runner` (`HostCtx::emit`) and the
+/// `WasmRunner` (`wasm_runner::emit_scrubbed`) — every audit emission
+/// on both paths must go through this, never `audit.emit(...)`
+/// directly. Several denial paths (outbound-taint refusal in
+/// particular) build their event detail from the RAW argument value,
+/// exactly the local-only bytes the taint layer exists to keep off
+/// the runtime boundary. The audit log is itself an outbound channel
+/// (it can be forwarded to a remote `HttpAuditSink`), so it needs the
+/// same scrub every other output boundary already gets. Before the
+/// wasm side was wired to this function, its audit emission bypassed
+/// scrubbing entirely — found during the Phase 3 wasm/native parity
+/// review.
+pub(crate) fn emit_with_taint_scrub(
+    audit: &Arc<dyn AuditSink>,
+    taint: &TaintRegistry,
+    mut event: AuditEvent,
+) {
+    if !taint.is_empty() {
+        let taints = taint.redaction_snapshot();
+        taint::redact_json(&mut event.detail, &taints);
+    }
+    audit.emit(event);
+}
+
+/// Refuse an output-producing call if any of `args` carries a value
+/// matching a tainted local-only substring (or a documented sibling
+/// transform), preventing local-only data from leaking across the
+/// runtime boundary. Shared by both the native `Runner`
+/// (`HostCtx::enforce_outbound_taint`) and the `WasmRunner`'s
+/// per-capability closures — extracted during the Phase 3 wasm/native
+/// parity review, where this exact check family (hand-duplicated
+/// across ~8 separate wasm closures before this) was the same shape
+/// of divergence that produced two prior findings (missing on the
+/// wasm path for SSRF's `deny_ips`, unscrubbed on the wasm path for
+/// audit events).
+///
+/// `step` is a closure rather than a plain `u32` so each runner keeps
+/// its own step-allocation timing: the native `Runner` already has a
+/// step number for the whole call (from `begin_call`) and just reuses
+/// it; the `WasmRunner` allocates a step lazily, only when a call is
+/// actually denied, and this must not change that.
+///
+/// Returns `Some(message)` on refusal (already audited); `None` means
+/// the call may proceed. Returning a plain message rather than a
+/// typed error lets each runner wrap it in whatever error/capture
+/// convention it already uses.
+pub(crate) fn check_outbound_taint(
+    taint: &TaintRegistry,
+    audit: &Arc<dyn AuditSink>,
+    task_id: &str,
+    capability: &'static str,
+    summary: &str,
+    args: &[(&str, &str)],
+    step: impl FnOnce() -> u32,
+) -> Option<String> {
+    if taint.is_empty() {
+        return None;
+    }
+    for (label, value) in args {
+        if let Some(reason) = taint.arg_taint_reason(value) {
+            let msg = format!(
+                "policy denies {capability}: tainted local-only value would \
+                 flow through argument {label:?} (matched form: {reason}); \
+                 destination is not local-only, refusing to leak across the \
+                 runtime boundary"
+            );
+            emit_with_taint_scrub(
+                audit,
+                taint,
+                AuditEvent::denied(task_id, step(), capability, summary, &msg),
+            );
+            return Some(msg);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------
@@ -856,7 +922,16 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         ctx.check_no_output_after_local_only_read("subprocess.exec")?;
         let argv = argv.items;
         if argv.is_empty() {
-            return Err(anyhow::anyhow!("subprocess.exec: argv must not be empty"));
+            let msg = "subprocess.exec: empty argv".to_string();
+            ctx.emit(AuditEvent::denied(
+                &ctx.task_id,
+                step,
+                "subprocess.exec",
+                "",
+                "empty argv",
+            ));
+            ctx.capture(CapturedKind::Policy, &msg);
+            return Err(DenyxError::Policy(msg).into());
         }
         if let Err(e) = ctx.policy.check_subprocess_command(&argv[0]) {
             let msg = e.to_string();
