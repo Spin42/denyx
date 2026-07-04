@@ -65,6 +65,17 @@ was built.**
   test targets line N" comment in that file's own test module, still
   points at the right code. Line numbers drift silently when a file
   grows — see `docs/mutation-testing.md`.
+- Adding a new byte-scanning/loop-counter function to one of those
+  three files: check whether it needs adding to `exclude_re`'s
+  existing `+=`-counter patterns too — a live CI run timed out on a
+  new function's counter mutants that weren't covered, costing the
+  full per-mutant timeout for zero new information. Verify with
+  `cargo mutants --list -f <file>` (a local install is cheap: `cargo
+  install cargo-mutants --locked`). Also re-check
+  `.github/workflows/mutants.yml`'s shard count against `cargo
+  mutants --list | wc -l` after a large change — the sharding math
+  is calibrated to the current mutant total and goes stale the same
+  way the line anchors do.
 
 ## Backlog
 
