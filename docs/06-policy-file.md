@@ -521,6 +521,41 @@ macOS/Windows operators never had this layer; the recommended
 shape on those platforms in v0.4.0+ is the wasm sandbox plus a VM
 if kernel-level subprocess isolation is in scope.
 
+**Layer 2, alternative backend: `[subprocess].sandbox = "landlock"`.**
+
+```toml
+[subprocess]
+allow_commands = ["python3", "git", "make"]
+sandbox        = "landlock"
+```
+
+[Landlock](https://landlock.io) (Linux 5.13+) restricts the child
+in-process — no external binary, no user namespaces, applied via
+`landlock_restrict_self` in the forked child before it execs. A
+narrower guarantee than bwrap (no PID/UTS/IPC namespace isolation, no
+reconstructed filesystem view — see
+[landlock-evaluation.md](landlock-evaluation.md) for the full
+comparison), but it works in some environments where bwrap's
+unprivileged user-namespace requirement is unavailable (certain
+containers, hardened kernel configurations). Complementary to bwrap,
+not a replacement — pick whichever backend your environment actually
+supports; Denyx does not auto-detect and fall back between them.
+
+Properties:
+- Linux-only, unprivileged (no special capabilities or setup beyond a
+  new-enough kernel). Denyx refuses to load if `sandbox = "landlock"`
+  is set but the running kernel doesn't support Landlock.
+- Filesystem access scoped to the policy's allow lists plus a minimal
+  system-path baseline needed to exec at all (same list bwrap uses).
+- Network: TCP bind/connect denied entirely when no
+  `[network].http_*_allow` is populated (same condition bwrap uses for
+  `--unshare-net`), on kernels supporting Landlock ABI v4 (Linux
+  6.7+); older kernels get the filesystem restriction only, via this
+  layer's best-effort degradation.
+- Env: filtered the same way as the default (unsandboxed) mode —
+  Landlock has no env-clearing mechanism of its own, so Denyx's usual
+  `env_clear()` + allow-listed re-injection still does that part.
+
 #### Subprocess env is filtered, not inherited
 
 The child process **does not inherit the parent's full environment**.

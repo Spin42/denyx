@@ -198,7 +198,10 @@ Hash-chained or signed per-action audit, the rare slice.
   scanner. Closest functional analogue to Denyx's audit shape — but
   pitched as a full agent OS, not a gate.
 - **[nono](https://nono.sh/)** — kernel-level isolation (Landlock /
-  Seatbelt / Windows). **Sigstore-backed signing of instruction files**
+  Seatbelt / Windows; Denyx added a Landlock backend of its own for
+  `[subprocess].sandbox` — see
+  [landlock-evaluation.md](landlock-evaluation.md) — Linux-only,
+  unlike nono's cross-platform claim). **Sigstore-backed signing of instruction files**
   (CLAUDE.md, SKILLS.md). **Merkle-tree-committed session logs** with
   optional DSSE attestations verified by `nono audit verify`. Targets
   Claude Code specifically. Early alpha per their docs.

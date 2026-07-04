@@ -197,7 +197,15 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   field applies the same bind-mount jail on both the wasm and native
   execution paths as of the Round 4 pentest fix — see
   [policy-file `[subprocess]`](06-policy-file.md#subprocess-is-a-privilege-boundary)
-  for the deprecation note and what changed.
+  for the deprecation note and what changed. `sandbox = "landlock"`
+  (Linux 5.13+, unprivileged, no external binary) is a second,
+  narrower OS-level backend for environments where bwrap's
+  unprivileged-user-namespace requirement isn't available — it has no
+  PID/UTS/IPC namespace isolation and no reconstructed filesystem
+  view, so it does not close the kernel-namespace gap this bullet
+  describes any more than bwrap does; see
+  [landlock-evaluation.md](landlock-evaluation.md) for the full
+  comparison.
 - **OS-level kernel bugs / sandbox escape.** Denyx is a *language-runtime*
   gate. Even with the wasm sandbox containing the Starlark
   interpreter, a kernel-level exploit reachable from a permitted
