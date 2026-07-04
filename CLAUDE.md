@@ -65,8 +65,16 @@ was built.**
   test targets line N" comment in that file's own test module, still
   points at the right code. Line numbers drift silently when a file
   grows — see `docs/mutation-testing.md`.
-- Check `backlog.md` at the start of a session; add or remove
-  entries per its own rules.
+
+## Backlog
+
+This project tracks planned work with
+[Backlog.md](https://github.com/MrLesk/Backlog.md) (`npm i -g
+backlog.md`), not ad hoc TODOs. Run `backlog instructions overview`
+at the start of any session involving nontrivial work — it explains
+when to create a task and points to the task-creation/execution/
+finalization guides. Use `backlog task ...` commands to read or
+change anything under `backlog/`; never hand-edit those files.
 
 ## Behaviour shortcuts
 
