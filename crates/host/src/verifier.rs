@@ -784,14 +784,14 @@ mod strip_tests {
         strip_strings_and_comments(input)
     }
 
-    // --- Single-quoted (non-triple) handling: lines 100-110 ---
+    // --- Single-quoted (non-triple) handling: lines 744-754 ---
 
     #[test]
     fn line_double_quoted_string_replaced_with_single_space() {
         // The base case of the non-triple branch: `"abc"` becomes a
         // single space and trailing real code is preserved verbatim.
-        // Kills line 109 (post-loop closer-consume `i < len &&
-        // bytes[i] == q`) and line 110 (`i += 1` after closer).
+        // Kills line 753 (post-loop closer-consume `i < len &&
+        // bytes[i] == q`) and line 754 (`i += 1` after closer).
         assert_eq!(s("\"abc\"y"), " y");
     }
 
@@ -799,7 +799,7 @@ mod strip_tests {
     fn newline_terminates_unclosed_double_quote_without_eating_newline() {
         // An unclosed string (`"abc\n...`) terminates at the newline.
         // The newline itself MUST stay in the output (the line-
-        // counting downstream relies on it). Kills the line-109
+        // counting downstream relies on it). Kills the line-753
         // `< → >` mutant: with `>` the post-loop closer-consume reads
         // OOB or skips, but specifically a `<` vs `>` flip on the
         // bounds check would change whether bytes[i]==q is even
@@ -812,15 +812,15 @@ mod strip_tests {
     #[test]
     fn backslash_inside_string_escapes_following_byte() {
         // `"\""` is a one-char string containing `"`. The escape on
-        // line 103 makes us advance 2 bytes past the `\` so the
+        // line 747 makes us advance 2 bytes past the `\` so the
         // following `"` is NOT treated as the closer.
         // Original output: " y" (5-byte string + 'y' → space + 'y').
-        // Mutant 103:33 (== → !=) on `bytes[i] == b'\\'`: never sees
+        // Mutant 747:33 (== → !=) on `bytes[i] == b'\\'`: never sees
         // backslash → treats inner `"` as closer at i=2 → output
-        // begins differently. Mutant 103:42 (&& → ||): combined with
+        // begins differently. Mutant 747:42 (&& → ||): combined with
         // the ==, takes escape branch unconditionally — `i += 2`
         // past end of string would walk off and hit different bytes.
-        // Mutant 104:27 (+= → *=): `i *= 2` instead of `i += 2`
+        // Mutant 748:27 (+= → *=): `i *= 2` instead of `i += 2`
         // makes the post-escape index wrong.
         assert_eq!(s("\"\\\"\"y"), " y");
     }
@@ -828,16 +828,16 @@ mod strip_tests {
     #[test]
     fn backslash_at_end_of_buffer_does_not_escape_off_end() {
         // `"\` with no following byte. The escape branch has a bounds
-        // check `i + 1 < bytes.len()` (line 103). Without it the
+        // check `i + 1 < bytes.len()` (line 747). Without it the
         // mutant `i += 2` would index past the end. We require the
         // strip to NOT panic and to emit a single space (the
         // unterminated string is treated as eating to end).
-        // Kills the line-103 bounds-check mutants:
-        // - 103:47 (+ → -, + → *): wrong arithmetic in `i + 1` makes
+        // Kills the line-747 bounds-check mutants:
+        // - 747:47 (+ → -, + → *): wrong arithmetic in `i + 1` makes
         //   the bound `i - 1 < len` (always true for i>0) or `i*1
         //   < len` (true while i < len) — both let the escape branch
         //   be taken with no following byte.
-        // - 103:51 (< → ==, < → >, < → <=): bounds check predicates
+        // - 747:51 (< → ==, < → >, < → <=): bounds check predicates
         //   that diverge from `<` near end-of-buffer.
         assert_eq!(s("\"\\"), " ");
     }
@@ -846,7 +846,7 @@ mod strip_tests {
     fn escape_in_string_does_not_skip_real_capability_after() {
         // After an escaped quote inside a string, the strip must
         // resume past the *true* closing quote and leave the
-        // following real code intact. Kills 104:27 (`i += 2` →
+        // following real code intact. Kills 748:27 (`i += 2` →
         // `i *= 2`): a wrong post-escape index would consume more
         // (or fewer) bytes than intended, shifting where the closer
         // is found, so the trailing real code starts at a different
@@ -857,12 +857,12 @@ mod strip_tests {
     #[test]
     fn unterminated_double_quoted_string_at_eof_emits_space() {
         // Pure end-of-input case (no `\n`, no closer). Kills line
-        // 109:48 (`bytes[i] == q` → `!=`): with the post-loop check
+        // 753:48 (`bytes[i] == q` → `!=`): with the post-loop check
         // mutated, an unterminated string would (under == → !=)
         // try to consume a non-quote byte as the closer. Since
         // there are zero bytes, `i < bytes.len()` is false anyway
         // → harmless on this exact input. The combination with
-        // 109:22 (`<` → `>`) would make the post-loop branch fire
+        // 753:22 (`<` → `>`) would make the post-loop branch fire
         // wrongly. Output must be " " (one space).
         assert_eq!(s("\"abc"), " ");
     }
@@ -875,11 +875,11 @@ mod strip_tests {
         assert_eq!(s("'abc'y"), " y");
     }
 
-    // --- Triple-quoted handling: lines 90, 92, 94 ---
+    // --- Triple-quoted handling: lines 734, 736, 738 ---
 
     #[test]
     fn triple_quoted_at_start_of_input_strips_entire_block() {
-        // Critical for line 92:19 (`i += 3` → `i *= 3`). When the
+        // Critical for line 736:19 (`i += 3` → `i *= 3`). When the
         // triple opens at i=0, `i *= 3` keeps i=0 — so the inner
         // while immediately matches the opener bytes as a closer
         // and breaks at i=3, leaving the docstring CONTENT exposed
@@ -891,7 +891,7 @@ mod strip_tests {
 
     #[test]
     fn triple_single_quoted_at_start_of_input_strips_entire_block() {
-        // Symmetric variant for the `'''...'''` form. Same line-92
+        // Symmetric variant for the `'''...'''` form. Same line-736
         // kill applies, AND it forces the strip's quote-symmetry to
         // work: any mutation that hard-coded the closer to `"""`
         // would survive the double-quoted test but fail here.
@@ -900,23 +900,23 @@ mod strip_tests {
 
     #[test]
     fn triple_quoted_followed_by_real_code_preserves_real_code() {
-        // The closer at line 94 must advance i past the closing
+        // The closer at line 738 must advance i past the closing
         // `"""` so the rest of the file scans normally. Kills:
-        // - 94:33 (== → !=) on `bytes[i] == q`: the closer would be
+        // - 738:33 (== → !=) on `bytes[i] == q`: the closer would be
         //   matched on any non-quote byte, ending the docstring
         //   on the very first content byte and exposing real
         //   docstring text.
-        // - 94:38 (&& → ||): turns the closer-match into "ANY of
+        // - 738:38 (&& → ||): turns the closer-match into "ANY of
         //   {bytes[i]==q OR bytes[i+1..i+3]==qq}" → premature close
         //   on a SINGLE quote in the docstring.
-        // - 94:49 (+ → *): `bytes[i * 1]` collapses the second
+        // - 738:49 (+ → *): `bytes[i * 1]` collapses the second
         //   check to `bytes[i] == q`, so the closer-match becomes
         //   `bytes[i]==q && bytes[i]==q && bytes[i+2]==q` —
         //   matches on a single-quote followed by something at i+2,
         //   prematurely closing on inputs like `"x"`.
-        // - 94:59 (&& → ||): turns the third check into OR, so
+        // - 738:59 (&& → ||): turns the third check into OR, so
         //   `bytes[i+2]==q` alone can close the docstring.
-        // - 94:75 (== → !=) on `bytes[i + 2] == q`: closer-match
+        // - 738:75 (== → !=) on `bytes[i + 2] == q`: closer-match
         //   would fire when bytes[i+2] is NOT q — i.e. on most
         //   docstring content.
         // Output: leading space (the docstring), then `\n` and the
@@ -929,7 +929,7 @@ mod strip_tests {
         // `"""said "hi" then more"""` contains a single `"` and a
         // pair `""` (no, actually `said "hi"` is `"hi"` = single+
         // single but adjacent to non-quote). Either way it's NOT
-        // `"""`. Kills the 94:38 / 94:59 (&& → ||) mutants:
+        // `"""`. Kills the 738:38 / 738:59 (&& → ||) mutants:
         // those would close on the inner single `"`, exposing
         // ` then more` (and re-processing it as code).
         assert_eq!(s("\"\"\"said \"hi\" then\"\"\""), " ");
@@ -938,7 +938,7 @@ mod strip_tests {
     #[test]
     fn triple_quote_detection_requires_three_consecutive_quotes() {
         // Input: `"x"y"z"`. Three single-quoted strings, NO triples
-        // anywhere. Kills line 90:57 (+ → *) on `bytes[i + 1]`:
+        // anywhere. Kills line 734:57 (+ → *) on `bytes[i + 1]`:
         // mutant turns it into `bytes[i] == q` (always true in this
         // branch), so triple is detected whenever bytes[i+2]==q.
         // First `"` at i=0: bytes[2]='"' → mutant says triple, eats
@@ -951,7 +951,7 @@ mod strip_tests {
     fn triple_quoted_with_inner_two_separated_quotes_does_not_close() {
         // Input: `"""x"y"z"""`. Inside the docstring there are TWO
         // single-quote bytes separated by one byte each (`"y"` and
-        // `"z"`). Kills 94:49 (+ → *): mutant collapses
+        // `"z"`). Kills 738:49 (+ → *): mutant collapses
         // `bytes[i + 1]` to `bytes[i]`, so the closer-match becomes
         // `bytes[i]==q && bytes[i]==q && bytes[i+2]==q`. At the
         // first inner `"` (position 4): bytes[4]==q AND bytes[6]==q
@@ -976,7 +976,7 @@ mod strip_tests {
         assert_eq!(s("\"x\""), " ");
     }
 
-    // --- Comment handling: line 84 ---
+    // --- Comment handling: line 727 ---
 
     #[test]
     fn line_comment_stripped_to_single_space_preserving_newline() {

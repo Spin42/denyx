@@ -2576,11 +2576,11 @@ mod helpers_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // --- translate_pattern (line 1678) ---
+    // --- translate_pattern (line 2060) ---
 
     #[test]
     fn translate_pattern_relative_no_slash_uses_recursive_glob() {
-        // Kills 1692:8 (delete `!`): mutant inverts the condition →
+        // Kills 2074:8 (delete `!`): mutant inverts the condition →
         // a no-slash pattern would route to the final
         // `<root>/<pattern>` form (no `**/`).
         let root = PathBuf::from("/p");
@@ -2589,7 +2589,7 @@ mod helpers_tests {
 
     #[test]
     fn translate_pattern_relative_with_slash_root_anchors() {
-        // Kills 1692:8 in the other direction: a slash-bearing
+        // Kills 2074:8 in the other direction: a slash-bearing
         // relative pattern would become `<root>/**/<pattern>`,
         // changing match semantics (matches at any nesting depth).
         let root = PathBuf::from("/p");
@@ -2602,11 +2602,11 @@ mod helpers_tests {
         assert_eq!(translate_pattern(&root, "/etc/passwd"), "/etc/passwd");
     }
 
-    // --- merge_policy_files sandbox overlay (line 619) ---
+    // --- merge_policy_files sandbox overlay (line 734) ---
 
     #[test]
     fn merge_policy_files_sandbox_default_keeps_base() {
-        // Kills 619:49 (== → !=): mutant flips the predicate and
+        // Kills 734:49 (== → !=): mutant flips the predicate and
         // would take OVER's default value, dropping base's bwrap.
         let base = PolicyFile::from_toml_str(
             r#"
@@ -2640,7 +2640,7 @@ sandbox = "bwrap"
         assert_eq!(merged.subprocess.sandbox, SandboxMode::Bwrap);
     }
 
-    // --- guard_sandbox_available (line 727) ---
+    // --- guard_sandbox_available (line 867) ---
 
     #[test]
     fn guard_sandbox_available_errors_when_bwrap_missing() {
@@ -2689,7 +2689,7 @@ sandbox = "none"
         assert!(policy.guard_sandbox_available().is_ok());
     }
 
-    // --- guard_audit_log (line 808) ---
+    // --- guard_audit_log (line 974) ---
 
     #[test]
     fn guard_audit_log_errors_when_policy_grants_write() {

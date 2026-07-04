@@ -51,6 +51,22 @@ minimum_test_timeout = 30.0
 # every entry here MUST have a comment explaining why it's
 # equivalent. If you can't write the explanation, it's not equivalent
 # and you should add a test instead.
+#
+# MAINTENANCE WARNING: several entries below are anchored to an exact
+# `file:line` position (cargo-mutants mutant names are
+# `file:line:col: replace X with Y in fn`). These line numbers drift
+# silently whenever code is added/removed above them in the same
+# file — a stale anchor doesn't wrongly suppress a different mutant
+# (the function name in the pattern won't coincidentally match at the
+# wrong line), it just stops matching anything, so the "equivalent"
+# mutant it used to cover reappears as a new "missed" mutant in the
+# next report. This has already happened once (verifier.rs nearly
+# tripled in size from the T6 static taint-propagation pass and every
+# line anchor below went stale). If you edit crates/policy/src/lib.rs,
+# crates/host/src/taint.rs, or crates/host/src/verifier.rs, re-verify
+# every line-anchored pattern below (and the matching in-code comments
+# in each file's own test module) still points at the right code —
+# see CLAUDE.md's "Maintenance duties" section.
 exclude_re = [
     # NOTE on regex format: cargo-mutants reports mutant names as
     # `<file>:<line>:<col>: <description>`, where `<description>`
@@ -105,10 +121,10 @@ exclude_re = [
     # to the same result under `% 26`. The same coincidence applies
     # to 'a' = 97 ≡ 19 (mod 26) — `(b - 'a' + n) % 26 == (b + 'a' + n) % 26`
     # holds. See the docstring on `compute_transforms`.
-    "taint\\.rs:24[12]:.*replace - with \\+ in compute_transforms",
-    "taint\\.rs:24[12]:.*replace - with / in compute_transforms",
+    "taint\\.rs:25[78]:.*replace - with \\+ in compute_transforms",
+    "taint\\.rs:25[78]:.*replace - with / in compute_transforms",
 
-    # `looks_like_path_arg` chained `||` (lines 1574-1576): the
+    # `looks_like_path_arg` chained `||` (lines 1956-1958): the
     # path-prefix detection chain is
     #   arg.starts_with('/')
     #     || arg.starts_with("./")
@@ -126,7 +142,7 @@ exclude_re = [
     # gate_decisions.rs (which targets the `||` between "~/" and
     # "~"). The other three `||` mutations are observably
     # equivalent.
-    "lib\\.rs:157[456]:.*replace \\|\\| with && in looks_like_path_arg",
+    "lib\\.rs:195[678]:.*replace \\|\\| with && in looks_like_path_arg",
 
     # `redact_lines` line-spans assignment: `if m >= *start && m
     # < *end`. The `< with <=` mutant changes whether a match
@@ -149,21 +165,21 @@ exclude_re = [
     #      boundary itself.
     # The mutant therefore changes WHICH match (also) clobbers an
     # already-clobbered line. Output is byte-identical.
-    "taint\\.rs:489:.*replace < with <= in redact_lines",
+    "taint\\.rs:508:.*replace < with <= in redact_lines",
 
-    # `strip_strings_and_comments` escape-bounds check at line 103:
+    # `strip_strings_and_comments` escape-bounds check at line 747:
     # `if bytes[i] == b'\\' && i + 1 < bytes.len() { i += 2 } else
     # { i += 1 }`. The bounds check is a guard against `i += 2`
     # walking off the end of the buffer when bytes[i]='\\' is the
     # LAST byte. Three mutations at this position are observably
     # equivalent:
     #
-    #   - 103:47 `+ → -`: `i - 1 < len`. For all i >= 1 (we're
+    #   - 747:47 `+ → -`: `i - 1 < len`. For all i >= 1 (we're
     #     past the opener), `i - 1` is in-range and `i - 1 < len`
     #     is always true.
-    #   - 103:47 `+ → *`: `i * 1 < len` = `i < len`, also always
+    #   - 747:47 `+ → *`: `i * 1 < len` = `i < len`, also always
     #     true inside this loop (the outer while gates on i < len).
-    #   - 103:51 `< → <=`: `i + 1 <= len`, true when i + 1 == len.
+    #   - 747:51 `< → <=`: `i + 1 <= len`, true when i + 1 == len.
     #
     # In all three cases the mutant takes the escape branch (i += 2)
     # WHERE THE ORIGINAL took the else branch (i += 1) — but ONLY
@@ -178,8 +194,8 @@ exclude_re = [
     # consumes a closer byte. Both then `out.push(b' ')`. The outer
     # while at the top gates on `i < len` — both i values fail that
     # condition. Output is byte-identical.
-    "verifier\\.rs:103:.*replace \\+ with [-*] in strip_strings_and_comments",
-    "verifier\\.rs:103:.*replace < with <= in strip_strings_and_comments",
+    "verifier\\.rs:747:.*replace \\+ with [-*] in strip_strings_and_comments",
+    "verifier\\.rs:747:.*replace < with <= in strip_strings_and_comments",
 
     # *::as_str helpers (SandboxMode::as_str, FsAction::as_str,
     # HttpVerb::as_str) only feed into error-message rendering. The

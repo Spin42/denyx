@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn redact_lines_chunking_runs_on_secret_of_exact_min_length() {
-        // Targets `< with <=` on line 468 (the
+        // Targets `< with <=` on line 487 (the
         // `if taint.len() < CHUNKING_MIN_LEN` skip).
         //
         // For a secret of length EXACTLY CHUNKING_MIN_LEN = 8, the
@@ -918,9 +918,9 @@ mod tests {
 
     #[test]
     fn redact_lines_chunking_skips_when_density_well_below_threshold() {
-        // Targets `< with ==` and `< with <=` on line 480 (the
+        // Targets `< with ==` and `< with <=` on line 499 (the
         // `if density < CHUNKING_MIN_DENSITY { continue; }`),
-        // PLUS the `/ with *` and `/ with %` on line 479.
+        // PLUS the `/ with *` and `/ with %` on line 498.
         //
         // Setup: a 12-char secret whose chars appear as a sparse
         // subsequence in a long paragraph (density ~ 12/600 = 0.02,
@@ -928,15 +928,15 @@ mod tests {
         // chunking detection doesn't clobber. The line is
         // unmodified.
         //
-        // - Mutant `<` → `==` on line 480: density 0.02 != 0.05,
+        // - Mutant `<` → `==` on line 499: density 0.02 != 0.05,
         //   so the skip condition is false; chunking runs and
         //   wrongly clobbers.
-        // - Mutant `<` → `<=` on line 480: same shape (0.02 < 0.05
+        // - Mutant `<` → `<=` on line 499: same shape (0.02 < 0.05
         //   is true so original DOES skip; mutant 0.02 <= 0.05 is
         //   ALSO true → also skips. Same behavior at this density.
         //   To kill this one we additionally need a test at exactly
         //   the threshold — see `redact_lines_chunking_runs_at_exact_density_threshold`.
-        // - Mutants on line 479 (/ with * or %): density becomes
+        // - Mutants on line 498 (/ with * or %): density becomes
         //   matches*span (huge) or matches%span (>=0). Either way,
         //   not < threshold → mutant doesn't skip → wrong clobber.
         let r = TaintRegistry::default();
