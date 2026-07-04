@@ -68,6 +68,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -82,6 +84,15 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
+
+      # denyx-runtime-starlark/build.rs requires the .wasm artefact at
+      # compile time (same requirement as ci.yml's build/test/clippy
+      # jobs — see scripts/build-runtime-starlark.sh). Missing this
+      # step made every scheduled run since 2026-05-18 fail at the
+      # baseline check below with "starlark_interpreter.wasm is
+      # missing", before mutation testing ever started.
+      - name: Stage starlark_interpreter.wasm
+        run: bash scripts/build-runtime-starlark.sh
 
       # Sanity check: the unmodified tree must pass tests before we
       # run the baseline. Any failure here would otherwise look like
