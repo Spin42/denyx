@@ -134,6 +134,81 @@ fn check_wasm_no_output_after_local_only_read(
     Err(wasmtime::Error::msg("output refused after local-only read"))
 }
 
+/// Wasm-path mirror of `HostCtx::check_call_limits` (native runner,
+/// `crates/host/src/lib.rs`). Called at the top of EVERY effecting
+/// import (read and write alike — a runaway loop calling an
+/// allow-listed *read* capability many times is exactly the same
+/// "agentic mistake" shape as a write loop). Checked before
+/// `call_counts` is incremented, so the Nth call against a cap of N
+/// is allowed and the (N+1)th is refused.
+fn check_wasm_call_limits(
+    caller: &mut Caller<'_, WasmState>,
+    policy: &denyx_policy::Policy,
+    audit: &Arc<dyn crate::AuditSink>,
+    task_id: &str,
+    capability: &'static str,
+) -> Result<(), wasmtime::Error> {
+    let max_total = policy.max_total_calls();
+    let max_for_cap = policy.max_calls_per_capability().get(capability).copied();
+    if max_total.is_none() && max_for_cap.is_none() {
+        return Ok(());
+    }
+    let counts = &caller.data().call_counts;
+    if let Some(max_total) = max_total {
+        let total_so_far: u64 = counts.values().sum();
+        if total_so_far >= max_total {
+            let msg = format!(
+                "[runtime].max_total_calls = {max_total} reached ({total_so_far} \
+                 calls already made this run); {capability} refused"
+            );
+            return Err(deny_wasm_call_limit(
+                caller, audit, task_id, capability, msg,
+            ));
+        }
+    }
+    if let Some(max_for_cap) = max_for_cap {
+        let count_so_far = *counts.get(capability).unwrap_or(&0);
+        if count_so_far >= max_for_cap {
+            let msg = format!(
+                "[runtime].max_calls_per_capability[{capability:?}] = {max_for_cap} \
+                 reached ({count_so_far} calls already made this run)"
+            );
+            return Err(deny_wasm_call_limit(
+                caller, audit, task_id, capability, msg,
+            ));
+        }
+    }
+    caller
+        .data_mut()
+        .call_counts
+        .entry(capability.to_string())
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
+    Ok(())
+}
+
+fn deny_wasm_call_limit(
+    caller: &mut Caller<'_, WasmState>,
+    audit: &Arc<dyn crate::AuditSink>,
+    task_id: &str,
+    capability: &'static str,
+    msg: String,
+) -> wasmtime::Error {
+    let step = caller
+        .data()
+        .step_counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    audit.emit(crate::AuditEvent::denied(
+        task_id,
+        step,
+        capability,
+        "call-limit",
+        &msg,
+    ));
+    caller.data_mut().captured_error = Some(crate::DenyxError::RuntimeLimit(msg));
+    wasmtime::Error::msg("call limit reached")
+}
+
 use denyx_policy::Policy;
 use denyx_runtime_starlark::{STARLARK_INTERPRETER_CWASM, STARLARK_INTERPRETER_WASM};
 
@@ -271,6 +346,7 @@ impl WasmRunner {
             step_counter: std::sync::atomic::AtomicU32::new(0),
             taint_registry: TaintRegistry::default(),
             start_time: Instant::now(),
+            call_counts: std::collections::HashMap::new(),
         };
         let mut store = Store::new(&self.engine, state);
         store
@@ -332,6 +408,13 @@ impl WasmRunner {
                       path_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(
+                        &mut caller,
+                        &fs_read_policy,
+                        &fs_read_audit,
+                        &fs_read_task_id,
+                        "fs.read",
+                    )?;
+                    check_wasm_call_limits(
                         &mut caller,
                         &fs_read_policy,
                         &fs_read_audit,
@@ -507,6 +590,13 @@ impl WasmRunner {
                         &fs_read_range_task_id,
                         "fs.read",
                     )?;
+                    check_wasm_call_limits(
+                        &mut caller,
+                        &fs_read_range_policy,
+                        &fs_read_range_audit,
+                        &fs_read_range_task_id,
+                        "fs.read",
+                    )?;
                     use std::io::{Read, Seek, SeekFrom};
                     // 1. Read path from guest memory.
                     let path = read_string_from_guest(&mut caller, path_ptr, path_len, "path")?;
@@ -653,6 +743,7 @@ impl WasmRunner {
                       content_len: u32|
                       -> Result<(), wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
+                    check_wasm_call_limits(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
                     // 1. Read path and content from guest memory.
                     let memory = caller
@@ -817,6 +908,7 @@ impl WasmRunner {
                       path_len: u32|
                       -> Result<(), wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
+                    check_wasm_call_limits(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
                     // 1. Read path from guest memory.
                     let memory = caller
@@ -967,6 +1059,13 @@ impl WasmRunner {
                       name_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(
+                        &mut caller,
+                        &env_read_policy,
+                        &env_read_audit,
+                        &env_read_task_id,
+                        "env.read",
+                    )?;
+                    check_wasm_call_limits(
                         &mut caller,
                         &env_read_policy,
                         &env_read_audit,
@@ -1127,6 +1226,7 @@ impl WasmRunner {
                       argv_json_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
+                    check_wasm_call_limits(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
                     // 1. Read argv JSON from guest memory.
                     let memory = caller
@@ -1468,6 +1568,7 @@ impl WasmRunner {
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
+                    check_wasm_call_limits(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let parsed = match http_get_policy.check_http_get(&url) {
@@ -1661,6 +1762,7 @@ impl WasmRunner {
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
+                    check_wasm_call_limits(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
@@ -1850,6 +1952,7 @@ impl WasmRunner {
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
+                    check_wasm_call_limits(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
@@ -2039,6 +2142,7 @@ impl WasmRunner {
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
+                    check_wasm_call_limits(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
@@ -2227,6 +2331,7 @@ impl WasmRunner {
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
+                    check_wasm_call_limits(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
                     check_wasm_no_output_after_local_only_read(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let parsed = match http_delete_policy.check_http_delete(&url) {
@@ -2603,6 +2708,12 @@ struct WasmState {
     /// rejected with `DenyxError::RuntimeLimit`. Mirrors the
     /// in-process Runner's `HostCtx::start_time` (lib.rs:347).
     start_time: Instant,
+    /// Calls made so far this run, by capability name. Mirrors the
+    /// in-process Runner's `HostCtx::call_counts` (lib.rs) — backs
+    /// both `[runtime].max_calls_per_capability` and
+    /// `[runtime].max_total_calls` (summed across every key). See
+    /// `check_wasm_call_limits`.
+    call_counts: std::collections::HashMap<String, u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3920,5 +4031,122 @@ fs.write({:?}, "hello")
         let _ = std::fs::remove_file(&policy_path);
         let _ = std::fs::remove_file(&secret_path);
         assert_eq!(outcome.printed, vec!["unrelated to the secret".to_string()]);
+    }
+
+    // ---- [runtime].max_calls_per_capability / max_total_calls (wasm) ----
+    //
+    // Mirrors crates/host/tests/runtime_call_limits.rs's native-runner
+    // tests against WasmRunner.
+
+    #[test]
+    fn max_calls_per_capability_allows_up_to_the_cap_and_denies_the_next() {
+        let fixture = unique_tmp_path("call_limit_fixture");
+        std::fs::write(&fixture, "hello").expect("write fixture");
+        let path_lit = fixture.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "call_limit_deny",
+            &format!(
+                "[filesystem]\nread_allow = [\"{path_lit}\"]\n\n\
+                 [runtime.max_calls_per_capability]\n\"fs.read\" = 2\n"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src = format!("p = \"{path_lit}\"\nfs.read(p)\nfs.read(p)\nfs.read(p)\n");
+        let err = runner
+            .run("t1", &src, "test.star")
+            .expect_err("the 3rd fs.read call must be refused once the cap of 2 is reached");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&fixture);
+        assert!(
+            matches!(err, DenyxError::RuntimeLimit(_)),
+            "expected DenyxError::RuntimeLimit, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("max_calls_per_capability"),
+            "expected a message naming the cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn max_calls_per_capability_two_calls_at_the_cap_succeed() {
+        let fixture = unique_tmp_path("call_limit_fixture_ok");
+        std::fs::write(&fixture, "hello").expect("write fixture");
+        let path_lit = fixture.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "call_limit_ok",
+            &format!(
+                "[filesystem]\nread_allow = [\"{path_lit}\"]\n\n\
+                 [runtime.max_calls_per_capability]\n\"fs.read\" = 2\n"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src = format!(
+            "p = \"{path_lit}\"\nfs.read(p)\nfs.read(p)\nprint(\"both calls succeeded\")\n"
+        );
+        let outcome = runner
+            .run("t1", &src, "test.star")
+            .expect("exactly 2 calls against a cap of 2 must succeed");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&fixture);
+        assert_eq!(outcome.printed, vec!["both calls succeeded".to_string()]);
+    }
+
+    #[test]
+    fn max_total_calls_counts_across_different_capabilities() {
+        let fixture = unique_tmp_path("total_call_limit_fixture");
+        std::fs::write(&fixture, "hello").expect("write fixture");
+        let path_lit = fixture.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "total_call_limit",
+            &format!(
+                "[filesystem]\nread_allow = [\"{path_lit}\"]\n\n\
+                 [environment]\nallow_vars = [\"PATH\"]\n\n\
+                 [runtime]\nmax_total_calls = 2\n"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src = format!("p = \"{path_lit}\"\nfs.read(p)\nenv.read(\"PATH\")\nfs.read(p)\n");
+        let err = runner
+            .run("t1", &src, "test.star")
+            .expect_err("the 3rd call must be refused once max_total_calls=2 is reached");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&fixture);
+        assert!(
+            matches!(err, DenyxError::RuntimeLimit(_)),
+            "expected DenyxError::RuntimeLimit, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("max_total_calls"),
+            "expected a message naming the cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn no_caps_configured_allows_unlimited_calls() {
+        let fixture = unique_tmp_path("no_call_limit_fixture");
+        std::fs::write(&fixture, "hello").expect("write fixture");
+        let path_lit = fixture.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "no_call_limit",
+            &format!("[filesystem]\nread_allow = [\"{path_lit}\"]\n"),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src = format!(
+            "p = \"{path_lit}\"\ndef go():\n    for _ in range(50):\n        fs.read(p)\n    print(\"done\")\ngo()\n"
+        );
+        let outcome = runner
+            .run("t1", &src, "test.star")
+            .expect("with no caps configured, repeated calls are unaffected");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&fixture);
+        assert_eq!(outcome.printed, vec!["done".to_string()]);
     }
 }

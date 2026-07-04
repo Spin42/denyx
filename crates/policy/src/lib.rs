@@ -6,6 +6,7 @@
 //! (host/IP allowlist + denylist), and functions (Starlark builtin
 //! allowlist).
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
@@ -272,6 +273,27 @@ pub struct RuntimePolicy {
     /// unchanged behavior.
     #[serde(default)]
     pub no_output_after_local_only_read: bool,
+    /// Per-capability call-count cap (e.g. `net.http_get = 20`). The
+    /// (N+1)th call to a capped capability is refused with
+    /// `RuntimeLimit`, regardless of wall-time or fuel remaining. Only
+    /// bounds call *count* — `[runtime].max_seconds` and (on the wasm
+    /// path) fuel already bound time/CPU; nothing previously bounded
+    /// repetition, so a runaway loop calling an individually-harmless,
+    /// allow-listed capability many times sailed through unmodified.
+    /// This targets exactly that "agentic mistake" shape (a loop, not
+    /// a single dangerous call), not malice.
+    ///
+    /// Empty map (default) ⇒ no per-capability cap.
+    #[serde(default)]
+    pub max_calls_per_capability: BTreeMap<String, u64>,
+    /// Global cap on the total number of effecting capability calls
+    /// (summed across every capability) in a single run. Same
+    /// motivation as `max_calls_per_capability`, at the whole-script
+    /// level instead of per-capability.
+    ///
+    /// `None` (default) ⇒ no total-call cap.
+    #[serde(default)]
+    pub max_total_calls: Option<u64>,
 }
 
 /// Full record for a `[tools.X]` entry: the capabilities it requires
@@ -566,6 +588,31 @@ where
         .collect())
 }
 
+/// Merge two call-count-cap maps with "most restrictive wins": for a
+/// key present on both sides, keep the smaller value; a key present
+/// on only one side keeps that side's value unchanged. See the merge
+/// arm's comment in `merge_policy_files` for why this direction (not
+/// override, not concat) is the safe one for a numeric cap.
+fn merge_min_u64_map(
+    mut base: BTreeMap<String, u64>,
+    over: BTreeMap<String, u64>,
+) -> BTreeMap<String, u64> {
+    for (k, v) in over {
+        base.entry(k).and_modify(|b| *b = (*b).min(v)).or_insert(v);
+    }
+    base
+}
+
+/// `Option<u64>` counterpart of [`merge_min_u64_map`]: `Some` on both
+/// sides keeps the smaller value; `Some` on only one side keeps it.
+fn merge_min_opt_u64(base: Option<u64>, over: Option<u64>) -> Option<u64> {
+    match (base, over) {
+        (Some(b), Some(o)) => Some(b.min(o)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
 fn merge_deny_args(
     mut base: std::collections::BTreeMap<String, Vec<String>>,
     over: std::collections::BTreeMap<String, Vec<String>>,
@@ -693,6 +740,20 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
             // omission.
             no_output_after_local_only_read: base.runtime.no_output_after_local_only_read
                 || over.runtime.no_output_after_local_only_read,
+            // Min-wins, not override: a call-count cap only ever makes
+            // execution MORE restrictive (like the deny-lists and the
+            // no-output flag above), so a base preset's cap can't be
+            // silently loosened by an inheriting policy that sets a
+            // higher number. A key present in only one side keeps that
+            // side's value.
+            max_calls_per_capability: merge_min_u64_map(
+                base.runtime.max_calls_per_capability,
+                over.runtime.max_calls_per_capability,
+            ),
+            max_total_calls: merge_min_opt_u64(
+                base.runtime.max_total_calls,
+                over.runtime.max_total_calls,
+            ),
         },
         tools: merge_tools(base.tools, over.tools),
         requires_approval: concat_dedup(base.requires_approval, over.requires_approval),
@@ -1333,6 +1394,16 @@ impl Policy {
     /// See `RuntimePolicy::no_output_after_local_only_read`'s docs.
     pub fn no_output_after_local_only_read(&self) -> bool {
         self.file.runtime.no_output_after_local_only_read
+    }
+
+    /// `[runtime].max_calls_per_capability` map. Empty when unset.
+    pub fn max_calls_per_capability(&self) -> &BTreeMap<String, u64> {
+        &self.file.runtime.max_calls_per_capability
+    }
+
+    /// `[runtime].max_total_calls`, if set.
+    pub fn max_total_calls(&self) -> Option<u64> {
+        self.file.runtime.max_total_calls
     }
 
     /// Compute the (name, value) env pairs to pass to a subprocess

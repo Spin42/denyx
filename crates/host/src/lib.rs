@@ -263,6 +263,7 @@ impl Runner {
             captured: RefCell::new(None),
             taint: TaintRegistry::default(),
             start_time: std::time::Instant::now(),
+            call_counts: RefCell::new(std::collections::HashMap::new()),
         };
 
         let globals = GlobalsBuilder::extended_by(&[
@@ -354,18 +355,75 @@ struct HostCtx {
     /// effecting capability call is allowed to run before being
     /// rejected with `RuntimeLimit`.
     start_time: std::time::Instant,
+    /// Calls made so far this run, by capability name. Backs both
+    /// `[runtime].max_calls_per_capability` (looked up directly) and
+    /// `[runtime].max_total_calls` (summed across every key) — see
+    /// `check_call_limits`.
+    call_counts: RefCell<std::collections::HashMap<String, u64>>,
 }
 
 impl HostCtx {
-    /// Bump the step counter AND enforce the wall-time deadline.
-    /// Every effecting builtin opens with `let step = ctx.begin_call(<cap>)?;`
-    /// so deadline-exceeded scripts fail before any audit event is
-    /// emitted or any work begins.
+    /// Bump the step counter AND enforce the wall-time deadline and
+    /// call-count caps. Every effecting builtin opens with
+    /// `let step = ctx.begin_call(<cap>)?;` so a deadline-exceeded or
+    /// over-cap script fails before any audit event is emitted or any
+    /// work begins.
     fn begin_call(&self, capability: &str) -> Result<u32, DenyxError> {
         self.check_deadline(capability)?;
+        self.check_call_limits(capability)?;
+        *self
+            .call_counts
+            .borrow_mut()
+            .entry(capability.to_string())
+            .or_insert(0) += 1;
         let mut s = self.step.borrow_mut();
         *s += 1;
         Ok(*s)
+    }
+
+    /// Bail with `RuntimeLimit` if `[runtime].max_total_calls` or
+    /// `[runtime].max_calls_per_capability[capability]` has already
+    /// been reached by calls made *before* this one. Checked before
+    /// `call_counts` is incremented, so the Nth call against a cap of
+    /// N is allowed and the (N+1)th is refused.
+    fn check_call_limits(&self, capability: &str) -> Result<(), DenyxError> {
+        let counts = self.call_counts.borrow();
+        if let Some(max_total) = self.policy.max_total_calls() {
+            let total_so_far: u64 = counts.values().sum();
+            if total_so_far >= max_total {
+                let msg = format!(
+                    "[runtime].max_total_calls = {max_total} reached ({total_so_far} \
+                     calls already made this run); {capability} refused"
+                );
+                drop(counts);
+                return self.deny_call_limit(capability, msg);
+            }
+        }
+        if let Some(&max_for_cap) = self.policy.max_calls_per_capability().get(capability) {
+            let count_so_far = *counts.get(capability).unwrap_or(&0);
+            if count_so_far >= max_for_cap {
+                let msg = format!(
+                    "[runtime].max_calls_per_capability[{capability:?}] = {max_for_cap} \
+                     reached ({count_so_far} calls already made this run)"
+                );
+                drop(counts);
+                return self.deny_call_limit(capability, msg);
+            }
+        }
+        Ok(())
+    }
+
+    fn deny_call_limit(&self, capability: &str, msg: String) -> Result<(), DenyxError> {
+        let step = *self.step.borrow();
+        self.emit(AuditEvent::denied(
+            &self.task_id,
+            step,
+            capability,
+            "call-limit",
+            &msg,
+        ));
+        self.capture(CapturedKind::RuntimeLimit, &msg);
+        Err(DenyxError::RuntimeLimit(msg))
     }
 
     /// Bail with `RuntimeLimit` if the wall-time deadline has been
