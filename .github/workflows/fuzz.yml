@@ -1,0 +1,112 @@
+name: Fuzz testing
+
+on:
+  # Weekly, offset from mutants.yml's Monday slot so the two slow
+  # periodic-audit workflows don't compete for runner minutes on the
+  # same day. Real (libFuzzer, coverage-guided) fuzzing is too slow
+  # and non-deterministic for PR-time — see fuzz/README.md's "CI"
+  # section and docs/mutation-testing.md's "Schedule, not gate" for
+  # the same reasoning applied to mutation testing.
+  schedule:
+    - cron: "0 6 * * 4" # Thursdays at 06:00 UTC
+  # Manual trigger from the Actions tab — useful right after a change
+  # to a fuzzed surface (verifier, policy TOML parsing, glob
+  # compilation) to get feedback without waiting for the weekly cycle.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: cargo fuzz run ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # Generous budget: the FIRST run on a cold cache compiles
+    # wasmtime/cranelift/starlark with ASan+coverage instrumentation
+    # from scratch, which alone took several minutes in local
+    # testing — separate from the bounded fuzzing time below. Once
+    # the build-artifact cache is warm, most of this budget goes
+    # unused.
+    timeout-minutes: 90
+    strategy:
+      # Each target's crash (or lack of one) is independent — one
+      # target's finding shouldn't block the other two from reporting.
+      fail-fast: false
+      matrix:
+        target: [verifier, policy_toml, policy_globs]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1
+
+      # denyx-runtime-starlark/build.rs requires the .wasm artefact at
+      # compile time (same requirement as ci.yml's build/test/clippy
+      # jobs) — the fuzz crate depends on denyx-host, which depends
+      # on it transitively.
+      - name: Stage starlark_interpreter.wasm
+        run: bash scripts/build-runtime-starlark.sh
+
+      # taiki-e/install-action does not package cargo-fuzz (checked
+      # against its manifests directory); cargo-fuzz itself is a
+      # stable-compiled CLI (only the fuzz TARGETS it builds need
+      # nightly), so a plain `cargo install` is the straightforward
+      # path.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Two independent caches: the ASan+coverage-instrumented build
+      # (fuzz/target/) is expensive to rebuild but doesn't need to
+      # survive a dependency bump, so it's keyed on Cargo.lock; the
+      # corpus (fuzz/corpus/<target>/) is cheap but should accumulate
+      # coverage across weeks regardless of dependency changes, so
+      # it's keyed on the target name alone and saved unconditionally.
+      - name: Cache fuzz build artefacts
+        uses: actions/cache@v4
+        with:
+          path: fuzz/target
+          key: fuzz-build-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: fuzz-build-${{ matrix.target }}-
+
+      - name: Cache fuzz corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # 10 minutes of libFuzzer time per target. Not exhaustive — this
+      # is a periodic audit signal that compounds via the growing
+      # corpus, not a one-shot completeness claim.
+      - name: Run cargo fuzz (${{ matrix.target }}, 600s)
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
+
+      # Save the corpus even though the run above would have failed
+      # the job (and skipped further steps) on a crash — `if: always()`
+      # keeps whatever coverage was accumulated before the crash.
+      - name: Save fuzz corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      # A libFuzzer crash is a real, reproducible bug (panic, OOM, or
+      # hang on a constructed input) — unlike a surviving mutant, this
+      # is not an expected/informational outcome, so the job fails
+      # loudly (no continue-on-error) rather than soft-failing. It's
+      # schedule/dispatch-only, so a crash never blocks a PR merge; it
+      # just needs a human to look at the uploaded artefact.
+      - name: Upload crash artefact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 90
