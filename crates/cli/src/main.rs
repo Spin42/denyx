@@ -18,6 +18,7 @@
 
 mod doctor;
 mod hook;
+mod hook_daemon;
 mod host_config;
 mod init;
 
@@ -80,6 +81,14 @@ enum Command {
     /// MCP surface. See `crates/cli/src/hook.rs` module docs for the
     /// trade-offs (no cross-call IFC, shell composition refused).
     Hook(hook::HookArgs),
+    /// Long-lived `denyx hook` backend: keeps a policy resident behind
+    /// a Unix socket so `denyx hook --daemon-socket <path>` skips the
+    /// cold policy parse on every call. Optional — `denyx hook` on its
+    /// own always works standalone. See `crates/cli/src/hook_daemon.rs`
+    /// module docs for the wire protocol and its trade-offs (fixed
+    /// daemon-side config, no self-daemonization).
+    #[command(name = "hook-daemon")]
+    HookDaemon(hook_daemon::HookDaemonCli),
 }
 
 #[derive(Parser, Debug)]
@@ -549,6 +558,10 @@ fn dispatch() -> Result<(), CliError> {
             std::process::exit(code);
         }
         Command::Hook(args) => hook::run_and_exit(args),
+        Command::HookDaemon(cli) => {
+            let code = hook_daemon::run(cli);
+            std::process::exit(code);
+        }
     }
 }
 

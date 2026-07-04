@@ -83,9 +83,31 @@ pub struct HookArgs {
     /// Task id stamped into audit events. Defaults to "hook";
     /// pass the host's session id (available on the hook request as
     /// `session_id`) via a wrapper script if you want per-session
-    /// grouping in the audit log.
+    /// grouping in the audit log. Ignored when a request is
+    /// successfully served by a daemon (`--daemon-socket`) — the
+    /// daemon stamps its own fixed `--task-id` from `denyx hook-daemon
+    /// start`, since the wire protocol doesn't carry per-request
+    /// overrides. See `hook_daemon` module doc.
     #[arg(long, default_value = "hook")]
     pub task_id: String,
+
+    /// Unix socket path of a running `denyx hook-daemon` (see `denyx
+    /// hook-daemon start`). If given and the daemon is reachable, the
+    /// request is delegated to it — skipping this process's own
+    /// policy parse, which is `denyx hook`'s dominant per-call cost
+    /// and the main reason a slow invocation could ever approach a
+    /// calling harness's hook timeout (Claude Code's `PreToolUse`
+    /// hooks fail OPEN on timeout — see this module's top-level doc).
+    /// If the daemon is unreachable (not started, crashed, stale
+    /// socket file) this process transparently falls back to
+    /// evaluating the request itself with ITS OWN `--policy`/
+    /// `--audit-log`/`--task-id` — daemon availability only affects
+    /// latency, never correctness of an individual invocation. It
+    /// DOES mean the daemon's fixed policy must be kept consistent
+    /// with what direct-mode invocations would use; see `denyx
+    /// hook-daemon start`'s docs.
+    #[arg(long)]
+    pub daemon_socket: Option<PathBuf>,
 }
 
 /// Run `denyx hook` and terminate the process directly. Never
@@ -126,19 +148,62 @@ enum Decision {
     Deny(String),
 }
 
-/// Read one `PreToolUse` request from stdin, translate it into the
-/// equivalent Denyx capability check, emit an audit event, and
-/// either print an ALLOW decision to stdout (returning `Ok`) or
-/// return the deny reason (caller exits 2 without printing JSON —
-/// exit code alone is the hard-deny signal; see module doc).
+/// Read one `PreToolUse` request from stdin and either delegate it to
+/// a running daemon (`--daemon-socket`, see `hook_daemon` module doc
+/// for the wire protocol and its trade-offs) or evaluate it directly
+/// in-process — falling back to direct evaluation automatically if
+/// the daemon is configured but unreachable, so daemon availability
+/// is purely a latency optimization, never a new failure mode.
 fn execute(args: &HookArgs) -> Result<(), String> {
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
         .map_err(|e| format!("failed to read stdin: {e}"))?;
+
+    if let Some(socket_path) = &args.daemon_socket {
+        if let Ok(response) = crate::hook_daemon::client_request(socket_path, &input) {
+            return match response {
+                Ok(output) => {
+                    println!("{output}");
+                    Ok(())
+                }
+                Err(reason) => Err(reason),
+            };
+        }
+        // Daemon configured but unreachable (not started, crashed,
+        // stale socket file) — fall back to direct evaluation below
+        // using this process's own args, exactly as if
+        // --daemon-socket had never been passed.
+    }
+
     let request: Value =
         serde_json::from_str(&input).map_err(|e| format!("malformed JSON on stdin: {e}"))?;
+    let policy = load_policy(args.policy.as_deref())?;
+    let audit = build_audit_sink(args, &policy);
+    match handle_request(&policy, &audit, &args.task_id, &request) {
+        Ok(output) => {
+            println!("{output}");
+            Ok(())
+        }
+        Err(reason) => Err(reason),
+    }
+}
 
+/// Core request handler shared by the direct (in-process) path and
+/// the daemon server (`hook_daemon::cmd_start`): translate the
+/// request into a Denyx capability check, emit an audit event, and
+/// return either the ALLOW decision's JSON payload (caller prints it
+/// to stdout and exits 0) or the deny reason (caller exits 2 without
+/// printing JSON — exit code alone is the hard-deny signal; see
+/// module doc). Returning the payload rather than printing it
+/// directly is what lets the daemon send the exact same bytes back
+/// over the wire instead of to its own stdout.
+pub(crate) fn handle_request(
+    policy: &Policy,
+    audit: &Arc<dyn AuditSink>,
+    task_id: &str,
+    request: &Value,
+) -> Result<String, String> {
     let tool_name = request
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -146,10 +211,8 @@ fn execute(args: &HookArgs) -> Result<(), String> {
         .to_string();
     let tool_input = request.get("tool_input").cloned().unwrap_or(Value::Null);
 
-    let policy = load_policy(args.policy.as_deref())?;
-    let decision = translate_and_check(&tool_name, &tool_input, &policy);
-
-    emit_audit(args, &policy, &tool_name, &tool_input, &decision);
+    let decision = translate_and_check(&tool_name, &tool_input, policy);
+    emit_audit(audit, task_id, &tool_name, &tool_input, &decision);
 
     match decision {
         Decision::Allow => {
@@ -160,14 +223,13 @@ fn execute(args: &HookArgs) -> Result<(), String> {
                     "permissionDecisionReason": "denyx policy permits this call",
                 }
             });
-            println!("{output}");
-            Ok(())
+            Ok(output.to_string())
         }
         Decision::Deny(reason) => Err(reason),
     }
 }
 
-fn load_policy(path: Option<&Path>) -> Result<Policy, String> {
+pub(crate) fn load_policy(path: Option<&Path>) -> Result<Policy, String> {
     match path {
         Some(p) => Policy::load(p).map_err(|e| format!("failed to load policy {p:?}: {e}")),
         None => {
@@ -350,13 +412,12 @@ fn tokenize_simple_command(command: &str) -> Result<Vec<String>, String> {
 }
 
 fn emit_audit(
-    args: &HookArgs,
-    policy: &Policy,
+    audit: &Arc<dyn AuditSink>,
+    task_id: &str,
     tool_name: &str,
     tool_input: &Value,
     decision: &Decision,
 ) {
-    let sink = build_audit_sink(args, policy);
     let (status, detail) = match decision {
         Decision::Allow => (
             AuditStatus::Allowed,
@@ -367,9 +428,9 @@ fn emit_audit(
             serde_json::json!({ "source": "denyx-hook", "tool_input": tool_input, "reason": reason }),
         ),
     };
-    sink.emit(AuditEvent {
+    audit.emit(AuditEvent {
         ts: chrono::Utc::now().to_rfc3339(),
-        task_id: args.task_id.clone(),
+        task_id: task_id.to_string(),
         step: 1,
         capability: format!("hook.{tool_name}"),
         status,
@@ -378,15 +439,25 @@ fn emit_audit(
 }
 
 fn build_audit_sink(args: &HookArgs, policy: &Policy) -> Arc<dyn AuditSink> {
-    let Some(path) = &args.audit_log else {
+    build_audit_sink_for(args.audit_log.as_deref(), policy)
+}
+
+/// Shared by the direct path (`build_audit_sink`, sourcing the path
+/// from `HookArgs`) and the daemon (`hook_daemon::run`, sourcing it
+/// from `HookDaemonStartArgs`) — same fallback-to-stderr posture as
+/// `denyx run --audit-log` either way.
+pub(crate) fn build_audit_sink_for(
+    audit_log: Option<&Path>,
+    policy: &Policy,
+) -> Arc<dyn AuditSink> {
+    let Some(path) = audit_log else {
         return Arc::new(JsonlAuditSink::stderr());
     };
-    // Same posture as `denyx run --audit-log`: refuse to write to a
-    // path the policy itself would let the agent reach (an agent
-    // that can read/write/delete its own audit trail can forge or
-    // erase history). Fall back to stderr rather than silently drop
-    // the event.
-    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    // Refuse to write to a path the policy itself would let the agent
+    // reach (an agent that can read/write/delete its own audit trail
+    // can forge or erase history). Fall back to stderr rather than
+    // silently drop the event.
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if policy.guard_audit_log(&canon).is_err() {
         return Arc::new(JsonlAuditSink::stderr());
     }
