@@ -466,6 +466,9 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
                 ConsistencyIssue::LocalExecutorNotIsolated { .. } => {
                     "local-executor isolation broken"
                 }
+                ConsistencyIssue::UntaintedSecretShapedResource { .. } => {
+                    "secret-shaped resource not tainted"
+                }
             };
             match sev {
                 Severity::Critical => {

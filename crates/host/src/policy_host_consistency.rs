@@ -121,6 +121,24 @@ pub enum ConsistencyIssue {
         host_config: String,
         other_servers: Vec<String>,
     },
+    /// A `filesystem.read_allow` path or `environment.allow_vars` name
+    /// looks secret-shaped (`.env`, `.aws/**`, `.ssh/**`, a credentials
+    /// file, or a `*_KEY`/`*_SECRET`/`*_TOKEN`-suffixed env var) but is
+    /// not also present in `local_only_read`/`local_only_vars`. Taint
+    /// tracking is opt-in per resource — nothing scrubs a value from
+    /// output unless the operator explicitly marked its source as
+    /// local-only, so a resource that LOOKS sensitive but was never
+    /// marked gets zero protection from the IFC layer, silently. This
+    /// is a name-shape heuristic, not proof the resource is actually a
+    /// secret (or that every match should be tainted) — it exists to
+    /// prompt a second look at policy intent. See
+    /// docs/06-policy-file.md's `local_only_read`/`local_only_vars`
+    /// documentation for what marking a resource local-only actually
+    /// changes.
+    UntaintedSecretShapedResource {
+        section: &'static str,
+        entries: Vec<String>,
+    },
 }
 
 /// Classification of an overly-permissive allow-list entry. Two
@@ -194,6 +212,11 @@ impl ConsistencyIssue {
             // drift: a real gap in a documented property, but not an
             // active bypass of the running policy.
             Self::LocalExecutorNotIsolated { .. } => Severity::Warning,
+            // A likely-secret resource with zero taint protection is a
+            // real, silent gap — but it's a heuristic name match, not a
+            // proven finding, so it sits at the same tier as other
+            // "probably a mistake" checks rather than Critical.
+            Self::UntaintedSecretShapedResource { .. } => Severity::Warning,
         }
     }
 
@@ -307,6 +330,22 @@ impl ConsistencyIssue {
                 if other_servers.len() == 1 { "" } else { "s" },
                 other_servers.join(", ")
             ),
+            Self::UntaintedSecretShapedResource { section, entries } => {
+                let n = entries.len();
+                let preview: Vec<&str> = entries.iter().take(6).map(String::as_str).collect();
+                let suffix = if n > 6 {
+                    format!(", … (+{} more)", n - 6)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "[{section}] has {n} secret-shaped entr{} not covered by local_only_* \
+                     ({}{suffix}) — reads succeed but the value is never tainted, so nothing \
+                     scrubs it from output",
+                    if n == 1 { "y" } else { "ies" },
+                    preview.join(", ")
+                )
+            }
         }
     }
 
@@ -357,6 +396,20 @@ impl ConsistencyIssue {
                  refuse to write a config that mixes them in the first place.",
                 if other_servers.len() == 1 { "y" } else { "ies" },
                 other_servers.join(", ")
+            ),
+            Self::UntaintedSecretShapedResource { section, entries } => format!(
+                "If these entries are actually sensitive, add them to the matching \
+                 local_only_* list so their values get scrubbed from output:\n  \
+                 {}\nIf a listed entry isn't actually sensitive (e.g. a `.env.example` \
+                 template, or a non-secret `*_KEY` like a public API key ID), this is a \
+                 false positive from a name-shape heuristic — no action needed. `[{section}]` \
+                 entries flagged: {}",
+                if section.starts_with("filesystem") {
+                    "local_only_read = [\"<path>\", ...]"
+                } else {
+                    "local_only_vars = [\"<name>\", ...]"
+                },
+                entries.join(", ")
             ),
         }
     }
@@ -419,7 +472,115 @@ pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<Consi
         out.extend(check_sandbox_drift(file, diagnosis));
         out.extend(check_overbroad_allow_lists(file));
         out.extend(check_wasm_runner_deadline(file, diagnosis));
+        out.extend(check_untainted_secret_shaped_resources(file));
     }
+    out
+}
+
+/// Name-shape hints for a filesystem path that's probably a secret.
+/// Matched as a case-insensitive substring against each `read_allow`
+/// entry — deliberately loose (glob syntax, relative vs. absolute
+/// forms, and `**` wildcards all still contain these substrings when
+/// present) rather than attempting real glob-semantics matching.
+const SECRET_SHAPED_PATH_HINTS: &[&str] = &[
+    ".env",
+    ".aws/",
+    ".ssh/",
+    ".netrc",
+    ".pgpass",
+    ".npmrc",
+    "credentials",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+];
+
+fn looks_secret_shaped_path(entry: &str) -> bool {
+    let lower = entry.to_ascii_lowercase();
+    SECRET_SHAPED_PATH_HINTS
+        .iter()
+        .any(|hint| lower.contains(hint))
+}
+
+/// Name-shape suffixes for an environment variable that's probably a
+/// secret. `AWS_SECRET_ACCESS_KEY` and similar compound names are
+/// covered by the `_KEY`/`_SECRET` suffix check without needing an
+/// exhaustive list.
+const SECRET_SHAPED_VAR_SUFFIXES: &[&str] = &[
+    "_KEY",
+    "_SECRET",
+    "_TOKEN",
+    "_PASSWORD",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+];
+
+fn looks_secret_shaped_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SECRET_SHAPED_VAR_SUFFIXES
+        .iter()
+        .any(|suffix| upper.ends_with(suffix))
+}
+
+/// Flag `filesystem.read_allow` paths and `environment.allow_vars`
+/// names that look secret-shaped but aren't also present in
+/// `local_only_read`/`local_only_vars`. Taint tracking is opt-in per
+/// resource (see `Policy`'s `local_only_read`/`local_only_vars`
+/// docs) — a resource that looks sensitive but was never marked gets
+/// no protection from the IFC layer, with no other signal that it was
+/// missed. Aggregated per section so the doctor prints at most one
+/// line per section, not one per entry.
+///
+/// This is a name-shape heuristic (see `SECRET_SHAPED_PATH_HINTS`/
+/// `SECRET_SHAPED_VAR_SUFFIXES`), not a proof the resource is
+/// sensitive or that every match should be tainted — false positives
+/// (a `.env.example` template, a non-secret `*_KEY` like a public API
+/// key ID) are expected and explained in `fix()`.
+fn check_untainted_secret_shaped_resources(
+    file: &denyx_policy::PolicyFile,
+) -> Vec<ConsistencyIssue> {
+    let mut out = Vec::new();
+
+    let local_only_read: BTreeSet<&str> = file
+        .filesystem
+        .local_only_read
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let flagged_paths: Vec<String> = file
+        .filesystem
+        .read_allow
+        .iter()
+        .filter(|p| looks_secret_shaped_path(p) && !local_only_read.contains(p.as_str()))
+        .cloned()
+        .collect();
+    if !flagged_paths.is_empty() {
+        out.push(ConsistencyIssue::UntaintedSecretShapedResource {
+            section: "filesystem.read_allow",
+            entries: flagged_paths,
+        });
+    }
+
+    let local_only_vars: BTreeSet<&str> = file
+        .environment
+        .local_only_vars
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let flagged_vars: Vec<String> = file
+        .environment
+        .allow_vars
+        .iter()
+        .filter(|v| looks_secret_shaped_var(v) && !local_only_vars.contains(v.as_str()))
+        .cloned()
+        .collect();
+    if !flagged_vars.is_empty() {
+        out.push(ConsistencyIssue::UntaintedSecretShapedResource {
+            section: "environment.allow_vars",
+            entries: flagged_vars,
+        });
+    }
+
     out
 }
 
@@ -1783,5 +1944,118 @@ delete_allow = [{delete_list}]
                 || fix.contains("Restrict"),
             "fix should explain why this matters: {fix}"
         );
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_flags_dotenv_read_allow_without_local_only() {
+        let p = parse_policy(
+            r#"
+[filesystem]
+read_allow = [".env"]
+"#,
+        );
+        let out = check_untainted_secret_shaped_resources(p.file_snapshot());
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ConsistencyIssue::UntaintedSecretShapedResource { section, entries }
+                if *section == "filesystem.read_allow" && entries == &vec![".env".to_string()]
+        ));
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_clean_when_also_local_only_read() {
+        let p = parse_policy(
+            r#"
+[filesystem]
+read_allow = [".env"]
+local_only_read = [".env"]
+"#,
+        );
+        assert!(check_untainted_secret_shaped_resources(p.file_snapshot()).is_empty());
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_flags_aws_ssh_credential_paths() {
+        let p = parse_policy(
+            r#"
+[filesystem]
+read_allow = ["~/.aws/credentials", "~/.ssh/id_rsa"]
+"#,
+        );
+        let out = check_untainted_secret_shaped_resources(p.file_snapshot());
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ConsistencyIssue::UntaintedSecretShapedResource { entries, .. }
+                if entries.len() == 2
+        ));
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_ignores_ordinary_paths() {
+        let p = parse_policy(
+            r#"
+[filesystem]
+read_allow = ["src/**", "README.md", "Cargo.toml"]
+"#,
+        );
+        assert!(check_untainted_secret_shaped_resources(p.file_snapshot()).is_empty());
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_flags_secret_shaped_env_var_without_local_only() {
+        let p = parse_policy(
+            r#"
+[environment]
+allow_vars = ["AWS_SECRET_ACCESS_KEY", "PATH"]
+"#,
+        );
+        let out = check_untainted_secret_shaped_resources(p.file_snapshot());
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ConsistencyIssue::UntaintedSecretShapedResource { section, entries }
+                if *section == "environment.allow_vars"
+                    && entries == &vec!["AWS_SECRET_ACCESS_KEY".to_string()]
+        ));
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_clean_when_env_var_also_local_only() {
+        let p = parse_policy(
+            r#"
+[environment]
+allow_vars = ["API_TOKEN"]
+local_only_vars = ["API_TOKEN"]
+"#,
+        );
+        assert!(check_untainted_secret_shaped_resources(p.file_snapshot()).is_empty());
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_ignores_ordinary_env_vars() {
+        let p = parse_policy(
+            r#"
+[environment]
+allow_vars = ["PATH", "HOME", "USER", "GITHUB_REPOSITORY"]
+"#,
+        );
+        assert!(check_untainted_secret_shaped_resources(p.file_snapshot()).is_empty());
+    }
+
+    #[test]
+    fn untainted_secret_shaped_resource_wired_into_check() {
+        let p = parse_policy(
+            r#"
+[filesystem]
+read_allow = [".env"]
+"#,
+        );
+        let diag = empty_diagnosis();
+        let out = check(Some(&p), &diag);
+        assert!(out
+            .iter()
+            .any(|i| matches!(i, ConsistencyIssue::UntaintedSecretShapedResource { .. })));
     }
 }
