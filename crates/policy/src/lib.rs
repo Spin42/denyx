@@ -2496,12 +2496,21 @@ mod helpers_tests {
         );
     }
 
-    // --- which_on_path (lines 1866-1875) ---
+    // --- which_on_path (line 2260) ---
 
     #[test]
     fn which_on_path_finds_existing_binary() {
         // Kills FnValue Some(Default::default()) — Default is empty
         // PathBuf, which `is_file()` rejects.
+        //
+        // Holds ENV_LOCK even though this test doesn't itself mutate
+        // PATH: guard_sandbox_available_errors_when_bwrap_missing
+        // temporarily clears PATH to "" under the same lock, and
+        // cargo test runs tests in parallel threads sharing one
+        // process's env — without this lock, that test's window
+        // could race this one and make "sh" transiently
+        // unresolvable, an intermittent CI failure (confirmed live).
+        let _g = ENV_LOCK.lock().unwrap();
         let r = which_on_path("sh");
         assert!(r.is_some(), "sh should be on PATH");
         let p = r.unwrap();
@@ -2512,7 +2521,9 @@ mod helpers_tests {
     #[test]
     fn which_on_path_returns_none_for_missing_binary() {
         // Kills Some(Default::default()) — mutant returns Some
-        // (empty PathBuf) for ANY name.
+        // (empty PathBuf) for ANY name. Same ENV_LOCK reasoning as
+        // which_on_path_finds_existing_binary above.
+        let _g = ENV_LOCK.lock().unwrap();
         let r = which_on_path("denyx_definitely_not_a_real_bin_xyzzy_42");
         assert_eq!(r, None);
     }
