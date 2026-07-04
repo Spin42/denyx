@@ -92,10 +92,13 @@ defenses are best-effort.** Three components carry the load:
    single-byte XOR + hex(XOR), base64 std/url-safe, ROT-1..25,
    chunking detection) and arg-side denial at every outbound
    effect. The static-analysis variant in the verifier refuses
-   the literal-argument shape of "read a local-only value and
-   then output it" before the script runs; the runtime variant
-   scrubs / refuses values that flow through variable-argument
-   reads.
+   the shape of "read a local-only value and then output it"
+   before the script runs — a literal argument, or one resolvable
+   via constant-folding of simple variable assignment/`+`-
+   concatenation, with flow-sensitive tracking across the
+   top-level statement sequence; the runtime variant scrubs /
+   refuses values that flow through reads the static pass cannot
+   resolve.
 3. **Visibility classes** (`allow` / `local_only_*` / `deny_*`)
    per resource, used by the gates above.
 
@@ -116,7 +119,7 @@ Tests:
   `git push --force` blocked by `[subprocess.deny_args]` even
   though `git` is in `allow_commands`.
 - `asi02_local_only_secret_refused_pre_exec_when_print_present` —
-  the verifier's literal-arg tainted-output-flow refusal.
+  the verifier's tainted-output-flow refusal.
 - `tests/taint.rs` (`fs_local_only_read_redacts_in_printed_output`,
   `env_local_only_var_redacts_in_printed_output`, etc.) — the
   runtime redaction path for variable-arg reads.
@@ -135,10 +138,14 @@ LLM-side wrappers, not the positive headline.
   multi-byte XOR, encodings outside the documented set
   (base32, base85, ASCII85, etc.) are residual risk — see the
   Round 1 report and the threat model.
-- The pre-exec analysis matches only literal-argument reads
-  (`env.read("NAME")` / `fs.read("/path")`). Variable-argument
-  reads fall through to the runtime IFC, which has the same
-  documented residual risk.
+- The pre-exec analysis is bounded: it folds literals and simple
+  variable/`+`-concatenation, and traces flow across top-level
+  statements, but it does not do full data-flow analysis (no
+  string formatting/slicing, no tracing across a `def`/`lambda`
+  call boundary under a different name — a coarse whole-script
+  fallback catches the latter at the cost of possible false
+  positives). Reads it cannot resolve fall through to the runtime
+  IFC, which has the same documented residual risk.
 - Operator-side: too-broad `**` globs in `read_allow` defeat
   deny-by-default by construction. The narrowest allow-list is
   the operator's responsibility.

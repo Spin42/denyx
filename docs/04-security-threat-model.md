@@ -52,7 +52,7 @@ result on the wasm path.
 |--------|-----|
 | **Prompt-injection telling the agent to run a destructive command** | The script can only call namespaced builtins, each gated against the policy in Rust before any side effect. A natural-language prompt cannot reach `os.system`, `subprocess.Popen`, or `eval` because the language has none of them. |
 | **Agent reading credentials it has no business reading** | `[filesystem].deny` (e.g. `**/.env*`, `~/.aws/**`) and `[environment].deny_vars` (e.g. `AWS_SECRET_ACCESS_KEY`) fail the call at the Rust gate. `secure-defaults` ships with a curated baseline of these. |
-| **Agent exfiltrating local-only secrets to a cloud orchestrator via printed output** | `[environment].local_only_vars`, `[filesystem].local_only_read`, `[network].local_only_hosts`, and `[subprocess].local_only_commands` mark values as tainted. Enforcement runs in two layers: a pre-execution verifier check refuses scripts whose literal-argument `env.read`/`fs.read` of a local-only value is paired with an output-producing call; the runtime IFC scrubs values that flow through variable-argument reads against a documented transform set (reverse, hex, single-byte XOR + hex(XOR), base64 std + url-safe ± padding, ROT-1..25) plus a chunking detector, and refuses tainted bytes at every outbound argument (`fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec` to non-local-only commands). The chunking detector's subsequence pass runs against the original value AND every one of those transforms (round-3 fix — see below), not just the original. The transform set is finite by intent. **Limited — see "Known limitations" below.** |
+| **Agent exfiltrating local-only secrets to a cloud orchestrator via printed output** | `[environment].local_only_vars`, `[filesystem].local_only_read`, `[network].local_only_hosts`, and `[subprocess].local_only_commands` mark values as tainted. Enforcement runs in two layers: a pre-execution verifier check refuses scripts where a local-only `env.read`/`fs.read` (a literal argument, or one resolvable via constant-folding of simple variable assignment/`+`-concatenation) is paired with an output-producing call reachable from it, plus a coarse whole-script fallback when a `def`/`lambda`/`load()` makes precise tracing impossible; the runtime IFC scrubs values that flow through non-foldable reads against a documented transform set (reverse, hex, single-byte XOR + hex(XOR), base64 std + url-safe ± padding, ROT-1..25) plus a chunking detector, and refuses tainted bytes at every outbound argument (`fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec` to non-local-only commands). The chunking detector's subsequence pass runs against the original value AND every one of those transforms (round-3 fix — see below), not just the original. The transform set is finite by intent. **Limited — see "Known limitations" below.** |
 | **Agent spawning a shell to escape the policy** (`subprocess.exec(["bash", "-c", "cat /etc/passwd"])`) | `secure-defaults` denies shells, interpreters, and generic command runners (`bash`, `sh`, `python`, `node`, `ruby`, `env`, `xargs`, ...). Argv path-arguments to allowed commands are also checked against `[filesystem]` rules — `subprocess.exec(["cat", "/etc/passwd"])` is rejected. |
 | **Agent (or a prompt-injected script) pointing `subprocess.exec`'s argv[0] at a planted executable to escape the command allowlist** | `allow_commands` entries with no path separator (e.g. `"cat"`) still match on argv[0]'s basename — by design, so the operator's own trusted `$PATH` resolves it. But a *path-shaped* argv[0] (containing `/`) is now path-gated the same as every other argv element: it must resolve inside `[filesystem]`'s allow surface, same as `argv[1..]` already was. Round-3 pentest finding: before this fix, argv[0] was checked by basename only, so a script could point it at any executable anywhere on the filesystem — full code execution, not merely a scoped bypass. See [Round 3 report](security-pentest-r3-argv0-and-chunking.md). |
 | **An operator's `deny_commands` entry for one specific dangerous binary being bypassed by an ordinary bare-name invocation** | `deny_commands` full-path entries (e.g. `"/usr/bin/cat"`) now also match by basename, same as bare entries already did — deny is deliberately more aggressive than allow, since broader is the safe direction for a denylist. Round-3 pentest finding: before this fix, a full-path deny entry only matched that exact string, so a script invoking the plain bare form of the same allowed command sailed past it. See [Round 3 report](security-pentest-r3-argv0-and-chunking.md). |
@@ -121,21 +121,42 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   this doc; see [Round 3 report](security-pentest-r3-argv0-and-chunking.md)
   for reproducers and the honest limits of the fix (the density
   threshold is a raised bar, not a closed class).
-- **The pre-execution verifier's tainted-output-flow check only
-  recognizes literal-string arguments.** `crates/host/src/verifier.rs`'s
-  `taint_flow` module refuses a script pre-execution only when a
-  local-only `env.read`/`fs.read` call's argument is a literal string
-  matching a `local_only_*` entry. A path or hostname built from a
-  variable or concatenation (`path = a + b; fs.read(path)`) is invisible
-  to this check and runs straight through to evaluation — confirmed live
-  during the Round 4 pentest. This is not a bug (the module's own doc
-  says so explicitly), but it means the verifier passing a script is
-  **not** evidence the script doesn't exfiltrate local-only data — only
-  the runtime taint layer (the "finite-transform, not full IFC" bullet
-  above) provides that property, with its own documented limits. Do not
-  treat the verifier as a second, independent line of defense for this
-  specific check; it exists to catch the naive case before wasted
-  execution, nothing more.
+- **The pre-execution verifier's tainted-output-flow check is a static
+  pre-filter, not full data-flow analysis.**
+  `crates/host/src/verifier.rs`'s `taint_flow` module now has two
+  passes. The original pass (`detect`) refuses a script pre-execution
+  when a local-only `env.read`/`fs.read` call's argument is a literal
+  string matching a `local_only_*` entry. A newer AST-based pass
+  (`detect_ast`, built on `starlark_syntax`) additionally
+  constant-folds simple string expressions — direct variable
+  reassignment and `+`-concatenation — so the exact evasion confirmed
+  live during the Round 4 pentest (`path = a + b; fs.read(path)`) is
+  now caught pre-execution when `a`/`b` are themselves foldable to
+  literals. It also does flow-sensitive tracking across the top-level
+  statement sequence (including inside nested `if`/`for` bodies), so a
+  tainted variable reaching a sink several lines later, not just on the
+  next line, is detected.
+  This still has real, deliberate limits: it does not track values
+  through assignment targets other than a plain identifier
+  (`x[i] = ...`, `obj.field = ...`), does not fold anything beyond
+  literal/`+`-concatenation (string formatting, slicing, arbitrary
+  function results), and cannot trace taint through a function or
+  lambda call boundary (a value passed into `def f(v): ...` under a
+  different parameter name is invisible to the direct-reference check).
+  For that last case, the presence of any `def`/`lambda`/`load()`
+  anywhere in the script triggers a conservative fallback: if a
+  local-only read was proven anywhere in the top-level sequence AND an
+  output-producing call exists anywhere in the script (a coarse,
+  byte-level check, not a proof of that specific flow), the script is
+  refused anyway — trading a possible false positive for not silently
+  under-reporting a case it cannot analyze precisely.
+  None of this changes the fundamental property: a script the verifier
+  does **not** reject is not proven free of local-only exfiltration —
+  only the runtime taint layer (the "finite-transform, not full IFC"
+  bullet above) provides that property, with its own documented
+  limits. The verifier is a pre-filter that catches easy and moderately
+  obfuscated cases before wasted execution; it is not a second,
+  independent line of defense equivalent to the runtime layer.
 - **A planted executable inside the policy's own allow surface.**
   Round 3 closed the case where a path-shaped `subprocess.exec`
   argv[0] pointed at an executable *outside* every `[filesystem]`
