@@ -21,5 +21,14 @@ globset.workspace = true
 url.workspace = true
 ipnet.workspace = true
 
+# Landlock (Linux 5.13+ LSM) availability probe for
+# guard_sandbox_available — same "fail load if the sandbox backend
+# isn't actually usable" posture as the bwrap-on-PATH check. Real
+# subprocess-time enforcement lives in denyx-host (crates/host/src/
+# landlock_sandbox.rs), where std::process::Command::pre_exec is
+# available; this crate only needs the cheap probe.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true

@@ -19,6 +19,9 @@ use url::Url;
 
 pub mod presets;
 
+#[cfg(target_os = "linux")]
+mod landlock_probe;
+
 /// Environment-variable names reserved by the Denyx runtime itself
 /// for control-plane configuration (the bearer token used to fetch
 /// policies and post audit events; the policy and audit URLs).
@@ -452,6 +455,20 @@ pub enum SandboxMode {
     /// receives a constructed filesystem view; paths outside the
     /// policy's allow lists do not exist for it.
     Bwrap,
+    /// Restrict the child in-process via Landlock (Linux 5.13+,
+    /// unprivileged — no user namespaces, no external binary,
+    /// applied via `landlock_restrict_self` in the forked child
+    /// before exec). A narrower guarantee than bwrap: Landlock scopes
+    /// filesystem access (and, on kernels new enough for Landlock ABI
+    /// v4+, TCP bind/connect) but has no PID/UTS/IPC namespace
+    /// isolation and no bind-mount view construction — the child
+    /// still sees the real filesystem tree, just denied access
+    /// outside the granted paths. Complementary to bwrap, not a
+    /// replacement: prefer this when bwrap's namespace requirements
+    /// aren't available (containers, hardened kernels disabling
+    /// unprivileged user namespaces) but Landlock is. See
+    /// `docs/landlock-evaluation.md`.
+    Landlock,
 }
 
 impl SandboxMode {
@@ -459,6 +476,7 @@ impl SandboxMode {
         match self {
             SandboxMode::None => "none",
             SandboxMode::Bwrap => "bwrap",
+            SandboxMode::Landlock => "landlock",
         }
     }
 }
@@ -882,6 +900,32 @@ impl Policy {
                     );
                 }
                 Ok(())
+            }
+            SandboxMode::Landlock => {
+                #[cfg(target_os = "linux")]
+                {
+                    if !landlock_probe::is_available() {
+                        anyhow::bail!(
+                            "policy sets `[subprocess].sandbox = \"landlock\"` but this \
+                             kernel does not support Landlock (needs Linux 5.13+ with \
+                             Landlock enabled — some containers and hardened configs \
+                             disable it even on a new-enough kernel). Set \
+                             `sandbox = \"none\"` or, if bubblewrap is available, \
+                             `sandbox = \"bwrap\"` instead."
+                        );
+                    }
+                    Ok(())
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    anyhow::bail!(
+                        "policy sets `[subprocess].sandbox = \"landlock\"`, but Landlock \
+                         is a Linux kernel feature — it doesn't exist on this platform. \
+                         Set `sandbox = \"none\"`, or run inside a Linux VM/WSL2 (see \
+                         docs/macos-deployment.md / docs/windows-deployment.md) and set \
+                         `sandbox = \"landlock\"` there instead."
+                    );
+                }
             }
         }
     }
@@ -1458,6 +1502,48 @@ impl Policy {
         self.file.subprocess.sandbox
     }
 
+    /// Whether any network capability is granted at all — the exact
+    /// condition `bwrap_argv` uses to decide `--unshare-net` vs
+    /// `--share-net`, extracted so other OS-level subprocess sandboxes
+    /// (Landlock) can make the same decision without re-deriving it
+    /// (see the Phase 3 wasm/native parity review for why re-deriving
+    /// the same condition twice is exactly the kind of duplication
+    /// that causes divergence bugs).
+    pub fn any_network_capability_granted(&self) -> bool {
+        !self.file.network.http_get_allow.is_empty()
+            || !self.file.network.http_post_allow.is_empty()
+            || !self.file.network.http_put_allow.is_empty()
+            || !self.file.network.http_patch_allow.is_empty()
+            || !self.file.network.http_delete_allow.is_empty()
+            || !self.file.network.local_only_hosts.is_empty()
+    }
+
+    /// Concrete filesystem prefixes derived from `[filesystem]` allow
+    /// lists, for building an OS-level subprocess sandbox (bwrap bind
+    /// mounts, Landlock rules): `(read_paths, write_paths)`, where
+    /// `read_paths` includes `local_only_read` and `write_paths`
+    /// includes `delete_allow` — the same grouping `bwrap_argv`
+    /// already uses for `--ro-bind-try` vs `--bind-try`.
+    pub fn sandbox_fs_paths(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let read_paths: Vec<PathBuf> =
+            collect_concrete_prefixes(&self.root, &self.file.filesystem.read_allow)
+                .into_iter()
+                .chain(collect_concrete_prefixes(
+                    &self.root,
+                    &self.file.filesystem.local_only_read,
+                ))
+                .collect();
+        let write_paths: Vec<PathBuf> =
+            collect_concrete_prefixes(&self.root, &self.file.filesystem.write_allow)
+                .into_iter()
+                .chain(collect_concrete_prefixes(
+                    &self.root,
+                    &self.file.filesystem.delete_allow,
+                ))
+                .collect();
+        (read_paths, write_paths)
+    }
+
     /// Build the `bwrap` argv that wraps `user_argv` with the
     /// bind-mount layout derived from this policy. Pass `env` as
     /// the (name, value) pairs the child should see — typically
@@ -1543,13 +1629,7 @@ impl Policy {
         }
 
         // Network: drop the netns if no HTTP verb is permitted.
-        let any_net = !self.file.network.http_get_allow.is_empty()
-            || !self.file.network.http_post_allow.is_empty()
-            || !self.file.network.http_put_allow.is_empty()
-            || !self.file.network.http_patch_allow.is_empty()
-            || !self.file.network.http_delete_allow.is_empty()
-            || !self.file.network.local_only_hosts.is_empty();
-        if !any_net {
+        if !self.any_network_capability_granted() {
             a.push("--unshare-net".into());
         }
 
@@ -2165,6 +2245,18 @@ fn concrete_prefix_of(raw: &str) -> Option<&str> {
 /// `None` if no entry of `$PATH` contains an executable file with
 /// the given name. Used at policy load to check that the configured
 /// sandbox backend is actually available.
+/// Whether this kernel supports Landlock (Linux 5.13+), independent
+/// of whether any policy actually requests `sandbox = "landlock"`.
+/// Exposed for `denyx doctor`-style diagnostics and for `denyx-host`'s
+/// own tests, mirroring `which_on_path("bwrap")`'s role for the bwrap
+/// backend — `denyx-host` needs this too since it's the crate that
+/// actually applies Landlock restrictions per subprocess call, and a
+/// test there shouldn't need to re-derive the same probe logic.
+#[cfg(target_os = "linux")]
+pub fn landlock_available() -> bool {
+    landlock_probe::is_available()
+}
+
 fn which_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
