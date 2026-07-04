@@ -24,37 +24,46 @@ concurrency:
   cancel-in-progress: true
 
 # ─── Why this workflow is sharded ───────────────────────────────────
-# .cargo/mutants.toml currently scopes to ~450 mutants across the
-# three security-critical files. At ~50s per mutant, a single runner
-# would need ~3-6 hours wall-clock — well past the point where
-# GitHub-hosted ubuntu-latest runners reliably stay alive (we
-# observed reaping at the ~35min mark with `The runner has received
-# a shutdown signal`).
+# .cargo/mutants.toml currently scopes to ~604 mutants across the
+# three security-critical files (was ~450 as of the original 4-way
+# design below; verifier.rs alone grew from ~112 to 234 mutants from
+# the T6 static taint-propagation pass, and per-mutant build time
+# also grew from the same crate gaining starlark_syntax + landlock as
+# direct deps). At ~50-150s per mutant, a single runner would need
+# many hours wall-clock — well past the point where GitHub-hosted
+# ubuntu-latest runners reliably stay alive (we observed reaping at
+# the ~35min mark with `The runner has received a shutdown signal`,
+# and separately a live run where 3 of 4 shards blew the 75min
+# per-shard timeout at the old ~110-mutants-per-shard split).
 #
-# Splitting into 4 parallel shards (≈110 mutants each, ≈25-30 min
-# wallclock per shard) keeps every runner's lifetime well inside the
-# reliable-completion window. The combine job aggregates the
-# per-shard reports into one summary so the badge / GITHUB_STEP_SUMMARY
-# remain a single coherent view of "how is the security core doing".
+# Splitting into 8 parallel shards (≈75 mutants each) keeps every
+# runner's lifetime well inside the reliable-completion window even
+# at the current, heavier per-mutant cost. The combine job aggregates
+# the per-shard reports into one summary so the badge /
+# GITHUB_STEP_SUMMARY remain a single coherent view of "how is the
+# security core doing". Re-check this math (`cargo mutants --list |
+# wc -l`) whenever the three scoped files grow significantly — see
+# CLAUDE.md's "Maintenance duties".
 # ────────────────────────────────────────────────────────────────────
 
 jobs:
   mutants:
-    name: cargo-mutants shard ${{ matrix.shard }}/4
+    name: cargo-mutants shard ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
-    # Per-shard timeout. ~110 mutants × ~50s with --jobs 2 leaves
-    # comfortable margin under 60 min. Set well above the expected
-    # finish time but well below the runner-reaping threshold so a
-    # genuinely stuck shard fails its own matrix instance without
-    # taking down the others.
-    timeout-minutes: 75
+    # Per-shard timeout. ~75 mutants at up to ~150s each with --jobs 2
+    # leaves comfortable margin under 90 min even at the slower end of
+    # observed per-mutant cost. Set well above the expected finish
+    # time but well below the runner-reaping threshold so a genuinely
+    # stuck shard fails its own matrix instance without taking down
+    # the others.
+    timeout-minutes: 90
     strategy:
       # If one shard fails (e.g. a single hard-timeout mutant or a
-      # transient runner issue), the other three should still report
+      # transient runner issue), the other seven should still report
       # their results so the combined view is still useful.
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
 
@@ -100,7 +109,7 @@ jobs:
       - name: cargo test (baseline)
         run: cargo test --workspace --locked --no-fail-fast
 
-      - name: Run mutation tests (shard ${{ matrix.shard }}/4)
+      - name: Run mutation tests (shard ${{ matrix.shard }}/8)
         # `--jobs 2` (vs the previous `--jobs 4`): cargo-mutants
         # spawns N parallel cargo invocations, each of which itself
         # runs cargo with the runner's NCPUS jobserver. -j 4 on a
@@ -108,7 +117,7 @@ jobs:
         # gives each parallel mutant breathing room and finishes
         # faster overall on a constrained runner.
         #
-        # `--shard ${{ matrix.shard }}/4` partitions the full
+        # `--shard ${{ matrix.shard }}/8` partitions the full
         # mutant set deterministically — combined with
         # `--no-shuffle` from .cargo/mutants.toml, shard k always
         # contains the same mutants across runs.
@@ -121,7 +130,7 @@ jobs:
         # "failure" is "tests didn't catch every mutation."
         run: |
           cargo mutants --workspace --no-shuffle --jobs 2 \
-            --shard ${{ matrix.shard }}/4 \
+            --shard ${{ matrix.shard }}/8 \
             --output mutants-output \
             || echo "mutants-exit-code=$?" >> "$GITHUB_OUTPUT"
         id: mutants
@@ -172,11 +181,11 @@ jobs:
           done
 
           {
-            echo "## Mutation testing summary (4-way sharded)"
+            echo "## Mutation testing summary (8-way sharded)"
             echo ""
 
             shards_present=$(find shards -maxdepth 1 -type d -name 'mutants-shard-*' | wc -l)
-            echo "Shards reporting: ${shards_present}/4"
+            echo "Shards reporting: ${shards_present}/8"
             echo ""
 
             if [ -s combined/missed.txt ]; then
@@ -190,10 +199,10 @@ jobs:
               echo '```'
               echo "</details>"
             else
-              if [ "${shards_present}" -eq 4 ]; then
-                echo "✅ No surviving mutants across all 4 shards."
+              if [ "${shards_present}" -eq 8 ]; then
+                echo "✅ No surviving mutants across all 8 shards."
               else
-                echo "⚠ No surviving mutants in the **${shards_present}** shards that reported, but **$((4 - shards_present))** shard(s) did not produce a report. Re-run to confirm full coverage."
+                echo "⚠ No surviving mutants in the **${shards_present}** shards that reported, but **$((8 - shards_present))** shard(s) did not produce a report. Re-run to confirm full coverage."
               fi
             fi
 

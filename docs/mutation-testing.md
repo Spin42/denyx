@@ -47,7 +47,11 @@ the wrong reason. That's the failure mode mutation testing catches.
 | `crates/host/src/taint.rs`        | The IFC layer. A miscomputed transform = silent secret leak.                  |
 | `crates/host/src/verifier.rs`     | The capability scanner. An off-by-one in word-boundary detection = bypass.    |
 
-That's roughly 1 000 LOC and ~450 mutants. Mutating the rest of the
+That's roughly 1 000 LOC and ~604 mutants as of 2026-07 (grew from
+~450 mostly via `verifier.rs`'s static taint-propagation pass — see
+`cargo mutants --list | wc -l` for the current count, and re-check
+`.github/workflows/mutants.yml`'s shard count against it after a
+large change to any of these three files). Mutating the rest of the
 workspace (the MCP server, the CLI, the Starlark-runtime glue) would
 generate ~1 000 additional mutants, most of them "equivalent" — code
 that's syntactically different but semantically identical, like
