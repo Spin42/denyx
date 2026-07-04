@@ -235,11 +235,15 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   This is documented Claude Code behavior, not a Denyx choice, and no
   amount of care on Denyx's side changes it: the end-to-end guarantee
   of a hook-based integration is bounded by a timeout Denyx does not
-  control. Keep `denyx hook` fast (cold policy parse and audit-log
-  fsync are the main latency sources today) and treat any harness
-  timeout as an effective allow, not a safe default. See
-  `crates/cli/src/hook.rs`'s module doc for the full trade-off
-  discussion.
+  control. Treat any harness timeout as an effective allow, not a safe
+  default. `denyx hook-daemon` (a long-lived process behind a Unix
+  socket, see `crates/cli/src/hook_daemon.rs`'s module doc) removes
+  the cold policy parse that was previously `denyx hook`'s dominant
+  per-call latency source, via `denyx hook --daemon-socket <path>` —
+  this narrows the window where "denyx is slow" becomes "the harness
+  timed out," but does not and cannot change the harness's own
+  fail-open behavior. See `crates/cli/src/hook.rs`'s module doc for
+  the full trade-off discussion.
 
 ## Trust boundaries
 
