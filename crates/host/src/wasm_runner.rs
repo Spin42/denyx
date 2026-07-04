@@ -4557,10 +4557,24 @@ fs.write({:?}, "hello")
         let out_path = unique_tmp_path("audit_scrub_out");
         let out_path_lit = out_path.to_string_lossy().replace('\\', "/");
 
+        // The path is read from an env var at runtime rather than
+        // passed as a literal or a directly-foldable variable — the
+        // static verifier's AST-based taint pass (T6.2-T6.6) now
+        // resolves simple literal/variable/`+`-concatenation
+        // indirection, so a script using those shapes gets refused
+        // pre-execution, before any runtime audit event fires. This
+        // test is specifically about the RUNTIME's audit-scrub
+        // behaviour, so the fixture must reach the runtime layer —
+        // `env.read(...)`'s return value is a call result, not
+        // statically foldable, so the static pass cannot resolve it.
+        let path_var = format!("DENYX_WASM_AUDIT_SCRUB_PATH_{}", std::process::id());
+        std::env::set_var(&path_var, &path_lit);
+
         let policy_path = write_temp_policy(
             "audit_scrub",
             &format!(
-                "[filesystem]\nlocal_only_read = [\"{path_lit}\"]\nwrite_allow = [\"{out_path_lit}\"]\n"
+                "[filesystem]\nlocal_only_read = [\"{path_lit}\"]\nwrite_allow = [\"{out_path_lit}\"]\n\n\
+                 [environment]\nallow_vars = [{path_var:?}]\n"
             ),
         );
         let policy = Policy::load(&policy_path).expect("policy loads");
@@ -4569,9 +4583,10 @@ fs.write({:?}, "hello")
             .with_audit(cap.clone())
             .with_confirm_hook(std::sync::Arc::new(DenyAllConfirm));
         let src = format!(
-            "p = \"{path_lit}\"\nsecret = fs.read(p)\nfs.write(\"{out_path_lit}\", secret)\n"
+            "p = env.read({path_var:?})\nsecret = fs.read(p)\nfs.write(\"{out_path_lit}\", secret)\n"
         );
         let result = runner.run("t1", &src, "test.star");
+        std::env::remove_var(&path_var);
         let _ = std::fs::remove_file(&policy_path);
         let _ = std::fs::remove_file(&secret_path);
         let _ = std::fs::remove_file(&out_path);

@@ -14,6 +14,14 @@
 //! runners produce a redacted audit payload for the identical policy
 //! and script, so a future reimplementation drift on either side fails
 //! loudly instead of silently reopening this leak.
+//!
+//! `script_for` reads the secret path via `env.read(...)` rather than
+//! a literal or a directly-foldable variable: the pre-exec verifier's
+//! AST-based taint pass (T6.2-T6.6) now resolves that simpler
+//! indirection statically and refuses the script before it runs at
+//! all, which would starve this test of the runtime audit event it's
+//! actually testing. `env.read(...)`'s return value isn't statically
+//! foldable, so this shape still reaches the runtime layer.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,24 +49,33 @@ fn fixture() -> (PathBuf, String, &'static str) {
     (path, path_lit, secret)
 }
 
-fn policy_for(secret_path_lit: &str, out_path_lit: &str) -> Policy {
+fn policy_for(secret_path_lit: &str, out_path_lit: &str, path_var: &str) -> Policy {
     let toml = format!(
         r#"
 [filesystem]
 local_only_read = ["{secret_path_lit}"]
 write_allow = ["{out_path_lit}"]
+
+[environment]
+allow_vars = [{path_var:?}]
 "#
     );
     let file = PolicyFile::from_toml_str(&toml).unwrap();
     Policy::from_file(file, std::env::temp_dir()).unwrap()
 }
 
-fn script_for(secret_path_lit: &str, out_path_lit: &str) -> String {
-    // Variable-arg fs.read so the pre-exec verifier's literal-arg-only
-    // taint_flow check doesn't short-circuit before the runtime
-    // outbound-taint gate (and its audit emission) fires.
+fn script_for(out_path_lit: &str, path_var: &str) -> String {
+    // The secret path is read from an env var at runtime rather than
+    // passed as a literal or a directly-foldable variable — the
+    // pre-exec verifier's AST-based taint pass (T6.2-T6.6) now
+    // resolves simple literal/variable/`+`-concatenation indirection,
+    // so a script using those shapes gets refused before the runtime
+    // outbound-taint gate (and its audit emission) ever fires. This
+    // test is specifically about that runtime audit-scrub behaviour,
+    // so the fixture must reach the runtime layer: `env.read(...)`'s
+    // return value is a call result, not statically foldable.
     format!(
-        r#"p = "{secret_path_lit}"
+        r#"p = env.read({path_var:?})
 secret = fs.read(p)
 fs.write("{out_path_lit}", secret)
 "#
@@ -87,12 +104,18 @@ fn native_runner_scrubs_secret_from_denied_outbound_taint_audit_event() {
         std::process::id()
     ));
     let out_path_lit = out_path.to_string_lossy().replace('\\', "/");
+    let path_var = format!(
+        "DENYX_AUDIT_SCRUB_PARITY_PATH_NATIVE_{}",
+        std::process::id()
+    );
+    std::env::set_var(&path_var, &secret_path_lit);
 
-    let policy = policy_for(&secret_path_lit, &out_path_lit);
+    let policy = policy_for(&secret_path_lit, &out_path_lit, &path_var);
     let cap = Arc::new(Capture::default());
     let runner = Runner::new(policy).with_audit(cap.clone());
-    let src = script_for(&secret_path_lit, &out_path_lit);
+    let src = script_for(&out_path_lit, &path_var);
     let result = runner.run("t1", &src, "test.star");
+    std::env::remove_var(&path_var);
     let _ = std::fs::remove_file(&secret_path);
     let _ = std::fs::remove_file(&out_path);
 
@@ -111,12 +134,15 @@ fn wasm_runner_scrubs_secret_from_denied_outbound_taint_audit_event() {
         std::process::id()
     ));
     let out_path_lit = out_path.to_string_lossy().replace('\\', "/");
+    let path_var = format!("DENYX_AUDIT_SCRUB_PARITY_PATH_WASM_{}", std::process::id());
+    std::env::set_var(&path_var, &secret_path_lit);
 
-    let policy = policy_for(&secret_path_lit, &out_path_lit);
+    let policy = policy_for(&secret_path_lit, &out_path_lit, &path_var);
     let cap = Arc::new(Capture::default());
     let runner = WasmRunner::new(policy).with_audit(cap.clone());
-    let src = script_for(&secret_path_lit, &out_path_lit);
+    let src = script_for(&out_path_lit, &path_var);
     let result = runner.run("t1", &src, "test.star");
+    std::env::remove_var(&path_var);
     let _ = std::fs::remove_file(&secret_path);
     let _ = std::fs::remove_file(&out_path);
 

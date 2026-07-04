@@ -28,34 +28,43 @@ fn fs_local_only_read_redacts_in_printed_output() {
     let secret_path = tmp.join(format!("denyx_taint_secret_{}.txt", std::process::id()));
     let secret_value = "supersecret-fs-token-abc123-XYZ789";
     std::fs::write(&secret_path, secret_value).unwrap();
+    let path_lit = secret_path.to_string_lossy().replace('\\', "/");
+
+    let path_holder_var = format!("DENYX_TAINT_TEST_FS_PATH_HOLDER_{}", std::process::id());
+    std::env::set_var(&path_holder_var, &path_lit);
 
     let toml = format!(
         r#"
 [filesystem]
 local_only_read = ["{path}"]
 
+[environment]
+allow_vars = ["{path_holder_var}"]
+
 [functions]
-allow = ["fs.read"]
+allow = ["fs.read", "env.read"]
 "#,
-        path = secret_path.to_string_lossy().replace('\\', "/")
+        path = path_lit
     );
     let runner = runner_for(&toml, tmp);
-    let path_lit = secret_path.to_string_lossy().replace('\\', "/");
     // NOTE: this test exercises the **runtime IFC scrubber**
     // (`redact_lines`) — which is the fallback layer for cases the
-    // pre-exec tainted-output-flow verifier doesn't catch. We use a
-    // variable-arg `fs.read` so the literal-arg analysis falls
-    // through, letting the runtime path do the work. The pre-exec
-    // behaviour (refusal of the literal-arg shape) has its own
+    // pre-exec tainted-output-flow verifier doesn't catch. The path
+    // is fetched via `env.read(...)` (a call result, not statically
+    // foldable) rather than a literal or a directly-foldable
+    // variable, so the AST-based static pass (T6.2-T6.6) can't
+    // resolve it and the runtime path does the work. The pre-exec
+    // behaviour (refusal of the literal/foldable shape) has its own
     // tests in `tests/verifier.rs`.
     let src = format!(
-        r#"p = "{path_lit}"
+        r#"p = env.read("{path_holder_var}")
 x = fs.read(p)
 print("got:", x)
 print("len:", len(x))
 "#
     );
     let outcome = runner.run("t-fs", &src, "test.star").unwrap();
+    std::env::remove_var(&path_holder_var);
     let joined = outcome.printed.join("\n");
     assert!(
         !joined.contains(secret_value),
@@ -77,22 +86,27 @@ fn env_local_only_var_redacts_in_printed_output() {
     let var = "DENYX_TAINT_TEST_VAR";
     let secret_value = "ek-zzz-zzz-this-is-the-key-do-not-leak";
     std::env::set_var(var, secret_value);
+    let name_holder_var = format!("DENYX_TAINT_TEST_VAR_NAME_HOLDER_{}", std::process::id());
+    std::env::set_var(&name_holder_var, var);
 
     let toml = format!(
         r#"
 [environment]
 local_only_vars = ["{var}"]
+allow_vars = ["{name_holder_var}"]
 
 [functions]
 allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
-    // Variable-arg env.read so the runtime IFC path (`redact_lines`)
-    // is exercised here; pre-exec literal-arg refusal is covered in
-    // tests/verifier.rs.
+    // The target var's NAME is itself fetched via `env.read(...)` (a
+    // call result, not statically foldable), so the AST-based static
+    // pass (T6.2-T6.6) can't resolve it and the runtime IFC path
+    // (`redact_lines`) is exercised here. Pre-exec literal/foldable-arg
+    // refusal is covered in tests/verifier.rs.
     let src = format!(
-        r#"name = "{var}"
+        r#"name = env.read("{name_holder_var}")
 k = env.read(name)
 print("auth=Bearer", k)
 "#
@@ -107,6 +121,7 @@ print("auth=Bearer", k)
     assert!(joined.contains("auth=Bearer"), "preamble preserved");
 
     std::env::remove_var(var);
+    std::env::remove_var(&name_holder_var);
 }
 
 #[test]
@@ -117,26 +132,33 @@ fn env_local_only_var_redacts_after_string_concat() {
     let var = "DENYX_TAINT_TEST_CONCAT";
     let secret_value = "raw-concat-secret-value-xyz0123";
     std::env::set_var(var, secret_value);
+    let name_holder_var = format!("DENYX_TAINT_TEST_CONCAT_NAME_HOLDER_{}", std::process::id());
+    std::env::set_var(&name_holder_var, var);
 
     let toml = format!(
         r#"
 [environment]
 local_only_vars = ["{var}"]
+allow_vars = ["{name_holder_var}"]
 
 [functions]
 allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
-    // Variable-arg env.read keeps this test on the runtime IFC path.
-    // Pre-exec refusal for the literal-arg shape is in tests/verifier.rs.
+    // Same non-foldable indirection as the test above — the target
+    // var's name is fetched via `env.read(...)`, keeping this test on
+    // the runtime IFC path rather than the AST-based static pass.
+    // Pre-exec refusal for the literal/foldable shape is in
+    // tests/verifier.rs.
     let src = format!(
-        r#"name = "{var}"
+        r#"name = env.read("{name_holder_var}")
 k = env.read(name)
 print("PREFIX[" + k + "]SUFFIX")
 "#
     );
     let outcome = runner.run("t-concat", &src, "test.star").unwrap();
+    std::env::remove_var(&name_holder_var);
     let joined = outcome.printed.join("\n");
     assert!(
         !joined.contains(secret_value),
