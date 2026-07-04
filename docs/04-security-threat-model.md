@@ -121,6 +121,21 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   this doc; see [Round 3 report](security-pentest-r3-argv0-and-chunking.md)
   for reproducers and the honest limits of the fix (the density
   threshold is a raised bar, not a closed class).
+- **The pre-execution verifier's tainted-output-flow check only
+  recognizes literal-string arguments.** `crates/host/src/verifier.rs`'s
+  `taint_flow` module refuses a script pre-execution only when a
+  local-only `env.read`/`fs.read` call's argument is a literal string
+  matching a `local_only_*` entry. A path or hostname built from a
+  variable or concatenation (`path = a + b; fs.read(path)`) is invisible
+  to this check and runs straight through to evaluation — confirmed live
+  during the Round 4 pentest. This is not a bug (the module's own doc
+  says so explicitly), but it means the verifier passing a script is
+  **not** evidence the script doesn't exfiltrate local-only data — only
+  the runtime taint layer (the "finite-transform, not full IFC" bullet
+  above) provides that property, with its own documented limits. Do not
+  treat the verifier as a second, independent line of defense for this
+  specific check; it exists to catch the naive case before wasted
+  execution, nothing more.
 - **A planted executable inside the policy's own allow surface.**
   Round 3 closed the case where a path-shaped `subprocess.exec`
   argv[0] pointed at an executable *outside* every `[filesystem]`
@@ -208,6 +223,23 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   Rust on the host side, so the gate itself is unaffected.
   See [wasm-sandbox.md](wasm-sandbox.md#new-attack-surface) for
   the full surface accounting.
+- **`denyx hook`'s fail-closed guarantee is bounded by the calling
+  harness's own failure behavior.** `crates/cli/src/hook.rs` is built
+  so its own contract is narrow and fail-closed: `catch_unwind`-wrapped,
+  exit 0 only on a confirmed allow, exit 2 for every other outcome
+  including internal errors and panics. But Claude Code's `PreToolUse`
+  hooks (the integration this subcommand targets) fail **open** on
+  anything other than exit code 2 — a slow `denyx hook` invocation that
+  times out, or one that produces malformed output, results in the
+  tool call proceeding regardless of what the policy would have said.
+  This is documented Claude Code behavior, not a Denyx choice, and no
+  amount of care on Denyx's side changes it: the end-to-end guarantee
+  of a hook-based integration is bounded by a timeout Denyx does not
+  control. Keep `denyx hook` fast (cold policy parse and audit-log
+  fsync are the main latency sources today) and treat any harness
+  timeout as an effective allow, not a safe default. See
+  `crates/cli/src/hook.rs`'s module doc for the full trade-off
+  discussion.
 
 ## Trust boundaries
 

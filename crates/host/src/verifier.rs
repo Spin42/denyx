@@ -9,14 +9,27 @@
 //!
 //! The verifier also enforces a static **tainted-output-flow** check
 //! (the `taint_flow` module below): a script that reads any
-//! `local_only_*` env var or filesystem path AND contains any
-//! output-producing call (`print`, `fs.write`, `fs.delete`,
-//! `net.http_*`, `subprocess.exec`) is refused before execution. This
-//! tightens the asymmetric Round-1 behaviour where `print` of a
-//! tainted value was permitted-then-scrubbed and `fs.write` was
-//! refused at the arg-side gate; both now refuse uniformly at the
-//! verifier. The motivation (Round-2 pentest) is documented in
+//! `local_only_*` env var or filesystem path via a LITERAL string
+//! argument, and separately contains any output-producing call
+//! (`print`, `fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec`),
+//! is refused before execution. This tightens the asymmetric Round-1
+//! behaviour where `print` of a tainted value was permitted-then-
+//! scrubbed and `fs.write` was refused at the arg-side gate; both now
+//! refuse uniformly at the verifier when the check fires. The
+//! motivation (Round-2 pentest) is documented in
 //! `docs/security-pentest-r2-tool-poisoning.md`.
+//!
+//! **Honest scope note:** this is a naive, literal-argument-only
+//! pre-filter, not a robust second line of defense — it exists to
+//! catch the easy/naive case before wasted execution, not to bound
+//! what a script can do. A path or hostname built from a variable or
+//! concatenation (`path = a + b; fs.read(path)`) evades it entirely
+//! and falls through to the runtime taint layer (`crates/host/src/taint.rs`),
+//! which is what actually enforces the no-exfiltration property (see
+//! `taint_flow`'s own module doc below, and
+//! `docs/04-security-threat-model.md`). Treat "the verifier didn't
+//! reject this script" as no signal at all about whether it leaks
+//! local-only data.
 
 use std::collections::BTreeSet;
 
