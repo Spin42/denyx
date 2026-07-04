@@ -102,10 +102,42 @@ exclude_re = [
     # all `+=` operators in scope are counters; verified with
     # `grep -n '+=' crates/host/src/{verifier,taint}.rs` returning
     # only loop-counter call sites.
-    "verifier\\.rs:.*replace \\+= with \\*= in (contains_word|strip_strings_and_comments)",
-    "verifier\\.rs:.*replace \\+= with -= in (contains_word|strip_strings_and_comments)",
+    #
+    # `extract_literal_args` (verifier.rs's taint_flow submodule) is
+    # the same shape (a `while i + needle.len() <= bytes.len()`
+    # forward scan, plus an inner `j` scan for the quoted-string
+    # body) and was missing from this function-name list — a live
+    # CI run timed out on two of its `+=` mutants (`j += 1` at the
+    # string-body scan, `i += 1` at the outer scan) before this was
+    # added. When you add a NEW byte-scanning helper with a `while
+    # <counter> < bytes.len()`-shaped loop to any of the three
+    # monitored files, check whether it needs adding here too —
+    # don't assume this list is exhaustive just because it compiles.
+    "verifier\\.rs:.*replace \\+= with \\*= in (contains_word|strip_strings_and_comments|taint_flow::extract_literal_args)",
+    "verifier\\.rs:.*replace \\+= with -= in (contains_word|strip_strings_and_comments|taint_flow::extract_literal_args)",
     "taint\\.rs:.*replace \\+= with \\*= in b64_encode",
     "taint\\.rs:.*replace \\+= with -= in b64_encode",
+
+    # `extract_literal_args`'s post-extraction resume: `i = j + 1`
+    # (line 657) advances the outer scan past the literal's closing
+    # quote. Mutating `+` to `-` gives `i = j - 1` (resumes one byte
+    # BEFORE the closer); mutating to `*` gives `i = j * 1 = j`
+    # (resumes AT the closer). Both are equivalent given the actual
+    # call sites (`fn_call` is always the literal "env.read" or
+    # "fs.read", never attacker-controlled): the closer byte and the
+    # literal's own content can never themselves start a valid
+    # `is_ident_byte`-bounded match for either needle (a quote
+    # character isn't 'e' or 'f', and even if the literal's last
+    # content byte were 'f'/'e', the preceding `before_ok` check
+    # would still need the FULL needle to follow, which the
+    # surrounding quote/paren syntax rules out). Both mutants just
+    # cause 1-3 wasted outer-loop iterations (each failing the
+    # needle-match, falling through to the unmutated `i += 1` at the
+    # bottom of the loop) before reconverging on the exact same
+    # position the original code reaches directly. Output is
+    # byte-identical for every input this function is ever called
+    # with.
+    "verifier\\.rs:657:.*replace \\+ with [-*] in taint_flow::extract_literal_args",
 
     # b64_encode combines bytes via bitwise OR after shifting them
     # to non-overlapping positions (0-7, 8-15, 16-23). For non-
