@@ -1616,6 +1616,35 @@ impl WasmRunner {
                             cmd.env_clear();
                             cmd.output()
                         }
+                        denyx_policy::SandboxMode::Landlock => {
+                            #[cfg(target_os = "linux")]
+                            {
+                                let (read_paths, write_paths) =
+                                    subprocess_policy.sandbox_fs_paths();
+                                let deny_network =
+                                    !subprocess_policy.any_network_capability_granted();
+                                let mut cmd = std::process::Command::new(&argv[0]);
+                                cmd.args(&argv[1..]);
+                                cmd.env_clear();
+                                for (name, value) in &env_pairs {
+                                    cmd.env(name, value);
+                                }
+                                crate::landlock_sandbox::wire_pre_exec(
+                                    &mut cmd,
+                                    read_paths,
+                                    write_paths,
+                                    deny_network,
+                                );
+                                cmd.output()
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                Err(std::io::Error::other(
+                                    "landlock sandboxing is Linux-only; this should have \
+                                     been refused at policy load",
+                                ))
+                            }
+                        }
                     };
                     let output = match output {
                         Ok(o) => o,

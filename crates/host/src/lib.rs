@@ -28,6 +28,8 @@ use thiserror::Error;
 
 pub mod audit;
 pub mod confirm;
+#[cfg(target_os = "linux")]
+pub(crate) mod landlock_sandbox;
 pub mod policy_host_consistency;
 pub mod project_diagnosis;
 pub mod startup_block;
@@ -1054,6 +1056,42 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 // the parent invocation as a belt-and-suspenders.
                 cmd.env_clear();
                 cmd.output()
+            }
+            denyx_policy::SandboxMode::Landlock => {
+                // In-process restriction via landlock_restrict_self in
+                // the forked child, before exec — see
+                // crates/host/src/landlock_sandbox.rs's module doc for
+                // how this differs from bwrap. No wrapper binary; the
+                // real target binary runs directly.
+                #[cfg(target_os = "linux")]
+                {
+                    let (read_paths, write_paths) = ctx.policy.sandbox_fs_paths();
+                    let deny_network = !ctx.policy.any_network_capability_granted();
+                    let mut cmd = std::process::Command::new(&argv[0]);
+                    cmd.args(&argv[1..]);
+                    cmd.env_clear();
+                    for (name, value) in &env_pairs {
+                        cmd.env(name, value);
+                    }
+                    crate::landlock_sandbox::wire_pre_exec(
+                        &mut cmd,
+                        read_paths,
+                        write_paths,
+                        deny_network,
+                    );
+                    cmd.output()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    // Unreachable in practice: Policy::guard_sandbox_available
+                    // refuses to load a policy with sandbox = "landlock" on
+                    // any non-Linux platform. This arm exists only so the
+                    // match stays exhaustive when cross-compiling.
+                    Err(std::io::Error::other(
+                        "landlock sandboxing is Linux-only; this should have \
+                         been refused at policy load",
+                    ))
+                }
             }
         };
         match output {

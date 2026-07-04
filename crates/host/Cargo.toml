@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 starlark.workspace = true
+starlark_syntax.workspace = true
 allocative.workspace = true
 ureq.workspace = true
 sha2.workspace = true
@@ -35,3 +36,11 @@ url.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 denyx-runtime-starlark.workspace = true
+
+# Landlock (Linux 5.13+ LSM) subprocess sandboxing — Linux-only, so
+# it's a target-specific dependency rather than a cargo feature: it
+# simply isn't compiled on other platforms, no opt-in build flag
+# needed. See crates/host/src/landlock_sandbox.rs and
+# docs/landlock-evaluation.md.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
