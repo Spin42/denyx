@@ -54,6 +54,19 @@ that's syntactically different but semantically identical, like
 `Result::Ok(()) → Result::Ok(())` in a path that always returns Ok.
 The triage cost is real and the signal is poor on those modules.
 
+**Maintenance warning:** `.cargo/mutants.toml`'s `exclude_re` list
+suppresses known-equivalent mutants using regexes anchored to an
+exact `file:line`. Several in-code test-module comments in these
+three files also cite exact line numbers ("this test targets line
+N"). Both drift silently whenever one of these files grows or
+shrinks above the cited line — this already happened once (every
+anchor went stale when `verifier.rs` nearly tripled from the T6
+static taint-propagation pass) and produced a wall of newly-"missed"
+mutants that were actually already-triaged equivalents. See
+`CLAUDE.md`'s "Maintenance duties": re-verify these anchors whenever
+you touch `crates/policy/src/lib.rs`, `crates/host/src/taint.rs`, or
+`crates/host/src/verifier.rs`.
+
 ## Schedule, not gate
 
 Mutation testing is too slow for PR-time. A typical scoped run takes
