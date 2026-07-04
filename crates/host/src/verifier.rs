@@ -9,27 +9,39 @@
 //!
 //! The verifier also enforces a static **tainted-output-flow** check
 //! (the `taint_flow` module below): a script that reads any
-//! `local_only_*` env var or filesystem path via a LITERAL string
-//! argument, and separately contains any output-producing call
-//! (`print`, `fs.write`, `fs.delete`, `net.http_*`, `subprocess.exec`),
-//! is refused before execution. This tightens the asymmetric Round-1
+//! `local_only_*` env var or filesystem path, and separately contains
+//! an output-producing call (`print`, `fs.write`, `fs.delete`,
+//! `net.http_*`, `subprocess.exec`) reachable from that read, is
+//! refused before execution. This tightens the asymmetric Round-1
 //! behaviour where `print` of a tainted value was permitted-then-
 //! scrubbed and `fs.write` was refused at the arg-side gate; both now
 //! refuse uniformly at the verifier when the check fires. The
 //! motivation (Round-2 pentest) is documented in
 //! `docs/security-pentest-r2-tool-poisoning.md`.
 //!
-//! **Honest scope note:** this is a naive, literal-argument-only
-//! pre-filter, not a robust second line of defense — it exists to
-//! catch the easy/naive case before wasted execution, not to bound
-//! what a script can do. A path or hostname built from a variable or
-//! concatenation (`path = a + b; fs.read(path)`) evades it entirely
-//! and falls through to the runtime taint layer (`crates/host/src/taint.rs`),
-//! which is what actually enforces the no-exfiltration property (see
-//! `taint_flow`'s own module doc below, and
-//! `docs/04-security-threat-model.md`). Treat "the verifier didn't
-//! reject this script" as no signal at all about whether it leaks
-//! local-only data.
+//! Two passes implement this, in order (see `taint_flow`'s own module
+//! doc for the full design): an AST-based pass (`detect_ast`, built on
+//! `starlark_syntax`) that constant-folds simple string expressions
+//! (literals, direct variable assignment, `+`-concatenation) and
+//! tracks taint flow-sensitively across the top-level statement
+//! sequence, plus a byte-level literal-argument pass (`detect`) kept
+//! as a fallback for when parsing fails.
+//!
+//! **Honest scope note:** this remains a static pre-filter, not a
+//! robust second line of defense equivalent to the runtime layer — it
+//! exists to catch the easy and moderately obfuscated cases before
+//! wasted execution, not to bound what a script can do. It does not
+//! perform full data-flow analysis: values threaded through anything
+//! beyond `+`-concatenation (string formatting, slicing, computed
+//! results), or through a `def`/`lambda` call boundary under a
+//! different name, can still evade the *precise* check (a coarse
+//! whole-script fallback catches the `def`/`lambda`/`load()` case at
+//! the cost of possible false positives — see `taint_flow`'s doc).
+//! Whatever evades both passes falls through to the runtime taint
+//! layer (`crates/host/src/taint.rs`), which is what actually enforces
+//! the no-exfiltration property (see `docs/04-security-threat-model.md`).
+//! Treat "the verifier didn't reject this script" as no signal at all
+//! about whether it leaks local-only data.
 
 use std::collections::BTreeSet;
 
@@ -68,8 +80,23 @@ pub fn verify(source: &str, policy: &Policy) -> Result<(), VerifierRejection> {
             return Err(VerifierRejection::Capability { capability: cap });
         }
     }
-    if let Some((sources, outputs)) = taint_flow::detect(source, &stripped, policy) {
-        return Err(VerifierRejection::TaintFlow { sources, outputs });
+    // `detect_ast` returns `Some(verdict)` when it successfully parsed
+    // the script — in that case its verdict (including exemptions like
+    // "subprocess.exec to a local_only_commands entry is a safe sink")
+    // is authoritative and `detect` must NOT be run afterwards to
+    // second-guess it with a blind byte-level scan that doesn't know
+    // about that exemption. `detect` only runs as a fallback when the
+    // AST pass couldn't even parse the script (`None`).
+    match taint_flow::detect_ast(source, &stripped, policy) {
+        Some(Some((sources, outputs))) => {
+            return Err(VerifierRejection::TaintFlow { sources, outputs });
+        }
+        Some(None) => {}
+        None => {
+            if let Some((sources, outputs)) = taint_flow::detect(source, &stripped, policy) {
+                return Err(VerifierRejection::TaintFlow { sources, outputs });
+            }
+        }
     }
     Ok(())
 }
@@ -123,6 +150,12 @@ fn is_ident_byte(b: u8) -> bool {
 mod taint_flow {
     use super::{contains_word, is_ident_byte};
     use denyx_policy::Policy;
+    use starlark_syntax::syntax::ast::{
+        ArgumentP, AssignTargetP, AstExpr, AstLiteral, AstStmt, BinOp, ClauseP, ExprP, StmtP,
+    };
+    use starlark_syntax::syntax::module::AstModuleFields;
+    use starlark_syntax::syntax::{AstModule, Dialect};
+    use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
 
     /// The output-producing calls. If any of these is present in a
@@ -188,6 +221,392 @@ mod taint_flow {
             return None;
         }
         Some((sources, outputs))
+    }
+
+    /// AST-based tainted-output-flow detection. Closes the evasion gap
+    /// in `detect()` above, which only recognises LITERAL string
+    /// arguments to `env.read`/`fs.read`: a script that instead builds
+    /// the path/name from a variable or `+`-concatenation
+    /// (`prefix = "local/only/"; path = prefix + "secret"; fs.read(path)`)
+    /// is invisible to `extract_literal_args`'s byte scan but is exactly
+    /// the kind of trivial rewrite an attacker (or an injected
+    /// instruction) would try first.
+    ///
+    /// Scope, deliberately bounded — this is still a pre-filter, not the
+    /// runtime taint layer that actually enforces the property:
+    /// - Only the top-level statement sequence gets flow-sensitive
+    ///   tracking: which identifiers currently hold a value derived from
+    ///   a local-only read (`tainted`), and which currently hold a known
+    ///   concrete string (`known`, used to fold `+`-concatenation and
+    ///   simple reassignment so a *computed* path/name can still be
+    ///   checked against the same `Policy` predicates `detect()` uses on
+    ///   literals). Reassignment strong-updates both sets in program
+    ///   order, matching how Starlark actually executes top-level code.
+    /// - Every statement (including nested `if`/`for`/`def` bodies) is
+    ///   still walked for the actual "does a call to an output function
+    ///   reference a currently-tainted identifier" check, so a leak
+    ///   inside a conditional or a nested block is caught directly.
+    /// - If the script defines a function (`def`), a `lambda`, or uses
+    ///   `load()` anywhere, the direct-reference check above cannot be
+    ///   trusted to see every path a tainted value could reach an
+    ///   output through — a call could pass it through under a
+    ///   different parameter name and return something that looks
+    ///   unrelated. Real interprocedural analysis is out of scope here,
+    ///   so instead of silently under-reporting, the pass falls back to
+    ///   a coarse whole-script check: if the sequential pass proved a
+    ///   local-only read occurred at all, and an output call exists
+    ///   anywhere in the script (byte-level, same technique `detect()`
+    ///   uses), refuse — without trying to prove that specific data
+    ///   flow. This mirrors `detect()`'s own coarseness, applied only
+    ///   when the precise check could plausibly be blind.
+    ///
+    /// Known false-negative: this does not track values through
+    /// assignment TARGETS other than a plain identifier (`x[i] = ...`,
+    /// `obj.field = ...`), and does not attempt alias analysis across
+    /// containers, dicts, or comprehensions. Those fall through to the
+    /// runtime taint layer, same as before this pass existed.
+    ///
+    /// Returns `None` (outer) only when the script fails to parse — the
+    /// caller should fall back to the byte-level `detect()` in that
+    /// case. Once parsing succeeds, the inner `Option` is authoritative
+    /// and must not be second-guessed by `detect()`: this pass reasons
+    /// about specific exemptions (e.g. `subprocess.exec` to a
+    /// `local_only_commands` entry is a safe sink, not a taint output)
+    /// that the blind byte-level scan doesn't know about, so re-running
+    /// `detect()` afterwards could re-flag a script this pass correctly
+    /// cleared.
+    pub fn detect_ast(
+        source: &str,
+        stripped: &str,
+        policy: &Policy,
+    ) -> Option<Option<(Vec<String>, Vec<String>)>> {
+        let module = AstModule::parse("script", source.to_owned(), &Dialect::Standard).ok()?;
+        let root = module.statement();
+
+        let has_indirection = contains_def_lambda_or_load(root);
+        let top_level = flatten_top_level(root);
+
+        let mut known: HashMap<String, String> = HashMap::new();
+        let mut tainted: BTreeSet<String> = BTreeSet::new();
+        let mut sources: Vec<String> = Vec::new();
+        let mut outputs: Vec<String> = Vec::new();
+
+        for stmt in &top_level {
+            // Evaluated against the taint state as of BEFORE this
+            // statement's own assignment effect, matching real
+            // execution order (a line's RHS/body runs before its own
+            // LHS binds).
+            collect_tainted_outputs(stmt, &tainted, &known, policy, &mut sources, &mut outputs);
+
+            if let StmtP::Assign(assign) = &stmt.node {
+                if let AssignTargetP::Identifier(id) = &assign.lhs.node {
+                    let name = id.node.ident.clone();
+                    match read_call_taint(&assign.rhs, &known, policy) {
+                        Some(tag) => {
+                            tainted.insert(name);
+                            if !sources.contains(&tag) {
+                                sources.push(tag);
+                            }
+                        }
+                        None => {
+                            tainted.remove(&name);
+                            match fold_str(&assign.rhs, &known) {
+                                Some(s) => {
+                                    known.insert(name, s);
+                                }
+                                None => {
+                                    known.remove(&name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !sources.is_empty() && !outputs.is_empty() {
+            return Some(Some((sources, outputs)));
+        }
+
+        // Coarse fallback — see module doc above.
+        if has_indirection && !sources.is_empty() {
+            let mut all_outputs: Vec<String> = Vec::new();
+            for call in OUTPUT_CALLS {
+                if contains_word(stripped, call) {
+                    all_outputs.push((*call).to_string());
+                }
+            }
+            if !all_outputs.is_empty() {
+                return Some(Some((sources, all_outputs)));
+            }
+        }
+
+        Some(None)
+    }
+
+    /// Immediate child statements and expressions of `stmt`, for
+    /// recursive walks. Assignment LHS targets other than a plain
+    /// identifier (index/dot) are deliberately not descended into — see
+    /// `detect_ast`'s "known false-negative" note.
+    fn stmt_children(
+        stmt: &StmtP<starlark_syntax::syntax::ast::AstNoPayload>,
+    ) -> (Vec<&AstStmt>, Vec<&AstExpr>) {
+        match stmt {
+            StmtP::Break | StmtP::Continue | StmtP::Pass | StmtP::Load(_) => (vec![], vec![]),
+            StmtP::Return(e) => (vec![], e.iter().collect()),
+            StmtP::Expression(e) => (vec![], vec![e]),
+            StmtP::Assign(a) => (vec![], vec![&a.rhs]),
+            StmtP::AssignModify(_, _, e) => (vec![], vec![e]),
+            StmtP::Statements(v) => (v.iter().collect(), vec![]),
+            StmtP::If(cond, body) => (vec![body.as_ref()], vec![cond]),
+            StmtP::IfElse(cond, bodies) => (vec![&bodies.0, &bodies.1], vec![cond]),
+            StmtP::For(f) => (vec![f.body.as_ref()], vec![&f.over]),
+            StmtP::Def(d) => (vec![d.body.as_ref()], vec![]),
+        }
+    }
+
+    /// Immediate child expressions of `expr`, for recursive walks.
+    fn expr_children(expr: &AstExpr) -> Vec<&AstExpr> {
+        match &expr.node {
+            ExprP::Tuple(v) | ExprP::List(v) => v.iter().collect(),
+            ExprP::Dot(e, _) => vec![e],
+            ExprP::Call(callee, args) => {
+                let mut v = vec![callee.as_ref()];
+                v.extend(args.args.iter().map(|a| a.node.expr()));
+                v
+            }
+            ExprP::Index(b) => vec![&b.0, &b.1],
+            ExprP::Index2(b) => vec![&b.0, &b.1, &b.2],
+            ExprP::Slice(e, a, b, c) => {
+                let mut v = vec![e.as_ref()];
+                v.extend(a.as_deref());
+                v.extend(b.as_deref());
+                v.extend(c.as_deref());
+                v
+            }
+            ExprP::Identifier(_) | ExprP::Literal(_) => vec![],
+            ExprP::Lambda(l) => vec![&l.body],
+            ExprP::Not(e) | ExprP::Minus(e) | ExprP::Plus(e) | ExprP::BitNot(e) => vec![e],
+            ExprP::Op(l, _, r) => vec![l, r],
+            ExprP::If(b) => vec![&b.0, &b.1, &b.2],
+            ExprP::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
+            ExprP::ListComprehension(e, for_clause, clauses) => {
+                let mut v = vec![e.as_ref(), &for_clause.over];
+                v.extend(clauses.iter().map(clause_expr));
+                v
+            }
+            ExprP::DictComprehension(b, for_clause, clauses) => {
+                let mut v = vec![&b.0, &b.1, &for_clause.over];
+                v.extend(clauses.iter().map(clause_expr));
+                v
+            }
+            ExprP::FString(f) => f.expressions.iter().collect(),
+        }
+    }
+
+    fn clause_expr(clause: &ClauseP<starlark_syntax::syntax::ast::AstNoPayload>) -> &AstExpr {
+        match clause {
+            ClauseP::For(fc) => &fc.over,
+            ClauseP::If(e) => e,
+        }
+    }
+
+    /// Whether `def`, `lambda`, or `load()` appears anywhere in the
+    /// (sub)tree rooted at `stmt`.
+    fn contains_def_lambda_or_load(stmt: &AstStmt) -> bool {
+        if matches!(&stmt.node, StmtP::Def(_) | StmtP::Load(_)) {
+            return true;
+        }
+        let (child_stmts, child_exprs) = stmt_children(&stmt.node);
+        child_stmts.iter().any(|s| contains_def_lambda_or_load(s))
+            || child_exprs.iter().any(|e| expr_contains_lambda(e))
+    }
+
+    fn expr_contains_lambda(expr: &AstExpr) -> bool {
+        matches!(&expr.node, ExprP::Lambda(_))
+            || expr_children(expr).iter().any(|e| expr_contains_lambda(e))
+    }
+
+    /// Split `stmt`'s subtree (module root, one top-level statement at a
+    /// time) into its flat top-level list, or a single-element list if
+    /// `stmt` isn't the `Statements` wrapper the parser wraps a module
+    /// body in.
+    fn flatten_top_level(stmt: &AstStmt) -> Vec<&AstStmt> {
+        match &stmt.node {
+            StmtP::Statements(v) => v.iter().collect(),
+            _ => vec![stmt],
+        }
+    }
+
+    /// Recursively walks `stmt`'s ENTIRE subtree (including nested
+    /// `if`/`for`/`def` bodies) looking for calls to an `OUTPUT_CALLS`
+    /// function whose argument expression references a currently-
+    /// tainted identifier. Appends any findings to `sources`/`outputs`
+    /// (deduplicated). `known` and `policy` are only used to evaluate
+    /// the `subprocess.exec`-to-a-local-only-command exemption — see
+    /// `is_local_only_subprocess_sink`.
+    fn collect_tainted_outputs(
+        stmt: &AstStmt,
+        tainted: &BTreeSet<String>,
+        known: &HashMap<String, String>,
+        policy: &Policy,
+        sources: &mut Vec<String>,
+        outputs: &mut Vec<String>,
+    ) {
+        let (child_stmts, child_exprs) = stmt_children(&stmt.node);
+        for e in &child_exprs {
+            collect_tainted_outputs_expr(e, tainted, known, policy, sources, outputs);
+        }
+        for s in &child_stmts {
+            collect_tainted_outputs(s, tainted, known, policy, sources, outputs);
+        }
+    }
+
+    fn collect_tainted_outputs_expr(
+        expr: &AstExpr,
+        tainted: &BTreeSet<String>,
+        known: &HashMap<String, String>,
+        policy: &Policy,
+        sources: &mut Vec<String>,
+        outputs: &mut Vec<String>,
+    ) {
+        if let ExprP::Call(callee, args) = &expr.node {
+            if let Some(name) = dotted_name(callee) {
+                let exempt =
+                    name == "subprocess.exec" && is_local_only_subprocess_sink(args, known, policy);
+                if OUTPUT_CALLS.contains(&name.as_str()) && !exempt {
+                    for a in &args.args {
+                        if let Some(tag) = find_taint_in_expr(a.node.expr(), tainted, known, policy)
+                        {
+                            if !sources.contains(&tag) {
+                                sources.push(tag);
+                            }
+                            if !outputs.contains(&name) {
+                                outputs.push(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for child in expr_children(expr) {
+            collect_tainted_outputs_expr(child, tainted, known, policy, sources, outputs);
+        }
+    }
+
+    /// Whether `subprocess.exec`'s argv[0] (the first element of its
+    /// first positional argument, expected to be a list literal) folds
+    /// to a command `policy` marks `local_only_commands` — the same
+    /// safe-sink exemption the runtime taint layer already grants:
+    /// local-only commands are a documented, intentional destination
+    /// for local-only data, not exfiltration. An unresolvable argv[0]
+    /// (built dynamically) is NOT exempted — conservative default,
+    /// matching `OUTPUT_CALLS`'s own doc on why `subprocess.exec` is
+    /// included at all (tainted control flow can still influence which
+    /// command/branch runs).
+    fn is_local_only_subprocess_sink(
+        args: &starlark_syntax::syntax::ast::CallArgsP<starlark_syntax::syntax::ast::AstNoPayload>,
+        known: &HashMap<String, String>,
+        policy: &Policy,
+    ) -> bool {
+        let argv0 = args
+            .args
+            .iter()
+            .find_map(|a| match &a.node {
+                ArgumentP::Positional(e) => Some(e),
+                _ => None,
+            })
+            .and_then(|first| match &first.node {
+                ExprP::List(items) => items.first(),
+                _ => None,
+            })
+            .and_then(|e| fold_str(e, known));
+        argv0.is_some_and(|argv0| policy.subprocess_is_local_only(&argv0))
+    }
+
+    /// Does `expr`'s subtree contain a taint source — either a
+    /// reference to an identifier currently in `tainted`, or an INLINE
+    /// local-only `env.read`/`fs.read` call used directly as part of
+    /// the expression (no intermediate variable, e.g.
+    /// `print("token=" + fs.read("/local/only/path"))`)? Returns a
+    /// source tag for the first match found: `<name>` for the
+    /// identifier case, or `read_call_taint`'s own tag (e.g.
+    /// `fs.read("/path")`) for the inline-call case.
+    fn find_taint_in_expr(
+        expr: &AstExpr,
+        tainted: &BTreeSet<String>,
+        known: &HashMap<String, String>,
+        policy: &Policy,
+    ) -> Option<String> {
+        if let Some(tag) = read_call_taint(expr, known, policy) {
+            return Some(tag);
+        }
+        if let ExprP::Identifier(id) = &expr.node {
+            if tainted.contains(&id.node.ident) {
+                return Some(format!("<{}>", id.node.ident));
+            }
+        }
+        expr_children(expr)
+            .into_iter()
+            .find_map(|e| find_taint_in_expr(e, tainted, known, policy))
+    }
+
+    /// Fully-qualified call-target name (`"env.read"`, `"fs.read"`,
+    /// `"print"`), or `None` if the callee isn't a plain
+    /// identifier/dot-chain (e.g. an indexed or computed callee).
+    fn dotted_name(expr: &AstExpr) -> Option<String> {
+        match &expr.node {
+            ExprP::Identifier(id) => Some(id.node.ident.clone()),
+            ExprP::Dot(inner, field) => Some(format!("{}.{}", dotted_name(inner)?, field.node)),
+            _ => None,
+        }
+    }
+
+    /// Constant-fold a string expression: literals, identifiers already
+    /// resolved to a known concrete string in `known`, and `+`-
+    /// concatenation of foldable sub-expressions. Anything else (calls,
+    /// formatting, unresolvable identifiers) is not foldable — `None`.
+    fn fold_str(expr: &AstExpr, known: &HashMap<String, String>) -> Option<String> {
+        match &expr.node {
+            ExprP::Literal(AstLiteral::String(s)) => Some(s.node.clone()),
+            ExprP::Identifier(id) => known.get(&id.node.ident).cloned(),
+            ExprP::Op(lhs, BinOp::Add, rhs) => {
+                let mut s = fold_str(lhs, known)?;
+                s.push_str(&fold_str(rhs, known)?);
+                Some(s)
+            }
+            _ => None,
+        }
+    }
+
+    /// If `expr` is a call to `env.read`/`fs.read` whose first
+    /// positional argument folds (via `fold_str`) to a concrete string
+    /// that `policy` classifies as local-only, returns a source tag for
+    /// it. This is `detect()`'s literal check generalised to any
+    /// foldable expression, not just a bare string literal.
+    fn read_call_taint(
+        expr: &AstExpr,
+        known: &HashMap<String, String>,
+        policy: &Policy,
+    ) -> Option<String> {
+        let ExprP::Call(callee, args) = &expr.node else {
+            return None;
+        };
+        let name = dotted_name(callee)?;
+        if name != "env.read" && name != "fs.read" {
+            return None;
+        }
+        let first_positional = args.args.iter().find_map(|a| match &a.node {
+            ArgumentP::Positional(e) => Some(e),
+            _ => None,
+        })?;
+        let value = fold_str(first_positional, known)?;
+        let is_local_only = if name == "env.read" {
+            policy.env_is_local_only(&value)
+        } else {
+            policy.fs_read_is_local_only(Path::new(&value))
+        };
+        is_local_only.then(|| format!("{name}({value:?})"))
     }
 
     /// Extract literal string arguments of every `fn_call("...")`
