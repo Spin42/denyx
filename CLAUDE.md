@@ -48,6 +48,26 @@ was built.**
   against" section that pulls weight equal to the "defends against"
   table. New defenses belong in both.
 
+## Test-first (TDD)
+
+- New behaviour: write the failing test before the implementation.
+- Bug fixes: write a test that reproduces the bug before touching
+  the fix. Confirm it fails, then fix, then confirm it passes.
+- No exceptions for "small" changes in `crates/policy` or
+  `crates/host` — these are the security-critical crates; the test
+  is the spec.
+
+## Maintenance duties
+
+- Editing `crates/policy/src/lib.rs`, `crates/host/src/taint.rs`, or
+  `crates/host/src/verifier.rs`: re-check every line-anchored regex
+  in `.cargo/mutants.toml`'s `exclude_re`, and every in-code "this
+  test targets line N" comment in that file's own test module, still
+  points at the right code. Line numbers drift silently when a file
+  grows — see `docs/mutation-testing.md`.
+- Check `backlog.md` at the start of a session; add or remove
+  entries per its own rules.
+
 ## Behaviour shortcuts
 
 - Run `./scripts/precommit.sh` (or rely on the hook installed via
