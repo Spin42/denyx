@@ -96,6 +96,44 @@ fn check_wasm_deadline(
     Err(wasmtime::Error::msg("deadline exceeded"))
 }
 
+/// Wasm-path mirror of `HostCtx::check_no_output_after_local_only_read`
+/// (native runner, `crates/host/src/lib.rs`). Called at the top of
+/// every OUTPUT-producing import (`host_print`, `host_fs_write`,
+/// `host_fs_delete`, `host_net_http_*`, `host_subprocess_exec`) —
+/// never from a read-only import. See
+/// `denyx_policy::RuntimePolicy::no_output_after_local_only_read`'s
+/// doc for why this is stronger than the default per-value taint scrub.
+fn check_wasm_no_output_after_local_only_read(
+    caller: &mut Caller<'_, WasmState>,
+    policy: &denyx_policy::Policy,
+    audit: &Arc<dyn crate::AuditSink>,
+    task_id: &str,
+    capability: &'static str,
+) -> Result<(), wasmtime::Error> {
+    if !policy.no_output_after_local_only_read() || caller.data().taint_registry.is_empty() {
+        return Ok(());
+    }
+    let step = caller
+        .data()
+        .step_counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let msg = format!(
+        "policy sets [runtime].no_output_after_local_only_read = true and a \
+         local-only read has already occurred this run; {capability} (an \
+         output-producing call) is refused regardless of whether its specific \
+         arguments are tainted"
+    );
+    audit.emit(crate::AuditEvent::denied(
+        task_id,
+        step,
+        capability,
+        "no-output-after-local-only-read",
+        &msg,
+    ));
+    caller.data_mut().captured_error = Some(crate::DenyxError::Policy(msg));
+    Err(wasmtime::Error::msg("output refused after local-only read"))
+}
+
 use denyx_policy::Policy;
 use denyx_runtime_starlark::{STARLARK_INTERPRETER_CWASM, STARLARK_INTERPRETER_WASM};
 
@@ -244,14 +282,24 @@ impl WasmRunner {
             .map_err(|e| DenyxError::Other(format!("wasi linker: {e}")))?;
 
         // ── host_print (Phase 4.1) ────────────────────────────────
+        let print_policy = self.policy.clone();
+        let print_audit = self.audit.clone();
+        let print_task_id = task_id.to_owned();
         linker
             .func_wrap(
                 "denyx",
                 "host_print",
-                |mut caller: Caller<'_, WasmState>,
-                 ptr: u32,
-                 len: u32|
-                 -> Result<(), wasmtime::Error> {
+                move |mut caller: Caller<'_, WasmState>,
+                      ptr: u32,
+                      len: u32|
+                      -> Result<(), wasmtime::Error> {
+                    check_wasm_no_output_after_local_only_read(
+                        &mut caller,
+                        &print_policy,
+                        &print_audit,
+                        &print_task_id,
+                        "print",
+                    )?;
                     let memory = caller
                         .get_export("memory")
                         .and_then(Extern::into_memory)
@@ -605,6 +653,7 @@ impl WasmRunner {
                       content_len: u32|
                       -> Result<(), wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &fs_write_policy, &fs_write_audit, &fs_write_task_id, "fs.write")?;
                     // 1. Read path and content from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -768,6 +817,7 @@ impl WasmRunner {
                       path_len: u32|
                       -> Result<(), wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &fs_delete_policy, &fs_delete_audit, &fs_delete_task_id, "fs.delete")?;
                     // 1. Read path from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -1077,6 +1127,7 @@ impl WasmRunner {
                       argv_json_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &subprocess_policy, &subprocess_audit, &subprocess_task_id, "subprocess.exec")?;
                     // 1. Read argv JSON from guest memory.
                     let memory = caller
                         .get_export("memory")
@@ -1417,6 +1468,7 @@ impl WasmRunner {
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &http_get_policy, &http_get_audit, &http_get_task_id, "net.http_get")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let parsed = match http_get_policy.check_http_get(&url) {
                         Ok(parsed) => parsed,
@@ -1609,6 +1661,7 @@ impl WasmRunner {
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &http_post_policy, &http_post_audit, &http_post_task_id, "net.http_post")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     let parsed = match http_post_policy.check_http_post(&url) {
@@ -1797,6 +1850,7 @@ impl WasmRunner {
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &http_put_policy, &http_put_audit, &http_put_task_id, "net.http_put")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     let parsed = match http_put_policy.check_http_put(&url) {
@@ -1985,6 +2039,7 @@ impl WasmRunner {
                       body_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &http_patch_policy, &http_patch_audit, &http_patch_task_id, "net.http_patch")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let req_body = read_string_from_guest(&mut caller, body_ptr, body_len, "body")?;
                     let parsed = match http_patch_policy.check_http_patch(&url) {
@@ -2172,6 +2227,7 @@ impl WasmRunner {
                       url_len: u32|
                       -> Result<u64, wasmtime::Error> {
                     check_wasm_deadline(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
+                    check_wasm_no_output_after_local_only_read(&mut caller, &http_delete_policy, &http_delete_audit, &http_delete_task_id, "net.http_delete")?;
                     let url = read_string_from_guest(&mut caller, url_ptr, url_len, "url")?;
                     let parsed = match http_delete_policy.check_http_delete(&url) {
                         Ok(parsed) => parsed,
@@ -3778,5 +3834,91 @@ fs.write({:?}, "hello")
         // realistic failure mode instead (huge ptr+len against a
         // guest that only has a small amount of actual memory).
         assert!(validate_guest_len(u32::MAX, u32::MAX, 65536).is_err());
+    }
+
+    // ---- [runtime].no_output_after_local_only_read (wasm path) ----
+    //
+    // Mirrors crates/host/tests/runtime_no_output_after_local_only_read.rs's
+    // native-runner tests against WasmRunner. Uses a variable-arg
+    // fs.read (`p = "..."; fs.read(p)`) so the pre-exec verifier's
+    // literal-arg-only taint_flow check doesn't short-circuit before
+    // the runtime flag gets a chance to fire.
+
+    #[test]
+    fn no_output_after_local_only_read_denies_unrelated_print_when_flag_set() {
+        let secret_path = unique_tmp_path("no_output_secret_deny");
+        std::fs::write(&secret_path, "irrelevant-secret-value").expect("write fixture");
+        let path_lit = secret_path.to_string_lossy().replace('\\', "/");
+
+        let policy_path = write_temp_policy(
+            "no_output_deny",
+            &format!(
+                "[filesystem]\nlocal_only_read = [\"{path_lit}\"]\n\n\
+                 [runtime]\nno_output_after_local_only_read = true\n"
+            ),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src =
+            format!("p = \"{path_lit}\"\nx = fs.read(p)\nprint(\"unrelated to the secret\")\n");
+        let err = runner
+            .run("t1", &src, "test.star")
+            .expect_err("output after a local-only read must be refused when the flag is set");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&secret_path);
+        assert!(
+            matches!(err, DenyxError::Policy(_)),
+            "expected DenyxError::Policy, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no_output_after_local_only_read") || msg.contains("local-only read"),
+            "expected a message naming the flag/property, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_output_after_local_only_read_allows_output_with_no_local_only_read() {
+        let policy_path = write_temp_policy(
+            "no_output_clean",
+            "[runtime]\nno_output_after_local_only_read = true\n",
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let outcome = runner
+            .run(
+                "t1",
+                r#"print("no local-only read ever happened in this script")"#,
+                "test.star",
+            )
+            .expect("no local-only read occurred, so output must be unaffected by the flag");
+        let _ = std::fs::remove_file(&policy_path);
+        assert_eq!(
+            outcome.printed,
+            vec!["no local-only read ever happened in this script".to_string()]
+        );
+    }
+
+    #[test]
+    fn no_output_after_local_only_read_allows_output_when_flag_unset_default() {
+        let secret_path = unique_tmp_path("no_output_secret_default_off");
+        std::fs::write(&secret_path, "irrelevant-secret-value").expect("write fixture");
+        let path_lit = secret_path.to_string_lossy().replace('\\', "/");
+
+        // No [runtime] section at all — flag defaults to false.
+        let policy_path = write_temp_policy(
+            "no_output_default_off",
+            &format!("[filesystem]\nlocal_only_read = [\"{path_lit}\"]\n"),
+        );
+        let policy = Policy::load(&policy_path).expect("policy loads");
+        let runner = WasmRunner::new(policy);
+        let src =
+            format!("p = \"{path_lit}\"\nx = fs.read(p)\nprint(\"unrelated to the secret\")\n");
+        let outcome = runner
+            .run("t1", &src, "test.star")
+            .expect("flag defaults to off; unrelated output after a local-only read is unaffected");
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&secret_path);
+        assert_eq!(outcome.printed, vec!["unrelated to the secret".to_string()]);
     }
 }

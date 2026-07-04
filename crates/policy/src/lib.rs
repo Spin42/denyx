@@ -249,6 +249,29 @@ pub struct RuntimePolicy {
     /// (typically a few hundred).
     #[serde(default)]
     pub max_callstack_size: Option<usize>,
+    /// When `true`, once ANY local-only read (`fs.read`/`env.read`
+    /// of a `local_only_*`-marked resource, or subprocess stdout/
+    /// stderr from a `local_only_commands` entry) has occurred
+    /// anywhere in a script's execution, every subsequent
+    /// output-producing call (`print`, `fs.write`, `fs.delete`,
+    /// `net.http_*`, `subprocess.exec`) is refused outright —
+    /// regardless of whether the specific value being output is
+    /// itself tainted.
+    ///
+    /// This is strictly stronger than the default per-value taint
+    /// scrub: the runtime taint layer (`crates/host/src/taint.rs`)
+    /// only recognizes a documented, finite set of transforms
+    /// (reverse, hex, XOR, base64, ROT-N) plus chunking — a script
+    /// that transforms a secret some other way (a script-generated
+    /// key, compression, any keyed cipher) can still leak it past
+    /// that layer. This flag closes that gap completely for any
+    /// script willing to accept the restriction: reads happen either
+    /// before all outputs, or not in the same run.
+    ///
+    /// `false` (default) ⇒ today's per-value taint scrub only,
+    /// unchanged behavior.
+    #[serde(default)]
+    pub no_output_after_local_only_read: bool,
 }
 
 /// Full record for a `[tools.X]` entry: the capabilities it requires
@@ -660,6 +683,16 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
                 .runtime
                 .max_callstack_size
                 .or(base.runtime.max_callstack_size),
+            // OR, not override: this flag only ever makes execution
+            // MORE restrictive, so a base preset that enables it
+            // can't be silently loosened by an inheriting policy that
+            // doesn't mention it. A policy that genuinely wants it
+            // off despite an inherited "on" isn't a case this schema
+            // supports today (no explicit-false-wins escape hatch),
+            // matching how deny-lists already can't be un-denied by
+            // omission.
+            no_output_after_local_only_read: base.runtime.no_output_after_local_only_read
+                || over.runtime.no_output_after_local_only_read,
         },
         tools: merge_tools(base.tools, over.tools),
         requires_approval: concat_dedup(base.requires_approval, over.requires_approval),
@@ -1294,6 +1327,12 @@ impl Policy {
     /// Max Starlark call-stack depth. `None` ⇒ Starlark's default.
     pub fn runtime_max_callstack_size(&self) -> Option<usize> {
         self.file.runtime.max_callstack_size
+    }
+
+    /// Whether `[runtime].no_output_after_local_only_read` is set.
+    /// See `RuntimePolicy::no_output_after_local_only_read`'s docs.
+    pub fn no_output_after_local_only_read(&self) -> bool {
+        self.file.runtime.no_output_after_local_only_read
     }
 
     /// Compute the (name, value) env pairs to pass to a subprocess

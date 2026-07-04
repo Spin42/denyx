@@ -397,6 +397,39 @@ impl HostCtx {
         Err(DenyxError::RuntimeLimit(msg))
     }
 
+    /// Bail with `DenyxError::Policy` if
+    /// `[runtime].no_output_after_local_only_read` is set and any
+    /// local-only read has already occurred this run. Called at the
+    /// top of every OUTPUT-producing builtin (print, `fs.write`,
+    /// `fs.delete`, `net.http_*`, `subprocess.exec`) — never from a
+    /// read-only builtin, since a local-only read is what TRIGGERS
+    /// this state, not itself an output. Unlike `enforce_outbound_taint`,
+    /// this fires regardless of whether the specific arguments being
+    /// output are themselves tainted — see the policy field's doc
+    /// comment in `denyx_policy::RuntimePolicy` for why that's a
+    /// strictly stronger property than the default per-value scrub.
+    fn check_no_output_after_local_only_read(&self, capability: &str) -> Result<(), DenyxError> {
+        if !self.policy.no_output_after_local_only_read() || self.taint.is_empty() {
+            return Ok(());
+        }
+        let msg = format!(
+            "policy sets [runtime].no_output_after_local_only_read = true and a \
+             local-only read has already occurred this run; {capability} (an \
+             output-producing call) is refused regardless of whether its specific \
+             arguments are tainted"
+        );
+        let step = *self.step.borrow();
+        self.emit(AuditEvent::denied(
+            &self.task_id,
+            step,
+            capability,
+            "no-output-after-local-only-read",
+            &msg,
+        ));
+        self.capture(CapturedKind::Policy, &msg);
+        Err(DenyxError::Policy(msg))
+    }
+
     fn require_confirm(&self, capability: &str, summary: String) -> Result<(), DenyxError> {
         if !self.policy.requires_approval(capability) {
             return Ok(());
@@ -503,6 +536,9 @@ struct PrintCapture<'a> {
 }
 impl<'a> starlark::PrintHandler for PrintCapture<'a> {
     fn println(&self, text: &str) -> starlark::Result<()> {
+        if let Err(e) = self.ctx.check_no_output_after_local_only_read("print") {
+            return Err(anyhow::Error::from(e).into());
+        }
         self.ctx.printed.borrow_mut().push(text.to_string());
         Ok(())
     }
@@ -665,6 +701,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("fs.write")?;
+        ctx.check_no_output_after_local_only_read("fs.write")?;
         match ctx.policy.check_fs_write(Path::new(path)) {
             Ok(resolved) => {
                 // Arg-side IFC: fs.write has no local_only_write
@@ -715,6 +752,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("fs.delete")?;
+        ctx.check_no_output_after_local_only_read("fs.delete")?;
         match ctx.policy.check_fs_delete(Path::new(path)) {
             Ok(resolved) => {
                 let summary = format!("delete {}", resolved.display());
@@ -757,6 +795,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("subprocess.exec")?;
+        ctx.check_no_output_after_local_only_read("subprocess.exec")?;
         let argv = argv.items;
         if argv.is_empty() {
             return Err(anyhow::anyhow!("subprocess.exec: argv must not be empty"));
@@ -930,6 +969,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("net.http_get")?;
+        ctx.check_no_output_after_local_only_read("net.http_get")?;
         match ctx.policy.check_http_get(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
@@ -1000,6 +1040,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("net.http_post")?;
+        ctx.check_no_output_after_local_only_read("net.http_post")?;
         match ctx.policy.check_http_post(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
@@ -1073,6 +1114,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("net.http_put")?;
+        ctx.check_no_output_after_local_only_read("net.http_put")?;
         match ctx.policy.check_http_put(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
@@ -1146,6 +1188,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("net.http_patch")?;
+        ctx.check_no_output_after_local_only_read("net.http_patch")?;
         match ctx.policy.check_http_patch(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
@@ -1218,6 +1261,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<String> {
         let ctx = ctx_from_eval(eval)?;
         let step = ctx.begin_call("net.http_delete")?;
+        ctx.check_no_output_after_local_only_read("net.http_delete")?;
         match ctx.policy.check_http_delete(url) {
             Ok(parsed) => {
                 if let Some(host) = parsed.host_str() {
