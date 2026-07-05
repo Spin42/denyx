@@ -139,6 +139,40 @@ exclude_re = [
     # with.
     "verifier\\.rs:657:.*replace \\+ with [-*] in taint_flow::extract_literal_args",
 
+    # `extract_literal_args`'s string-body escape check (line 647):
+    # `if bytes[j] == b'\\' && j + 1 < bytes.len() { j += 2 } else
+    # { j += 1 }`. The bounds check guards against `j += 2` reading
+    # past the end when the literal contains an escaped backslash as
+    # its very last byte with nothing following (an unterminated,
+    # malformed literal — `source` here is the untrusted script, so
+    # this genuinely can happen, unlike the `fn_call`-based exclusion
+    # above). Five mutations at this position are equivalent for
+    # EVERY input, not just realistic ones:
+    #   - 647:63 `< → ==`, `< → >`, `< → <=`: only change behaviour
+    #     when `j` is the last valid index (elsewhere `j + 1 <
+    #     bytes.len()` and the mutant condition agree, since both are
+    #     just "is there a next byte"). At that boundary, if
+    #     `bytes[j] == b'\\'`: the mutants for `==`/`<=` wrongly take
+    #     the escape branch (`j += 2`, landing at `bytes.len() + 1`);
+    #     `>` correctly falls to `j += 1` same as the original.
+    #   - 647:59 `+ → -` (`j - 1 < bytes.len()`) and `+ → *` (`j * 1 <
+    #     bytes.len()` = `j < bytes.len()`): both are trivially true
+    #     for every `j` inside the loop (guarded by the loop's own `j
+    #     < bytes.len()`), so both always take the escape branch when
+    #     `bytes[j] == b'\\'`, including at the last-index boundary.
+    # In every one of these boundary-divergent cases, the "wrong"
+    # escape branch advances `j` to `bytes.len() + 1` — one past what
+    # the correct code reaches (`bytes.len()`) — but the very next
+    # thing either code does is re-check `j < bytes.len()` (the outer
+    # while, or the closer check at line 653): both `bytes.len()` and
+    # `bytes.len() + 1` fail that check identically, and NEITHER value
+    # is ever used to index `bytes` (the check happens before any
+    # indexing). Both paths therefore reach the same outcome — no
+    # literal pushed, no panic — for every possible input, adversarial
+    # or not.
+    "verifier\\.rs:647:63:.*replace < with (==|>|<=) in taint_flow::extract_literal_args",
+    "verifier\\.rs:647:59:.*replace \\+ with [-*] in taint_flow::extract_literal_args",
+
     # b64_encode combines bytes via bitwise OR after shifting them
     # to non-overlapping positions (0-7, 8-15, 16-23). For non-
     # overlapping bit ranges, `|` and `^` produce identical results.

@@ -710,6 +710,57 @@ mod taint_flow {
                 "boundary should reject prefix-attached: {args:?}"
             );
         }
+
+        #[test]
+        fn extract_literal_args_skips_whitespace_before_paren() {
+            // Kills 634:29 (`<` → `==` or `>` in the name-to-"("
+            // whitespace-skip loop `while j < bytes.len() &&
+            // bytes[j].is_ascii_whitespace()`). Both mutations make
+            // `j == bytes.len()` (or `>`, always false) the first
+            // conjunct, so the loop never runs even when whitespace
+            // is present — `bytes[j] == b'('` then fails on the
+            // still-unskipped space, and the literal is silently
+            // dropped. `env.read  ("USER")` (two spaces before the
+            // paren) reveals this: the unmutated code must still
+            // extract "USER".
+            let src = "env.read  (\"USER\")";
+            let args = extract_literal_args(src, "env.read");
+            assert_eq!(args, vec!["USER".to_string()]);
+        }
+
+        #[test]
+        fn extract_literal_args_skips_whitespace_after_paren() {
+            // Kills 639:33 (`<` → `>` in the second whitespace-skip
+            // loop, between "(" and the opening quote). Same failure
+            // mode as the test above, one skip-loop later:
+            // `env.read( "USER")` (space right after the paren) must
+            // still extract "USER".
+            let src = "env.read( \"USER\")";
+            let args = extract_literal_args(src, "env.read");
+            assert_eq!(args, vec!["USER".to_string()]);
+        }
+
+        #[test]
+        fn extract_literal_args_handles_odd_length_literal_without_escapes() {
+            // Kills 647:54 (`&&` → `||`) and 647:45 (`==` → `!=`) in
+            // the string-body scan's escape check: `if bytes[j] ==
+            // b'\\' && j + 1 < bytes.len() { j += 2 } else { j += 1
+            // }`. Both mutations make the escape branch (`j += 2`)
+            // fire on every NON-backslash byte too (since `j + 1 <
+            // bytes.len()` is true almost everywhere, and `!=
+            // b'\\'` is true for any ordinary character) — for an
+            // EVEN-length literal this coincidentally overshoots by
+            // exactly the right amount to land back on the closing
+            // quote (undetected), but for an ODD-length literal like
+            // "abc" it overshoots PAST the quote, the inner scan
+            // never finds a matching `"` in the remaining source, and
+            // the literal is silently dropped entirely. The other
+            // three tests in this module all use even-length literals
+            // ("USER", "HOME", "/tmp/x") and would not catch this.
+            let src = "fs.read(\"abc\")";
+            let args = extract_literal_args(src, "fs.read");
+            assert_eq!(args, vec!["abc".to_string()]);
+        }
     }
 }
 
