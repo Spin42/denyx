@@ -221,11 +221,25 @@ deny_commands = [
 ]
 
 [subprocess.deny_args]
-# `find -exec CMD` and `find -execdir CMD` spawn CMD with whatever
-# args find chose. Same wholesale-bypass shape as the commands
-# above; deny the flag specifically since `find` itself is otherwise
-# a useful tool that doesn't bypass.
-find = ["-exec", "-execdir"]
+# `find` is otherwise a useful, non-bypassing tool, but several of
+# its primaries hand control to arbitrary code or mutate the
+# filesystem directly — outside the argv path-gate and the fs.*
+# capability gates:
+#
+#   -exec / -execdir       spawn an arbitrary command
+#   -ok   / -okdir         the interactive spawn variants
+#   -delete                unlink matched files via find's own
+#                          syscall, never touching fs.delete /
+#                          delete_allow
+#   -fprintf / -fprint /   write to an arbitrary path via find's
+#   -fls / -fprint0        own syscall, never touching fs.write /
+#                          write_allow
+#
+# deny_args is a substring match, so the shortest safe stem covers
+# the longer variants ("-exec" matches "-execdir", "-ok" matches
+# "-okdir", "-fprint" matches "-fprintf"/"-fprint0"). Read-only
+# primaries (-print, -printf, -ls) are intentionally left allowed.
+find = ["-exec", "-ok", "-delete", "-fprint", "-fls"]
 "#;
 
 /// Look up a preset by name. Returns the raw TOML source.
