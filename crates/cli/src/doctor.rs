@@ -443,6 +443,7 @@ pub fn render(diagnosis: &ProjectDiagnosis, issues: &[ConsistencyIssue]) -> (Str
         for issue in issues {
             let sev = issue.severity();
             let label = match issue {
+                ConsistencyIssue::UnsandboxedCodeRunner { .. } => "unsandboxed code runner",
                 ConsistencyIssue::ToolUrlNotInNetworkAllow { .. } => "tool URL vs network",
                 ConsistencyIssue::ToolDeclaresUnsupportedCapability { .. } => {
                     "tool capability vs policy"

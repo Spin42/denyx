@@ -25,6 +25,22 @@ use crate::project_diagnosis::{
 /// minimum data needed for a useful fix message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsistencyIssue {
+    /// A `[subprocess].allow_commands` entry runs code that the argv
+    /// path-gate and `[subprocess].deny_args` cannot contain: a
+    /// language interpreter (`python3`, `node`, ...), a shell
+    /// (`bash`, `sh`, ...), or a build driver that shells out
+    /// (`make`). Flagged only when `[subprocess].sandbox = "none"` and
+    /// the policy grants a writable tree. The runner reads its program
+    /// from a file the agent can write, so it executes as an ordinary
+    /// ungated host process: it can read, write, delete, and open
+    /// sockets outside every `[filesystem]`/`[network]` rule. Blocking
+    /// `-c`/`-e` in `deny_args` only forces the code into a file; it is
+    /// not a containment boundary. Warning, not Critical: often a
+    /// deliberate trade-off on a trusted dev policy, but it means
+    /// `subprocess` is effectively an arbitrary-code capability. Close
+    /// it with an OS sandbox (`sandbox = "landlock"`/`"bwrap"`) or by
+    /// running denyx in a VM/container.
+    UnsandboxedCodeRunner { commands: Vec<String> },
     /// `[tools.X].backend_url`'s host is not allowed by any
     /// `[network].http_*_allow` list. Calling that tool would fail
     /// at runtime with a network-deny.
@@ -171,6 +187,11 @@ pub enum Severity {
 impl ConsistencyIssue {
     pub fn severity(&self) -> Severity {
         match self {
+            // An allowed interpreter/shell/build-driver under
+            // `sandbox = "none"` with a writable tree is an ungated
+            // arbitrary-code primitive: a real gap, but frequently an
+            // accepted trade-off on a trusted dev policy, so Warning.
+            Self::UnsandboxedCodeRunner { .. } => Severity::Warning,
             // Tool wired with a URL the network gate denies → tool
             // can't function. Critical.
             Self::ToolUrlNotInNetworkAllow { .. } => Severity::Critical,
@@ -223,6 +244,12 @@ impl ConsistencyIssue {
     /// Short one-line summary suitable for a `[X] label: msg` line.
     pub fn summary(&self) -> String {
         match self {
+            Self::UnsandboxedCodeRunner { commands } => format!(
+                "[subprocess].allow_commands includes {n} code-runner{plural} ({list}) while sandbox = 'none' and a writable tree is granted; each runs a program read from a file the agent can write, as an ungated host process, so [subprocess].deny_args cannot contain what it executes",
+                n = commands.len(),
+                plural = if commands.len() == 1 { "" } else { "s" },
+                list = commands.join(", "),
+            ),
             Self::ToolUrlNotInNetworkAllow {
                 tool_name,
                 host,
@@ -352,6 +379,8 @@ impl ConsistencyIssue {
     /// Multi-line fix instructions, copy-pasteable when possible.
     pub fn fix(&self) -> String {
         match self {
+            Self::UnsandboxedCodeRunner { .. } =>
+                "These commands run a program read from a file, not from gated argv, so blocking -c/-e in [subprocess].deny_args only moves the code into a file; it does not contain it. Options: (1) set [subprocess].sandbox = 'landlock' (Linux 5.13+) so the child is confined to the policy's filesystem (and, on Landlock ABI v4+, TCP) view even when it ignores the argv gate; (2) drop the interpreter/build-driver from [subprocess].allow_commands if the project does not truly need it; (3) accept the trade-off and treat subprocess as trusted, running denyx inside a VM or container. Landlock constructs no filesystem view and (below ABI v4) no network isolation, so a full jail still needs bwrap or a VM.".to_string(),
             Self::ToolUrlNotInNetworkAllow { host, method, .. } => format!(
                 "Add the host to [network].http_{}_allow:\n  http_{}_allow = [\"{}\"]\nOr remove the [tools.X] entry if the tool isn't actually used.",
                 method.to_lowercase(),
@@ -473,8 +502,75 @@ pub fn check(policy: Option<&Policy>, diagnosis: &ProjectDiagnosis) -> Vec<Consi
         out.extend(check_overbroad_allow_lists(file));
         out.extend(check_wasm_runner_deadline(file, diagnosis));
         out.extend(check_untainted_secret_shaped_resources(file));
+        out.extend(check_unsandboxed_code_runners(file));
     }
     out
+}
+
+/// Commands that execute a program read from a file (or stdin)
+/// rather than from gated argv: shells, language interpreters, and
+/// build drivers that shell out to run recipes. When any is allowed,
+/// `[subprocess].deny_args` cannot constrain what it runs, and under
+/// `sandbox = "none"` the child is an ordinary host process.
+const CODE_RUNNER_COMMANDS: &[&str] = &[
+    // shells
+    "sh", "bash", "zsh", "dash", "fish", "ksh", "ash", "busybox",
+    // language interpreters
+    "python", "python2", "python3", "pypy", "pypy3", "ruby", "perl", "php", "node", "nodejs",
+    "deno", "bun", "lua", "luajit", "tclsh", "expect", "Rscript",
+    // build drivers that shell out to run recipes
+    "make", "cmake", "ninja", "gradle", "mvn", "rake", "just",
+];
+
+/// Flag a policy that allows a code-runner (see `CODE_RUNNER_COMMANDS`)
+/// while `[subprocess].sandbox = "none"` and a writable tree is
+/// granted. Such a command is an ungated arbitrary-code primitive: it
+/// reads its program from a file the agent can author, then runs as a
+/// normal host process outside every filesystem/network gate, so
+/// `deny_args` blocking `-c`/`-e` buys nothing (the code just moves
+/// into a file). Emitted as one aggregated issue. Heuristic: keys on
+/// `allow_commands` membership, honouring `!` negations, not on whether
+/// the command is also still denied.
+fn check_unsandboxed_code_runners(file: &denyx_policy::PolicyFile) -> Vec<ConsistencyIssue> {
+    // Without an OS sandbox only: landlock/bwrap confine the child to
+    // the policy's view even if it ignores the argv gate.
+    if file.subprocess.sandbox != denyx_policy::SandboxMode::None {
+        return Vec::new();
+    }
+    // Only when the agent can author the program the runner executes.
+    // With no writable tree it can still run scripts already present
+    // but cannot introduce new code: a smaller surface, not warned.
+    if file.filesystem.write_allow.is_empty() {
+        return Vec::new();
+    }
+    let mut allowed: BTreeSet<String> = BTreeSet::new();
+    for entry in &file.subprocess.allow_commands {
+        let (negated, name) = match entry.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, entry.as_str()),
+        };
+        let base = std::path::Path::new(name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name)
+            .to_string();
+        if negated {
+            allowed.remove(&base);
+        } else {
+            allowed.insert(base);
+        }
+    }
+    let mut found: Vec<String> = Vec::new();
+    for &cmd in CODE_RUNNER_COMMANDS {
+        if allowed.contains(cmd) {
+            found.push(cmd.to_string());
+        }
+    }
+    if found.is_empty() {
+        Vec::new()
+    } else {
+        vec![ConsistencyIssue::UnsandboxedCodeRunner { commands: found }]
+    }
 }
 
 /// Name-shape hints for a filesystem path that's probably a secret.
@@ -1025,6 +1121,68 @@ fn check_subprocess_commands_on_path(file: &denyx_policy::PolicyFile) -> Vec<Con
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn coderunner_policy(toml: &str) -> denyx_policy::PolicyFile {
+        denyx_policy::PolicyFile::from_toml_str(toml)
+            .expect("parse test policy")
+            .resolve_inheritance()
+            .expect("resolve inheritance")
+    }
+
+    #[test]
+    fn unsandboxed_code_runner_flagged_with_writable_tree() {
+        let file = coderunner_policy(
+            r#"
+inherits = 'secure-defaults'
+name = 't'
+[filesystem]
+write_allow = ['src/**']
+[subprocess]
+allow_commands = ['python3', 'git', 'make']
+deny_commands = ['!python3']
+"#,
+        );
+        let issues = check_unsandboxed_code_runners(&file);
+        assert_eq!(issues.len(), 1, "one aggregated issue expected");
+        assert_eq!(issues[0].severity(), Severity::Warning);
+        match &issues[0] {
+            ConsistencyIssue::UnsandboxedCodeRunner { commands } => {
+                assert!(commands.contains(&"python3".to_string()));
+                assert!(commands.contains(&"make".to_string()));
+                assert!(!commands.contains(&"git".to_string()));
+            }
+            _ => panic!("expected UnsandboxedCodeRunner"),
+        }
+    }
+
+    #[test]
+    fn unsandboxed_code_runner_silent_without_writable_tree() {
+        let file = coderunner_policy(
+            r#"
+inherits = 'secure-defaults'
+name = 't'
+[subprocess]
+allow_commands = ['python3']
+"#,
+        );
+        assert!(check_unsandboxed_code_runners(&file).is_empty());
+    }
+
+    #[test]
+    fn unsandboxed_code_runner_silent_when_sandboxed() {
+        let file = coderunner_policy(
+            r#"
+inherits = 'secure-defaults'
+name = 't'
+[filesystem]
+write_allow = ['src/**']
+[subprocess]
+sandbox = 'landlock'
+allow_commands = ['python3']
+"#,
+        );
+        assert!(check_unsandboxed_code_runners(&file).is_empty());
+    }
     use crate::project_diagnosis::{
         AuditDirCheck, GitignoreCheck, HostName, LockdownState, PolicyCheck,
     };
