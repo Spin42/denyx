@@ -131,7 +131,12 @@ pub(crate) fn wire_pre_exec(
     unsafe {
         cmd.pre_exec(move || {
             apply(&read_paths, &write_paths, deny_network)
-                .map_err(|e| std::io::Error::other(format!("landlock: {e}")))
+                .map_err(|e| std::io::Error::other(format!("landlock: {e}")))?;
+            // Second kernel layer: a seccomp syscall denylist. Fatal to
+            // the spawn here (explicit sandbox mode); a confine-by-
+            // default path can make this best-effort instead.
+            crate::seccomp::apply().map_err(|e| std::io::Error::other(format!("seccomp: {e}")))?;
+            Ok(())
         });
     }
 }

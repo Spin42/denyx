@@ -44,3 +44,5 @@ denyx-runtime-starlark.workspace = true
 # docs/landlock-evaluation.md.
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
+seccompiler.workspace = true
+libc.workspace = true

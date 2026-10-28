@@ -32,6 +32,8 @@ pub mod confirm;
 pub(crate) mod landlock_sandbox;
 pub mod policy_host_consistency;
 pub mod project_diagnosis;
+#[cfg(target_os = "linux")]
+pub(crate) mod seccomp;
 pub mod startup_block;
 pub mod taint;
 pub mod verifier;
