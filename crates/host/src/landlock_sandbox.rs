@@ -213,7 +213,7 @@ mod tests {
     use std::net::TcpListener;
 
     /// Fork a throwaway child (never actually exec'ing anything — see
-    /// the `std::process::exit` calls below), apply Landlock exactly
+    /// the `libc::_exit` calls below), apply Landlock exactly
     /// as `wire_pre_exec` would, then run `probe` in that SAME child
     /// post-restriction and report its bool result via exit code.
     /// Self-contained: no external binaries, no argv path-gate, no
@@ -236,9 +236,9 @@ mod tests {
         unsafe {
             cmd.pre_exec(move || {
                 if apply(&read_paths, &write_paths, deny_network).is_err() {
-                    std::process::exit(2);
+                    libc::_exit(2);
                 }
-                std::process::exit(if probe() { 1 } else { 0 });
+                libc::_exit(if probe() { 1 } else { 0 });
             });
         }
         let status = cmd.status().ok()?;

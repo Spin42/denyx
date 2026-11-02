@@ -230,9 +230,9 @@ mod tests {
         unsafe {
             cmd.pre_exec(move || {
                 if apply(deny_network).is_err() {
-                    std::process::exit(2);
+                    libc::_exit(2);
                 }
-                std::process::exit(if probe() { 1 } else { 0 });
+                libc::_exit(if probe() { 1 } else { 0 });
             });
         }
         let status = cmd.status().ok()?;
