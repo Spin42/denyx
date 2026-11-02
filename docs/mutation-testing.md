@@ -3,9 +3,8 @@
 > ← [Back to docs README](README.md)
 
 Denyx runs mutation testing on its security-critical core via
-[`cargo-mutants`](https://mutants.rs/). The CI workflow is
-[`.github/workflows/mutants.yml`](../.github/workflows/mutants.yml);
-the per-project configuration is
+[`cargo-mutants`](https://mutants.rs/), locally rather than in CI (see
+"Run locally, not in CI" below). The per-project configuration is
 [`.cargo/mutants.toml`](../.cargo/mutants.toml). This doc covers what
 the tool does, why we run it, and what to do when a mutant survives.
 
@@ -49,9 +48,7 @@ the wrong reason. That's the failure mode mutation testing catches.
 
 That's roughly 1 000 LOC and ~604 mutants as of 2026-07 (grew from
 ~450 mostly via `verifier.rs`'s static taint-propagation pass — see
-`cargo mutants --list | wc -l` for the current count, and re-check
-`.github/workflows/mutants.yml`'s shard count against it after a
-large change to any of these three files). Mutating the rest of the
+`cargo mutants --list | wc -l` for the current count). Mutating the rest of the
 workspace (the MCP server, the CLI, the Starlark-runtime glue) would
 generate ~1 000 additional mutants, most of them "equivalent" — code
 that's syntactically different but semantically identical, like
@@ -71,22 +68,17 @@ mutants that were actually already-triaged equivalents. See
 you touch `crates/policy/src/lib.rs`, `crates/host/src/taint.rs`, or
 `crates/host/src/verifier.rs`.
 
-## Schedule, not gate
+## Run locally, not in CI
 
-Mutation testing is too slow for PR-time. A typical scoped run takes
-30–90 minutes on a 4-core runner. If we gated PRs on it, every PR
-would be blocked for an hour and developers would route around it.
+Mutation testing is too slow for PR-time, and too slow for
+GitHub-hosted runners at all: at ~600 mutants and 50–150 s each, a
+full run needs hours, past the point where hosted runners are
+reaped, and even an 8-way sharded matrix did not complete reliably.
+There is no CI workflow for it.
 
-The workflow runs:
-
-- **Weekly**, every Monday at 06:00 UTC, on a `cron` schedule.
-- **On-demand** via the GitHub Actions UI (`workflow_dispatch`) —
-  use this right after a security-critical change rather than
-  waiting for the weekly cycle.
-
-Surviving mutants are surfaced in the workflow's GitHub Step Summary
-and uploaded as an artefact. We don't auto-open issues for now;
-triage is a human-in-the-loop step.
+Run it locally (see "Running locally" below) after any change to one
+of the three files in scope, and before a release. Triage is a
+human-in-the-loop step either way.
 
 ## Reading a `cargo-mutants` report
 
@@ -139,8 +131,8 @@ The acceptance bar for a Denyx PR is **no new surviving mutants in
 the policy-gate decision functions** (the boolean classifiers and
 the `check_*` methods on `Policy` — `requires_approval`,
 `*_is_local_only`, `check_subprocess_command`,
-`check_subprocess_argv_paths`, `check_env_read`, etc.). If the
-weekly run shows new survivors there, opening a fix PR is the next
+`check_subprocess_argv_paths`, `check_env_read`, etc.). If a
+run shows new survivors there, opening a fix PR is the next
 step — same workflow as a failing test, just on a slower clock.
 
 **Workspace-wide kill rate** is a softer target. Many helper
