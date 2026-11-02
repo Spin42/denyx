@@ -70,6 +70,25 @@ http_get_allow = ["*"]
 }
 
 #[test]
+fn negating_ipv6_loopback_still_reallows_it_under_secure_defaults() {
+    let p = build(
+        r#"
+inherits = "secure-defaults"
+[network]
+http_get_allow = ["*"]
+deny_ips = ["!127.0.0.0/8", "!::1/128"]
+"#,
+    );
+    for ip in ["::1", "127.0.0.1"] {
+        let ip: IpAddr = ip.parse().unwrap();
+        assert!(
+            p.check_resolved_ip("http_get", "h", ip).is_ok(),
+            "{ip} should be re-allowed by the negation"
+        );
+    }
+}
+
+#[test]
 fn trailing_dot_does_not_escape_deny_hosts() {
     let p = build(
         r#"

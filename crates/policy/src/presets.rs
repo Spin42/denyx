@@ -90,7 +90,6 @@ deny_ips = [
     "127.0.0.0/8",      # IPv4 loopback
     "0.0.0.0/8",        # "this network"; 0.0.0.0 reaches the local host
     "100.64.0.0/10",    # carrier-grade NAT (also Alibaba Cloud metadata)
-    "::/96",            # IPv6 unspecified, loopback, IPv4-compatible
     "64:ff9b::/96",     # NAT64-embedded IPv4
     "::1/128",          # IPv6 loopback
     "fc00::/7",         # IPv6 unique local

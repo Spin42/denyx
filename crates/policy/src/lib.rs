@@ -1325,9 +1325,18 @@ impl Policy {
         // IPv4-only denylist); normalizing here closes it for every
         // caller of this function (both DNS-resolved and literal-IP
         // URLs route through it).
+        // The deprecated IPv4-compatible form (`::a.b.c.d`) embeds an
+        // IPv4 host the same way; `::` and `::1` share its prefix but are
+        // IPv6's own unspecified and loopback addresses.
         let ip = match ip {
             IpAddr::V6(v6) => v6
                 .to_ipv4_mapped()
+                .or_else(|| {
+                    let compatible = v6.segments()[..6] == [0; 6]
+                        && v6 != std::net::Ipv6Addr::UNSPECIFIED
+                        && v6 != std::net::Ipv6Addr::LOCALHOST;
+                    compatible.then(|| v6.to_ipv4().expect("first 96 bits are zero"))
+                })
                 .map(IpAddr::V4)
                 .unwrap_or(IpAddr::V6(v6)),
             v4 => v4,
