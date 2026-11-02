@@ -2277,6 +2277,11 @@ fn translate_pattern(root: &Path, raw: &str) -> String {
     if raw.starts_with('/') {
         return raw.to_string();
     }
+    // `./X` is X relative to the root, anchored there: it must not fall
+    // through to the bare-name rule below, which matches X at any depth.
+    if let Some(rest) = raw.strip_prefix("./") {
+        return format!("{}/{}", root.display(), rest.trim_start_matches("./"));
+    }
     if !raw.contains('/') {
         return format!("{}/**/{}", root.display(), raw);
     }
@@ -2650,7 +2655,7 @@ mod helpers_tests {
         p
     }
 
-    // --- concrete_prefix_of (lines 1830-1858) ---
+    // --- concrete_prefix_of ---
 
     #[test]
     fn concrete_prefix_of_empty_input_returns_none() {
@@ -2698,7 +2703,7 @@ mod helpers_tests {
         assert_eq!(concrete_prefix_of("~/.aws/**"), Some("~/.aws"));
     }
 
-    // --- collect_concrete_prefixes (lines 1774-1814) ---
+    // --- collect_concrete_prefixes ---
 
     #[test]
     fn collect_concrete_prefixes_returns_root_for_globless_relative() {
@@ -2751,7 +2756,7 @@ mod helpers_tests {
         );
     }
 
-    // --- which_on_path (line 2260) ---
+    // --- which_on_path ---
 
     #[test]
     fn which_on_path_finds_existing_binary() {
@@ -2783,7 +2788,7 @@ mod helpers_tests {
         assert_eq!(r, None);
     }
 
-    // --- home_dir (lines 1877-1879) ---
+    // --- home_dir ---
 
     #[test]
     fn home_dir_returns_some_when_home_set() {
@@ -2817,7 +2822,7 @@ mod helpers_tests {
         assert_eq!(r, None);
     }
 
-    // --- canonicalize_with_unresolved_tail (lines 1947-1969) ---
+    // --- canonicalize_with_unresolved_tail ---
 
     #[test]
     fn canonicalize_with_unresolved_tail_resolves_symlink_in_existing_prefix() {
@@ -2842,7 +2847,7 @@ mod helpers_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // --- translate_pattern (line 2060) ---
+    // --- translate_pattern ---
 
     #[test]
     fn translate_pattern_relative_no_slash_uses_recursive_glob() {
@@ -2868,7 +2873,7 @@ mod helpers_tests {
         assert_eq!(translate_pattern(&root, "/etc/passwd"), "/etc/passwd");
     }
 
-    // --- merge_policy_files sandbox overlay (line 734) ---
+    // --- merge_policy_files sandbox overlay ---
 
     #[test]
     fn merge_policy_files_sandbox_default_keeps_base() {
@@ -2906,7 +2911,7 @@ sandbox = "bwrap"
         assert_eq!(merged.subprocess.sandbox, SandboxMode::Bwrap);
     }
 
-    // --- guard_sandbox_available (line 867) ---
+    // --- guard_sandbox_available ---
 
     #[test]
     fn guard_sandbox_available_errors_when_bwrap_missing() {
@@ -2955,7 +2960,7 @@ sandbox = "none"
         assert!(policy.guard_sandbox_available().is_ok());
     }
 
-    // --- guard_audit_log (line 974) ---
+    // --- guard_audit_log ---
 
     #[test]
     fn guard_audit_log_errors_when_policy_grants_write() {

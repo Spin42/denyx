@@ -30,7 +30,12 @@ write_allow = ["**"]
     let targets = [
         PathBuf::from("/work/.mcp.json"),
         PathBuf::from("/work/sub/.mcp.json"),
+        PathBuf::from("/work/.claude/settings.json"),
         PathBuf::from("/work/.claude/settings.local.json"),
+        PathBuf::from("/work/.claude/commands/deploy.md"),
+        PathBuf::from("/work/.claude/agents/reviewer.md"),
+        PathBuf::from("/work/.claude/skills/x/SKILL.md"),
+        PathBuf::from("/work/.claude/hooks/pre.sh"),
         PathBuf::from("/work/opencode.json"),
         PathBuf::from("/work/.git/hooks/pre-commit"),
         home().join(".claude/settings.json"),
@@ -43,6 +48,11 @@ write_allow = ["**"]
         );
     }
     assert!(p.check_fs_write(Path::new("/work/src/main.rs")).is_ok());
+    // Memory files are agent-writable by design (the setup prompt grants
+    // them); the preset must not deny them underneath that grant.
+    assert!(p
+        .check_fs_write(Path::new("/work/.claude/CLAUDE.md"))
+        .is_ok());
 }
 
 /// Claude Code places git worktrees under `<repo>/.claude/worktrees/`,

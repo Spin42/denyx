@@ -46,11 +46,18 @@ deny = [
     # Agent-host and git configuration the next session trusts or runs:
     # writing any of these widens the next session's tools, permissions
     # or hooks without touching the policy file.
-    # `**/.claude/**` is anchored at the policy root, so a project that
+    # Under `.claude/`, the files a later session executes or obeys as
+    # configuration. Memory files (`.claude/CLAUDE.md`) are left to the
+    # policy: the setup prompt grants them so the agent can keep notes.
+    # These patterns are anchored at the policy root, so a project that
     # itself lives under a `.claude/` directory (Claude Code worktrees,
-    # scratch dirs) is not swallowed. The home entries name files, for
+    # scratch dirs) is not swallowed; the home entries name files for
     # the same reason.
-    "**/.claude/**",
+    "**/.claude/settings*.json",
+    "**/.claude/commands/**",
+    "**/.claude/agents/**",
+    "**/.claude/skills/**",
+    "**/.claude/hooks/**",
     "~/.claude/settings*.json",
     "~/.claude/CLAUDE.md",
     "~/.claude.json",

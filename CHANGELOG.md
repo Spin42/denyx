@@ -13,6 +13,19 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`./`-prefixed patterns now match.** A pattern such as
+  `"./CLAUDE.md"` or `"./src/**"` matched nothing, so the memory-file
+  entries `examples/denyx-setup-prompt.md` tells agents to add never
+  took effect. `./X` now names X relative to the policy root, anchored
+  there.
+- **`secure-defaults` no longer denies the whole project `.claude/`
+  directory.** 0.5.0's `**/.claude/**` entry also covered
+  `.claude/CLAUDE.md`, which the setup prompt makes agent-writable. The
+  preset now denies only `.claude/settings*.json`, `commands/`,
+  `agents/`, `skills/` and `hooks/`.
+
 ## [0.5.0] — 2026-11-02
 
 Round 3, 4 and 5 pentest remediation, an OS sandbox for subprocesses on
