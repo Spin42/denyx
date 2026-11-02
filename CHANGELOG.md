@@ -13,6 +13,11 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-02
+
+Fixes the memory-file step of `examples/denyx-setup-prompt.md`, which
+did not work in 0.5.0.
+
 ### Fixed
 
 - **`./`-prefixed patterns now match.** A pattern such as
@@ -25,6 +30,14 @@ breaking API changes between minor versions until they hit `1.0.0`.
   `.claude/CLAUDE.md`, which the setup prompt makes agent-writable. The
   preset now denies only `.claude/settings*.json`, `commands/`,
   `agents/`, `skills/` and `hooks/`.
+
+### Changed
+
+- Mutation testing no longer runs on GitHub-hosted runners, which
+  could not complete it; it is a local step before releases
+  ([docs/mutation-testing.md](docs/mutation-testing.md)).
+- CLI test temp directories are unique per call, fixing an
+  intermittent coverage-job failure.
 
 ## [0.5.0] — 2026-11-02
 
@@ -786,7 +799,8 @@ the `aegis-*` crate names were partially taken on crates.io.
   own crypto (AES, custom permutations) or pure side channels
   (length, comparison oracles, substring guesses).
 
-[Unreleased]: https://github.com/Spin42/denyx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Spin42/denyx/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Spin42/denyx/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Spin42/denyx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Spin42/denyx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Spin42/denyx/compare/v0.2.0...v0.3.0
