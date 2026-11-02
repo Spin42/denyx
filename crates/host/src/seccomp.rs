@@ -20,7 +20,9 @@
 //! - `setns`, `unshare`, `mount`, `umount2`, `pivot_root`, `chroot`,
 //!   and the new mount API (`fsopen`/`move_mount`/…) — build or enter
 //!   namespaces/mounts to confuse or escape the sandbox. `unshare`
-//!   into a new user namespace is unprivileged.
+//!   into a new user namespace is unprivileged. `clone` is denied only
+//!   when it requests a new namespace; `clone3`, whose flags the filter
+//!   cannot read, reports `ENOSYS` so callers fall back to `clone`.
 //! - `open_by_handle_at` — opens a file from an opaque handle rather
 //!   than a path, sidestepping Landlock's path-based rules.
 //! - `keyctl`/`add_key`/`request_key`, the kernel-module and `kexec`
@@ -40,7 +42,8 @@
 use std::collections::BTreeMap;
 
 use seccompiler::{
-    apply_filter, BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch,
+    apply_filter, BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition,
+    SeccompFilter, SeccompRule, TargetArch,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -116,10 +119,11 @@ pub(crate) fn apply() -> anyhow::Result<()> {
             std::io::Error::last_os_error()
         ));
     }
-    let rules: BTreeMap<i64, Vec<SeccompRule>> = denied_syscalls()
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = denied_syscalls()
         .into_iter()
         .map(|nr| (nr, vec![]))
         .collect();
+    rules.insert(libc::SYS_clone, clone_namespace_rules()?);
     let filter = SeccompFilter::new(
         rules,
         // Default for any syscall NOT listed above: allow.
@@ -130,7 +134,46 @@ pub(crate) fn apply() -> anyhow::Result<()> {
     )?;
     let program: BpfProgram = filter.try_into()?;
     apply_filter(&program)?;
+
+    // clone3 takes its flags through a user-space struct the filter
+    // cannot inspect, so namespace creation through it can't be told
+    // apart from a plain fork. ENOSYS makes glibc and std fall back to
+    // clone, which the rules above do inspect.
+    let clone3 = SeccompFilter::new(
+        BTreeMap::from([(libc::SYS_clone3, vec![])]),
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::ENOSYS as u32),
+        TARGET_ARCH,
+    )?;
+    let program: BpfProgram = clone3.try_into()?;
+    apply_filter(&program)?;
     Ok(())
+}
+
+/// One rule per `CLONE_NEW*` bit: `clone` is denied when any of them is
+/// set in its flags argument, the same namespace creation `unshare`
+/// would perform.
+fn clone_namespace_rules() -> anyhow::Result<Vec<SeccompRule>> {
+    [
+        libc::CLONE_NEWUSER,
+        libc::CLONE_NEWNS,
+        libc::CLONE_NEWNET,
+        libc::CLONE_NEWPID,
+        libc::CLONE_NEWIPC,
+        libc::CLONE_NEWUTS,
+        libc::CLONE_NEWCGROUP,
+    ]
+    .into_iter()
+    .map(|bit| {
+        let bit = bit as u64;
+        Ok(SeccompRule::new(vec![SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Qword,
+            SeccompCmpOp::MaskedEq(bit),
+            bit,
+        )?])?)
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -189,6 +232,82 @@ mod tests {
         match r {
             Some(true) => {}
             Some(false) => panic!("unshare was not denied — seccomp filter is ineffective"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
+    }
+
+    /// Raw `clone` with `flags`; a child that gets created exits at once.
+    fn raw_clone(flags: libc::c_long) -> i64 {
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_clone,
+                flags | libc::SIGCHLD as libc::c_long,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        if rc == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        rc
+    }
+
+    /// AEG-PEN-R5-011: namespace creation through clone must be denied
+    /// like unshare is.
+    #[test]
+    fn denies_clone_with_new_namespace_flags() {
+        let r = run_after_apply(|| {
+            [
+                libc::CLONE_NEWUSER,
+                libc::CLONE_NEWNET,
+                libc::CLONE_NEWNS,
+                libc::CLONE_NEWPID,
+            ]
+            .into_iter()
+            .all(|f| denied(raw_clone(f as libc::c_long)))
+        });
+        match r {
+            Some(true) => {}
+            Some(false) => panic!("clone with a CLONE_NEW* flag was not denied"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
+    }
+
+    /// clone3 passes its flags in memory the filter cannot read, so it
+    /// is refused as unsupported; libc and std then fall back to clone.
+    #[test]
+    fn clone3_reports_enosys() {
+        let r = run_after_apply(|| {
+            let mut args = [0u64; 11];
+            args[0] = libc::CLONE_NEWUSER as u64;
+            args[4] = libc::SIGCHLD as u64;
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_clone3,
+                    args.as_mut_ptr(),
+                    std::mem::size_of_val(&args),
+                )
+            };
+            if rc == 0 {
+                unsafe { libc::_exit(0) };
+            }
+            rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
+        });
+        match r {
+            Some(true) => {}
+            Some(false) => panic!("clone3 was not refused with ENOSYS"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
+    }
+
+    #[test]
+    fn plain_fork_still_works() {
+        let r = run_after_apply(|| raw_clone(0) > 0);
+        match r {
+            Some(true) => {}
+            Some(false) => panic!("a plain fork was blocked — clone rule too broad"),
             None => eprintln!("skipping: seccomp could not be installed in this environment"),
         }
     }
