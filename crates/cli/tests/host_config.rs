@@ -630,10 +630,15 @@ fn no_mcp_writes_lockdown_only() {
     assert_eq!(oc["permission"]["*"], "deny");
 }
 
+/// Tests run as threads of one process, so pid + clock alone can
+/// collide when two tests start together; the counter keeps each
+/// directory distinct.
 fn tempdir() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let base = std::env::temp_dir().join(format!(
-        "denyx_host_config_test_{}_{}",
+        "denyx_host_config_test_{}_{}_{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

@@ -60,13 +60,19 @@ fn tempdir() -> PathBuf {
     // the cargo target tree sidesteps that — it's transient (cleaned
     // by `cargo clean`), unique-per-run, and outside any glob the
     // starter templates ship.
+    //
+    // Tests run as threads of one process, so pid + clock alone can
+    // collide when two tests start together; the counter keeps each
+    // directory distinct.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let target_dir = PathBuf::from(DENYX)
         .parent()
         .expect("denyx binary parent dir")
         .to_path_buf();
     let base = target_dir.join("setup-flow-tmp").join(format!(
-        "{}_{}",
+        "{}_{}_{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
