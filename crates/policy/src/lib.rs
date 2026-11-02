@@ -1786,7 +1786,7 @@ impl Policy {
                 continue;
             }
             for pattern in patterns {
-                if joined.contains(pattern) {
+                if joined.contains(pattern) || short_flag_in_cluster(pattern, &argv[1..]) {
                     return Err(PolicyError::ArgsDenied {
                         command: argv0.clone(),
                         pattern: pattern.clone(),
@@ -1831,7 +1831,7 @@ impl Policy {
                 continue;
             }
             for pattern in patterns {
-                if joined.contains(pattern) {
+                if joined.contains(pattern) || short_flag_in_cluster(pattern, &argv[1..]) {
                     return Some(pattern.as_str());
                 }
             }
@@ -2078,6 +2078,28 @@ impl HostMatcher {
 /// qualified form with the root label) names the same host as
 /// `example.com`. Patterns and hosts are both reduced to this form so a
 /// spelling difference cannot slip past a deny or local-only entry.
+/// For a single short-flag pattern (`-c`), whether any argument is a
+/// combined short-option cluster carrying that flag (`-Ic`, `-lc`).
+/// Shells and interpreters accept such clusters, so a substring match
+/// on `-c` alone misses them.
+fn short_flag_in_cluster(pattern: &str, args: &[String]) -> bool {
+    let mut chars = pattern.chars();
+    let (Some('-'), Some(flag), None) = (chars.next(), chars.next(), chars.next()) else {
+        return false;
+    };
+    if !flag.is_ascii_alphanumeric() {
+        return false;
+    }
+    args.iter().any(|a| {
+        a.strip_prefix('-').is_some_and(|rest| {
+            !rest.starts_with('-')
+                && !rest.is_empty()
+                && rest.chars().all(|c| c.is_ascii_alphanumeric())
+                && rest.contains(flag)
+        })
+    })
+}
+
 fn canonical_host(host: &str) -> String {
     host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
 }
