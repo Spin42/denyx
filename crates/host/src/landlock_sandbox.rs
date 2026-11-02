@@ -54,7 +54,7 @@ use std::path::PathBuf;
 
 use landlock::{
     path_beneath_rules, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, ABI,
+    RulesetCreatedAttr, Scope, ABI,
 };
 
 /// Minimal system paths a spawned child needs read+execute access to
@@ -159,6 +159,10 @@ fn apply(
     if deny_network {
         ruleset = ruleset.handle_access(AccessNet::from_all(TARGET_ABI))?;
     }
+    // ABI V6 scopes: no signals to, and no abstract-socket connections
+    // to, processes outside this sandbox. Older kernels skip them
+    // (BestEffort); the seccomp layer still blocks AF_UNIX sockets.
+    ruleset = ruleset.scope(Scope::from_all(ABI::V6))?;
     let created = ruleset
         .create()?
         // Missing paths are silently skipped by `path_beneath_rules`
@@ -261,18 +265,16 @@ mod tests {
             .is_ok()
     }
 
-    /// Make every Landlock syscall fail with EPERM in the calling
-    /// (forked) process, the way a container seccomp profile that
-    /// predates Landlock does.
-    fn block_landlock_syscalls() -> std::io::Result<()> {
-        use seccompiler::{apply_filter, BpfProgram, SeccompAction, SeccompFilter, TargetArch};
+    /// A filter making every Landlock syscall fail with EPERM, the way
+    /// a container seccomp profile that predates Landlock does. Built
+    /// in the parent: the forked child of a multithreaded test binary
+    /// must not allocate.
+    fn landlock_blocking_filter() -> seccompiler::BpfProgram {
+        use seccompiler::{SeccompAction, SeccompFilter, TargetArch};
         #[cfg(target_arch = "x86_64")]
         let arch = TargetArch::x86_64;
         #[cfg(target_arch = "aarch64")]
         let arch = TargetArch::aarch64;
-        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
         let rules = [
             libc::SYS_landlock_create_ruleset,
             libc::SYS_landlock_add_rule,
@@ -281,15 +283,62 @@ mod tests {
         .into_iter()
         .map(|nr| (nr, vec![]))
         .collect();
-        let filter = SeccompFilter::new(
+        SeccompFilter::new(
             rules,
             SeccompAction::Allow,
             SeccompAction::Errno(libc::EPERM as u32),
             arch,
         )
-        .map_err(std::io::Error::other)?;
-        let prog: BpfProgram = filter.try_into().map_err(std::io::Error::other)?;
-        apply_filter(&prog).map_err(std::io::Error::other)
+        .unwrap()
+        .try_into()
+        .unwrap()
+    }
+
+    fn abi_v6_scopes_available() -> bool {
+        use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope, ABI};
+        Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .scope(Scope::from_all(ABI::V6))
+            .and_then(|r| r.create())
+            .is_ok()
+    }
+
+    /// AEG-PEN-R5-002: a confined child must not signal processes
+    /// outside its Landlock domain.
+    #[test]
+    fn denies_signal_to_process_outside_domain() {
+        if skip_if_unavailable() || !abi_v6_scopes_available() {
+            return;
+        }
+        let result = run_after_restrict(vec![], vec![], false, || {
+            let ppid = unsafe { libc::getppid() };
+            unsafe { libc::kill(ppid, 0) == 0 }
+        });
+        assert_eq!(result, Some(false), "child could signal its parent");
+    }
+
+    /// AEG-PEN-R5-002: abstract unix sockets outside the domain are out
+    /// of reach even without the seccomp layer.
+    #[test]
+    fn denies_connect_to_abstract_socket_outside_domain() {
+        if skip_if_unavailable() || !abi_v6_scopes_available() {
+            return;
+        }
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+        let name = format!("denyx-r5-abstract-{}", std::process::id());
+        let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = UnixListener::bind_addr(&addr).unwrap();
+        let result = run_after_restrict(vec![], vec![], false, move || {
+            let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+            UnixStream::connect_addr(&addr).is_ok()
+        });
+        drop(listener);
+        assert_eq!(
+            result,
+            Some(false),
+            "child connected to an outside abstract socket"
+        );
     }
 
     /// AEG-PEN-R5-004: when the kernel advertises Landlock but the
@@ -299,9 +348,15 @@ mod tests {
         if skip_if_unavailable() {
             return;
         }
+        let filter = landlock_blocking_filter();
         let mut cmd = std::process::Command::new("true");
         unsafe {
-            cmd.pre_exec(block_landlock_syscalls);
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                seccompiler::apply_filter(&filter).map_err(std::io::Error::other)
+            });
         }
         wire_pre_exec(&mut cmd, vec![], vec![], true);
         assert!(

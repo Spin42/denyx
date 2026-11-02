@@ -27,6 +27,11 @@
 //!   than a path, sidestepping Landlock's path-based rules.
 //! - `keyctl`/`add_key`/`request_key`, the kernel-module and `kexec`
 //!   loaders — kernel surfaces no sandboxed child needs.
+//! - `socket(AF_UNIX, …)` — same-user daemons (session D-Bus,
+//!   `systemd --user`, ssh/gpg agents, container engines) execute
+//!   requests outside any sandbox, and Landlock does not mediate
+//!   `connect()` to a pathname socket. `socketpair` is still allowed.
+//!   A sandboxed child therefore cannot use those daemons at all.
 //!
 //! The action is `EPERM`, not kill: a denied syscall fails like any
 //! other denied operation, so a program that merely probes one (tries
@@ -124,6 +129,20 @@ pub(crate) fn apply() -> anyhow::Result<()> {
         .map(|nr| (nr, vec![]))
         .collect();
     rules.insert(libc::SYS_clone, clone_namespace_rules()?);
+    // AF_UNIX sockets reach same-user daemons (session D-Bus,
+    // systemd --user, ssh/gpg agents, container engines) that run
+    // commands outside the sandbox, and Landlock cannot mediate
+    // connect() to a pathname socket. socketpair() stays allowed: it
+    // only connects the process to itself.
+    rules.insert(
+        libc::SYS_socket,
+        vec![SeccompRule::new(vec![SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Eq,
+            libc::AF_UNIX as u64,
+        )?])?],
+    );
     let filter = SeccompFilter::new(
         rules,
         // Default for any syscall NOT listed above: allow.
@@ -252,6 +271,36 @@ mod tests {
             unsafe { libc::_exit(0) };
         }
         rc
+    }
+
+    /// AEG-PEN-R5-002: a confined child must not reach same-user
+    /// daemons (session D-Bus, systemd --user, agents) over AF_UNIX.
+    #[test]
+    fn denies_unix_socket_creation() {
+        let r = run_after_apply(|| {
+            denied(unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) } as i64)
+        });
+        match r {
+            Some(true) => {}
+            Some(false) => panic!("socket(AF_UNIX) was not denied"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
+    }
+
+    #[test]
+    fn allows_socketpair_and_inet_sockets() {
+        let r = run_after_apply(|| {
+            let mut fds = [0i32; 2];
+            let pair =
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+            let inet = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            pair == 0 && inet >= 0
+        });
+        match r {
+            Some(true) => {}
+            Some(false) => panic!("socketpair or AF_INET socket was blocked"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
     }
 
     /// AEG-PEN-R5-011: namespace creation through clone must be denied
