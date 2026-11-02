@@ -43,6 +43,15 @@ deny = [
     "~/.docker/config.json",
     "~/.gem/credentials",
     "~/.kube/config",
+    # Agent-host and git configuration the next session trusts or runs:
+    # writing any of these widens the next session's tools, permissions
+    # or hooks without touching the policy file.
+    "**/.claude/**",
+    "~/.claude/**",
+    ".mcp.json",
+    "opencode.json",
+    "~/.config/opencode/**",
+    "**/.git/hooks/**",
     # Generic secret / dotenv conventions
     ".env",
     ".env.*",
