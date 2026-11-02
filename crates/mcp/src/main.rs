@@ -945,9 +945,9 @@ impl ConfirmHook for ElicitConfirm {
             "params": {
                 "message": format!(
                     "Denyx: the agent is asking to perform `{cap}`.\n\nDetails: {summary}\nTask: {task}\n\nApprove this single call?",
-                    cap = request.capability,
-                    summary = request.summary,
-                    task = request.task_id,
+                    cap = denyx_host::confirm::display_safe(&request.capability),
+                    summary = denyx_host::confirm::display_safe(&request.summary),
+                    task = denyx_host::confirm::display_safe(&request.task_id),
                 ),
                 "requestedSchema": {
                     "type": "object",

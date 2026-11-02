@@ -1297,7 +1297,9 @@ impl ConfirmHook for TtyConfirm {
         let _ = writeln!(
             stderr,
             "[denyx] confirm {} for task {}: {}",
-            request.capability, request.task_id, request.summary
+            denyx_host::confirm::display_safe(&request.capability),
+            denyx_host::confirm::display_safe(&request.task_id),
+            denyx_host::confirm::display_safe(&request.summary)
         );
         let _ = write!(stderr, "        allow? [y/N] ");
         let _ = stderr.flush();
