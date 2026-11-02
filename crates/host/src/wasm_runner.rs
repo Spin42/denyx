@@ -473,27 +473,30 @@ impl WasmRunner {
                     };
 
                     // 2. Gate through policy.
-                    let path_obj = std::path::Path::new(&path);
-                    if let Err(e) = fs_read_policy.check_fs_read(path_obj) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        emit_scrubbed(
-                            &caller,
-                            &fs_read_audit,
-                            AuditEvent::denied(
-                                &fs_read_task_id,
-                                step,
-                                "fs.read",
-                                &path,
-                                &format!("{e}"),
-                            ),
-                        );
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
-                        return Err(wasmtime::Error::msg("fs.read denied by policy"));
-                    }
+                    let resolved = match fs_read_policy.check_fs_read(std::path::Path::new(&path)) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &fs_read_audit,
+                                AuditEvent::denied(
+                                    &fs_read_task_id,
+                                    step,
+                                    "fs.read",
+                                    &path,
+                                    &format!("{e}"),
+                                ),
+                            );
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
+                            return Err(wasmtime::Error::msg("fs.read denied by policy"));
+                        }
+                    };
+                    let path_obj = resolved.as_path();
 
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
@@ -641,27 +644,31 @@ impl WasmRunner {
                     let path = read_string_from_guest(&mut caller, path_ptr, path_len, "path")?;
 
                     // 2. Gate through policy (same as fs.read).
-                    let path_obj = std::path::Path::new(&path);
-                    if let Err(e) = fs_read_range_policy.check_fs_read(path_obj) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        emit_scrubbed(
-                            &caller,
-                            &fs_read_range_audit,
-                            AuditEvent::denied(
-                                &fs_read_range_task_id,
-                                step,
-                                "fs.read",
-                                &path,
-                                &format!("{e}"),
-                            ),
-                        );
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
-                        return Err(wasmtime::Error::msg("fs.read denied by policy"));
-                    }
+                    let resolved =
+                        match fs_read_range_policy.check_fs_read(std::path::Path::new(&path)) {
+                            Ok(resolved) => resolved,
+                            Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                emit_scrubbed(
+                                    &caller,
+                                    &fs_read_range_audit,
+                                    AuditEvent::denied(
+                                        &fs_read_range_task_id,
+                                        step,
+                                        "fs.read",
+                                        &path,
+                                        &format!("{e}"),
+                                    ),
+                                );
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!("fs.read({path:?}): {e}")));
+                                return Err(wasmtime::Error::msg("fs.read denied by policy"));
+                            }
+                        };
+                    let path_obj = resolved.as_path();
 
                     // 3. Capability-level confirm gate.
                     if fs_read_range_policy.requires_approval("fs.read") {
@@ -848,27 +855,31 @@ impl WasmRunner {
                         })?;
 
                     // 2. Gate through policy.
-                    let path_obj = std::path::Path::new(&path);
-                    if let Err(e) = fs_write_policy.check_fs_write(path_obj) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        emit_scrubbed(
-                            &caller,
-                            &fs_write_audit,
-                            AuditEvent::denied(
-                                &fs_write_task_id,
-                                step,
-                                "fs.write",
-                                &path,
-                                &format!("{e}"),
-                            ),
-                        );
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("fs.write({path:?}): {e}")));
-                        return Err(wasmtime::Error::msg("fs.write denied by policy"));
-                    }
+                    let resolved = match fs_write_policy.check_fs_write(std::path::Path::new(&path))
+                    {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &fs_write_audit,
+                                AuditEvent::denied(
+                                    &fs_write_task_id,
+                                    step,
+                                    "fs.write",
+                                    &path,
+                                    &format!("{e}"),
+                                ),
+                            );
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("fs.write({path:?}): {e}")));
+                            return Err(wasmtime::Error::msg("fs.write denied by policy"));
+                        }
+                    };
+                    let path_obj = resolved.as_path();
 
                     // Outbound taint refusal. Shared with the native Runner via
                     // `crate::check_outbound_taint` — see that function's doc for
@@ -1024,27 +1035,31 @@ impl WasmRunner {
                     };
 
                     // 2. Gate through policy.
-                    let path_obj = std::path::Path::new(&path);
-                    if let Err(e) = fs_delete_policy.check_fs_delete(path_obj) {
-                        let step = caller
-                            .data()
-                            .step_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        emit_scrubbed(
-                            &caller,
-                            &fs_delete_audit,
-                            AuditEvent::denied(
-                                &fs_delete_task_id,
-                                step,
-                                "fs.delete",
-                                &path,
-                                &format!("{e}"),
-                            ),
-                        );
-                        caller.data_mut().captured_error =
-                            Some(DenyxError::Policy(format!("fs.delete({path:?}): {e}")));
-                        return Err(wasmtime::Error::msg("fs.delete denied by policy"));
-                    }
+                    let resolved =
+                        match fs_delete_policy.check_fs_delete(std::path::Path::new(&path)) {
+                            Ok(resolved) => resolved,
+                            Err(e) => {
+                                let step = caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                emit_scrubbed(
+                                    &caller,
+                                    &fs_delete_audit,
+                                    AuditEvent::denied(
+                                        &fs_delete_task_id,
+                                        step,
+                                        "fs.delete",
+                                        &path,
+                                        &format!("{e}"),
+                                    ),
+                                );
+                                caller.data_mut().captured_error =
+                                    Some(DenyxError::Policy(format!("fs.delete({path:?}): {e}")));
+                                return Err(wasmtime::Error::msg("fs.delete denied by policy"));
+                            }
+                        };
+                    let path_obj = resolved.as_path();
 
                     // Outbound taint refusal. Shared with the native Runner via
                     // `crate::check_outbound_taint`.
