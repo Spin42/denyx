@@ -1642,6 +1642,7 @@ impl WasmRunner {
                                         !subprocess_policy.any_network_capability_granted();
                                     let mut cmd = std::process::Command::new(&argv[0]);
                                     cmd.args(&argv[1..]);
+                                    cmd.current_dir(subprocess_policy.root());
                                     cmd.env_clear();
                                     for (name, value) in &env_pairs {
                                         cmd.env(name, value);
@@ -1657,6 +1658,7 @@ impl WasmRunner {
                                     crate::warn_auto_sandbox_unconfined(&argv[0]);
                                     let mut cmd = std::process::Command::new(&argv[0]);
                                     cmd.args(&argv[1..]);
+                                    cmd.current_dir(subprocess_policy.root());
                                     cmd.env_clear();
                                     for (name, value) in &env_pairs {
                                         cmd.env(name, value);
@@ -1669,6 +1671,7 @@ impl WasmRunner {
                                 crate::warn_auto_sandbox_unconfined(&argv[0]);
                                 let mut cmd = std::process::Command::new(&argv[0]);
                                 cmd.args(&argv[1..]);
+                                cmd.current_dir(subprocess_policy.root());
                                 cmd.env_clear();
                                 for (name, value) in &env_pairs {
                                     cmd.env(name, value);
@@ -1679,6 +1682,7 @@ impl WasmRunner {
                         denyx_policy::SandboxMode::None => {
                             let mut cmd = std::process::Command::new(&argv[0]);
                             cmd.args(&argv[1..]);
+                            cmd.current_dir(subprocess_policy.root());
                             cmd.env_clear();
                             for (name, value) in &env_pairs {
                                 cmd.env(name, value);
@@ -1701,6 +1705,7 @@ impl WasmRunner {
                                     !subprocess_policy.any_network_capability_granted();
                                 let mut cmd = std::process::Command::new(&argv[0]);
                                 cmd.args(&argv[1..]);
+                                cmd.current_dir(subprocess_policy.root());
                                 cmd.env_clear();
                                 for (name, value) in &env_pairs {
                                     cmd.env(name, value);

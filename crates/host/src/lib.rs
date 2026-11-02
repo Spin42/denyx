@@ -1054,6 +1054,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         let deny_network = !ctx.policy.any_network_capability_granted();
                         let mut cmd = std::process::Command::new(&argv[0]);
                         cmd.args(&argv[1..]);
+                        cmd.current_dir(ctx.policy.root());
                         cmd.env_clear();
                         for (name, value) in &env_pairs {
                             cmd.env(name, value);
@@ -1069,6 +1070,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         warn_auto_sandbox_unconfined(&argv[0]);
                         let mut cmd = std::process::Command::new(&argv[0]);
                         cmd.args(&argv[1..]);
+                        cmd.current_dir(ctx.policy.root());
                         cmd.env_clear();
                         for (name, value) in &env_pairs {
                             cmd.env(name, value);
@@ -1081,6 +1083,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                     warn_auto_sandbox_unconfined(&argv[0]);
                     let mut cmd = std::process::Command::new(&argv[0]);
                     cmd.args(&argv[1..]);
+                    cmd.current_dir(ctx.policy.root());
                     cmd.env_clear();
                     for (name, value) in &env_pairs {
                         cmd.env(name, value);
@@ -1092,6 +1095,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 // Default mode: spawn directly with filtered env.
                 let mut cmd = std::process::Command::new(&argv[0]);
                 cmd.args(&argv[1..]);
+                cmd.current_dir(ctx.policy.root());
                 cmd.env_clear();
                 for (name, value) in &env_pairs {
                     cmd.env(name, value);
@@ -1128,6 +1132,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                     let deny_network = !ctx.policy.any_network_capability_granted();
                     let mut cmd = std::process::Command::new(&argv[0]);
                     cmd.args(&argv[1..]);
+                    cmd.current_dir(ctx.policy.root());
                     cmd.env_clear();
                     for (name, value) in &env_pairs {
                         cmd.env(name, value);
