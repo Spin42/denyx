@@ -67,18 +67,18 @@ write_allow = [
     "fuzz/**",
     "scripts/**",
     ".github/**",
-    ".githooks/**",
     "docs/**",
     "CHANGELOG.md",
     "README.md",
     "CLAUDE.md",
-    "target/**",
-    # Narrow scratch trees the pentest harnesses regenerate.
-    # Intentionally NOT `/tmp/**`, which `denyx doctor` flags as
-    # over-broad. Keep this list scoped to the actual fixture
-    # paths the harnesses use.
+    # Pentest harness scratch space. Broad: `denyx doctor` flags it.
     "/tmp/**",
 ]
+# Not writable on purpose:
+# - `.githooks/**`: git runs these hooks unsandboxed on the next human
+#   commit (`core.hooksPath = .githooks`).
+# - `target/**`: holds the `denyx-mcp` binary the host launches; cargo
+#   (a subprocess) still writes it, the agent's fs.write cannot.
 
 delete_allow = [
     "target/**",
@@ -95,6 +95,12 @@ deny = [
     "**/.denyx/**",
     "**/.denyx/audit.jsonl",
     "docs/pentest-artifacts/**",
+    # Host and agent configuration a later session trusts: writing any
+    # of these would widen the next session's permissions or tools.
+    "**/.claude/**",
+    ".mcp.json",
+    "opencode.json",
+    "**/.git/**",
 ]
 
 # ── Network ──────────────────────────────────────────────────────
@@ -218,6 +224,10 @@ git = [
     "rebase -i",
     "update-ref -d",
     "reflog expire",
+    # Per-invocation config runs shell code: `alias.x=!cmd`,
+    # core.pager, core.sshCommand, core.fsmonitor.
+    "-c ",
+    "--config-env",
 ]
 
 # `cargo publish` releases to crates.io. `cargo yank` pulls a
@@ -231,12 +241,14 @@ gh = [
     "release delete",
 ]
 
-# Force shells + interpreters to operate on real files (which DO
-# go through fs.read/write) rather than inline strings (which
-# bypass the argv path-gate entirely).
+# Block inline code (-c, also inside clusters like -lc / -Ic), module
+# runners (python3 -m) and make's inline recipes. This only narrows
+# the surface: with sandbox = "none" a script file the agent writes
+# still runs unconfined, and `denyx doctor` warns about it.
 bash    = ["-c"]
 sh      = ["-c"]
-python3 = ["-c", "-e"]
+python3 = ["-c", "-e", "-m"]
+make    = ["--eval", "-E"]
 
 # pip install --target / --prefix lets the agent write outside
 # its venv. Block both — pip should only ever install into
