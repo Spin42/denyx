@@ -307,14 +307,22 @@ literal IPs (`"169.254.169.254"`, coerced to `/32`) and CIDR ranges
 
 When the script calls `net.http_get("https://example.com/...")`, Denyx:
 
-1. Parses the URL.
+1. Parses the URL. Host names are compared case-insensitively and
+   without a trailing root dot (`Example.COM.` is `example.com`).
 2. If the URL's host is itself an IP literal, runs it through `deny_ips`.
-3. Resolves the host via DNS.
-4. Runs **every resolved IP** through `deny_ips`. (Defends SSRF: if
-   `evil.example.com` resolves to `169.254.169.254`, the request is
-   rejected.)
-5. Checks `deny_hosts`.
-6. Checks the verb's `_allow` list (or `local_only_hosts`).
+   The unspecified addresses `0.0.0.0` and `::` are always refused:
+   they reach the local host on Linux.
+3. Checks `deny_hosts`, then the verb's `_allow` list (or
+   `local_only_hosts`).
+4. Refuses the call if the URL, as written or as it will be sent, or
+   the body carries a local-only value (unless the destination is
+   itself local-only).
+5. Asks for approval if the capability is in `requires_approval`.
+6. Resolves the host via DNS and runs **every resolved IP** through
+   `deny_ips`. (Defends SSRF: if `evil.example.com` resolves to
+   `169.254.169.254`, the request is rejected.) Resolution comes last
+   so a refused or unapproved host name never reaches the resolver.
+7. Sends the parsed URL.
 
 ### `[environment]`
 
@@ -538,8 +546,11 @@ reconstructed filesystem view — see
 comparison), but it works in some environments where bwrap's
 unprivileged user-namespace requirement is unavailable (certain
 containers, hardened kernel configurations). Complementary to bwrap,
-not a replacement — pick whichever backend your environment actually
-supports; Denyx does not auto-detect and fall back between them.
+not a replacement. With no `sandbox` key the mode is `auto`: Landlock
+plus the seccomp denylist where the kernel offers Landlock, a failed
+spawn if the restriction cannot be enforced, and an unconfined child
+with a per-spawn warning on a host without Landlock. Set `landlock` or
+`bwrap` explicitly to refuse to load on such a host instead.
 
 Properties:
 - Linux-only, unprivileged (no special capabilities or setup beyond a

@@ -326,6 +326,13 @@ flow:
 The MCP config points at `denyx-local-mcp` instead of `denyx-mcp`
 directly.
 
+No human answers approval prompts in this loop, so the bridge starts
+its `denyx-mcp` child with `--confirm-mode auto-deny`: every capability
+the policy lists in `requires_approval` is refused. Pass
+`--confirm-mode auto-allow` only if you accept that those calls run
+unreviewed. Without `--audit-log`, audit events go to the bridge's
+stderr.
+
 **Claude Code** — write `./.mcp.json` in your project root:
 
 ```json

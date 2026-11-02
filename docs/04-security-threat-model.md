@@ -57,8 +57,9 @@ result on the wasm path.
 | **Agent (or a prompt-injected script) pointing `subprocess.exec`'s argv[0] at a planted executable to escape the command allowlist** | `allow_commands` entries with no path separator (e.g. `"cat"`) still match on argv[0]'s basename — by design, so the operator's own trusted `$PATH` resolves it. But a *path-shaped* argv[0] (containing `/`) is now path-gated the same as every other argv element: it must resolve inside `[filesystem]`'s allow surface, same as `argv[1..]` already was. Round-3 pentest finding: before this fix, argv[0] was checked by basename only, so a script could point it at any executable anywhere on the filesystem — full code execution, not merely a scoped bypass. See [Round 3 report](security-pentest-r3-argv0-and-chunking.md). |
 | **An operator's `deny_commands` entry for one specific dangerous binary being bypassed by an ordinary bare-name invocation** | `deny_commands` full-path entries (e.g. `"/usr/bin/cat"`) now also match by basename, same as bare entries already did — deny is deliberately more aggressive than allow, since broader is the safe direction for a denylist. Round-3 pentest finding: before this fix, a full-path deny entry only matched that exact string, so a script invoking the plain bare form of the same allowed command sailed past it. See [Round 3 report](security-pentest-r3-argv0-and-chunking.md). |
 | **Agent following an HTTP redirect to a denied host** | `net.http_*` does not auto-follow 3xx; the call returns a typed error and the script must re-issue against the new URL (which gets gated again). |
-| **Agent reading a denied path via a symlink the operator allowed** | `fs.*` canonicalize paths before the policy check; the symlink target — not the symlink itself — is what the policy sees. |
-| **Agent modifying its own policy or audit log** | `Policy::guard_audit_log` and the self-writable guard refuse to start if the policy file or audit log is reachable to the agent under any of `write_allow` / `delete_allow`. |
+| **Agent reading a denied path via a symlink the operator allowed** | `fs.*` canonicalize paths before the policy check; the symlink target — not the symlink itself — is what the policy sees, including for a dangling link that a write would create through. Both runners perform the IO on that checked path, never on the string the script passed. |
+| **Agent modifying its own policy or audit log** | `Policy::guard_audit_log` and the self-writable guard refuse to start if the policy file or audit log is reachable to the agent under any of `write_allow` / `delete_allow`. The subprocess argv gate refuses the loaded policy file as an argument, so `cp evil.toml denyx.toml` is denied even when `read_allow` covers it. `secure-defaults` also denies the agent-host and git configuration a later session trusts: the project's `.mcp.json`, `.claude/`, `opencode.json` and `.git/hooks/`, and the home `~/.claude/settings*.json`, `~/.claude/CLAUDE.md`, `~/.claude.json` and `~/.config/opencode/`. Other files a later process executes (build scripts, CI workflows, binaries the host launches) are protected only by the operator's allow-lists. See [Round 5 report](security-pentest-r5-wasm-rawpath-and-sandbox-parity.md). |
+| **A confined subprocess escaping its OS sandbox** *(`sandbox = "landlock"`, or `"auto"` where Landlock is available)* | Landlock restricts the child's filesystem to the policy's grants, split around `[filesystem].deny` matches so a denied entry is never granted, and requests the ABI V6 signal and abstract-socket scopes where supported. The seccomp layer denies `AF_UNIX` sockets (same-user daemons such as the session D-Bus or `systemd --user` run commands outside any sandbox), namespace creation through `unshare`, `clone` and `clone3`, and, when the policy grants no network, all IP sockets. If Landlock or seccomp cannot be installed, or Landlock reports nothing enforced, the spawn fails. See [Round 5 report](security-pentest-r5-wasm-rawpath-and-sandbox-parity.md). |
 | **Audit log tampering after the fact** | Each line carries a SHA-256 chain (`denyx_seq` + `denyx_prev_hash`); `denyx audit verify` detects in-place mutation and removal of a line from the *middle* of the log (both break the chain). **It does not, by itself, detect truncation of the tail** — deleting the most recent N events produces a shorter chain that still reports valid, since nothing in the remaining bytes proves more events once existed (round-4 pentest finding, confirmed live). `denyx audit verify --min-seq N` closes this only when paired with external monitoring that remembers the log's previous length, or with the `HttpAuditSink` / `--audit-url` team mode, where a remote copy already exists before local truncation could happen. |
 | **MCP tool definition poisoning reaching the cloud orchestrator (local-executor deployment)** | In the `denyx-local-mcp` architecture the cloud orchestrator's MCP tool list contains only `delegate_to_local`, so other servers' tool descriptions cannot reach its context — **provided** the host is launched with `--strict-mcp-config` (or equivalent) and denyx-local-mcp is the only MCP server configured. This is a precondition on operator setup, not enforced by Denyx itself. The local executor model receives tool routing metadata only from the operator-controlled policy file. See [Round 2 pentest report](security-pentest-r2-tool-poisoning.md). |
 | **Reads of resources the policy doesn't mention** | Default-deny: `fs.read` of a path not in `read_allow` or `local_only_read` returns `PolicyError::PathDenied`; `env.read` of a name not in `allow_vars` or `local_only_vars` returns `PolicyError::EnvDenied`; `subprocess.exec` of a command not in `allow_commands` or `local_only_commands` returns `PolicyError::SubprocessDenied`. **Operator caveat:** a too-broad rooted glob in `read_allow` (e.g. `["**"]` or `["/tmp/**"]`) silently defeats the property. Narrow allow-lists are the operator's responsibility. |
@@ -206,10 +207,12 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   default.** The WasmRunner contains the Starlark interpreter — a
   runtime bug in the interpreter, or a runaway pure-CPU loop, stays
   inside the wasmtime guest. It does **not** isolate child processes
-  a permitted `subprocess.exec` call starts: with the default
-  `[subprocess].sandbox = "none"`, a permitted `python3` runs as a
-  normal child of the host process, bounded only by the policy's
-  `allow_commands`, argv path-gate, and `subprocess.deny_args`. If
+  a permitted `subprocess.exec` call starts: with
+  `[subprocess].sandbox = "none"`, or the default `"auto"` on a host
+  without Landlock (a warning is printed per spawn), a permitted
+  `python3` runs as a normal child of the host process, bounded only by
+  the policy's `allow_commands`, argv path-gate, and
+  `subprocess.deny_args`. If
   your threat model includes a permitted interpreter constructing
   paths inside its own heap that bypass the argv path-gate (e.g.
   `python3 -c "open(chr(47)+...)"`), run Denyx inside a container or
@@ -236,6 +239,24 @@ Read these honestly. **Each is a real gap, not a hypothetical.**
   resolved IP, but a malicious resolver can return a different IP
   on the next lookup the OS does. Resolved-IP pinning is future
   work.
+- **A subprocess's network is all or nothing.** With no `[network]`
+  grant the child has no IP sockets. With any `http_*_allow` entry it
+  has unrestricted network: `deny_hosts`, `deny_ips` and the taint
+  layer apply to `net.http_*`, not to sockets a child opens itself
+  (Round 5, AEG-PEN-R5-013).
+- **Subprocesses are not time-bounded and can outlive the run.**
+  `[runtime].max_seconds` is not enforced while a child runs, and a
+  child that daemonizes (setsid plus double fork) keeps running after
+  `denyx run` exits (AEG-PEN-R5-021).
+- **Check-then-open race on the in-process runner.** `fs.*` resolves
+  and checks a path, then opens it by path again. A child that
+  outlives `subprocess.exec` can swap a directory component in
+  between; Round 5 measured 22 outside reads in 150 attempts with an
+  external racer (AEG-PEN-R5-022).
+- **Glob semantics are not gitignore semantics.** `*` crosses `/`, a
+  trailing-slash deny entry matches nothing, and a bare directory name
+  in `deny` blocks only the entry, not its contents. Write deny
+  patterns as `dir/**` (AEG-PEN-R5-023).
 - **Unicode normalization tricks in paths/URLs.** Operators must
   write patterns matching the byte form they expect; we don't
   normalize NFC/NFD on either side of the match.
@@ -310,10 +331,12 @@ the agent has no other surface.
   as ground truth. If the agent can edit the policy, the policy is
   worthless — that's why `Policy::guard_self_writable` refuses to
   start with a policy that grants write/delete on itself.
-- **Single-threaded evaluation.** No TOCTOU between policy check
-  and operation within one script — the evaluator is single-threaded.
-  Two concurrent `denyx run` invocations against shared state are
-  the operator's problem, not Denyx's.
+- **Single-threaded evaluation, but not a single-actor filesystem.**
+  The evaluator is single-threaded, so a script cannot race its own
+  checks. A subprocess it started can, if that subprocess outlives
+  `subprocess.exec` (see the check-then-open race above). Two
+  concurrent `denyx run` invocations against shared state are the
+  operator's problem, not Denyx's.
 - **Filesystem rooted at the policy file.** Relative patterns
   (`src/**`) anchor at the policy-file directory, not the CWD.
   Operators don't need to leak their machine's directory structure

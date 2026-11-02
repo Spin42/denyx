@@ -136,13 +136,15 @@ mistakes:
   already fails policy *load* (not just a doctor warning) when
   `sandbox = "landlock"` is set on a kernel that can't support it — the
   same hard-refusal posture bwrap already has, not a softer diagnostic.
-- **No automatic backend selection.** An operator must explicitly
-  choose `sandbox = "bwrap"` or `sandbox = "landlock"`; Denyx does not
-  probe both and pick whichever works. This mirrors the existing
-  bwrap-only design (no "try landlock, fall back to none" auto-
-  detection either) and avoids a policy's effective security
-  properties silently depending on which backend happened to be
-  available on a given host.
+- **`auto` (the default) depends on the host, visibly.** With no
+  `sandbox` key, Denyx applies Landlock plus the seccomp denylist when
+  the kernel offers Landlock. If Landlock is advertised but the
+  restriction cannot be installed or is reported `NotEnforced` (for
+  example a container seccomp profile that refuses the Landlock
+  syscalls), the spawn fails: the child does not run unconfined. On a
+  host without Landlock, `auto` runs the child unconfined and prints a
+  warning on every spawn, and `denyx doctor` treats it as unconfined.
+  Set `sandbox = "landlock"` or `"bwrap"` to refuse to load instead.
 - **No macOS/Windows Landlock support**, because Landlock is a Linux
   kernel feature — this doesn't reopen the sandbox-exec/AppContainer
   question already closed in `docs/macos-deployment.md` and
