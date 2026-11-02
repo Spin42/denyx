@@ -1886,6 +1886,66 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_get denied"));
                         }
                     };
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_get_policy.host_is_local_only(&parsed_host) {
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_get_audit,
+                            &http_get_task_id,
+                            "net.http_get",
+                            &format!("GET {parsed}"),
+                            &[("url", url.as_str()), ("url", parsed.as_str())],
+                            || {
+                                caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                        }
+                    }
+
+                    // Capability-level confirm gate. Fires when
+                    // policy.requires_approval() lists this capability. An
+                    // operator deny surfaces as DenyxError::ConfirmDenied
+                    // (exit code 4) — distinct from a policy-Deny.
+                    if http_get_policy.requires_approval("net.http_get") {
+                        let decision = http_get_confirm.confirm(&ConfirmRequest {
+                            task_id: http_get_task_id.clone(),
+                            capability: "net.http_get".to_string(),
+                            summary: format!("net.http_get: {parsed}"),
+                        });
+                        if matches!(decision, ConfirmDecision::Deny) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &http_get_audit,
+                                AuditEvent::denied(
+                                    &http_get_task_id,
+                                    step,
+                                    "net.http_get",
+                                    &url,
+                                    "confirm hook denied",
+                                ),
+                            );
+                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
+                                "net.http_get denied by confirm hook".to_string(),
+                            ));
+                            return Err(wasmtime::Error::msg("confirm denied"));
+                        }
+                    }
+
                     // Hostname-based `[network].deny_ips` — a literal-IP URL is
                     // already covered by check_http_get itself; this catches a
                     // hostname that resolves to a denied IP (SSRF / cloud
@@ -1913,68 +1973,8 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_get denied"));
                         }
                     }
-                    // Capability-level confirm gate. Fires when
-                    // policy.requires_approval() lists this capability. An
-                    // operator deny surfaces as DenyxError::ConfirmDenied
-                    // (exit code 4) — distinct from a policy-Deny.
-                    if http_get_policy.requires_approval("net.http_get") {
-                        let decision = http_get_confirm.confirm(&ConfirmRequest {
-                            task_id: http_get_task_id.clone(),
-                            capability: "net.http_get".to_string(),
-                            summary: format!("net.http_get: {url}"),
-                        });
-                        if matches!(decision, ConfirmDecision::Deny) {
-                            let step = caller
-                                .data()
-                                .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            emit_scrubbed(
-                                &caller,
-                                &http_get_audit,
-                                AuditEvent::denied(
-                                    &http_get_task_id,
-                                    step,
-                                    "net.http_get",
-                                    &url,
-                                    "confirm hook denied",
-                                ),
-                            );
-                            caller.data_mut().captured_error = Some(DenyxError::ConfirmDenied(
-                                "net.http_get denied by confirm hook".to_string(),
-                            ));
-                            return Err(wasmtime::Error::msg("confirm denied"));
-                        }
-                    }
-
-                    // Outbound taint refusal only fires when the destination is NOT
-                    // itself local-only — a local-only host receiving a local-only
-                    // value isn't a boundary crossing.
-                    let parsed_host = url::Url::parse(&url)
-                        .ok()
-                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
-                        .unwrap_or_default();
-                    if !http_get_policy.host_is_local_only(&parsed_host) {
-                        if let Some(msg) = crate::check_outbound_taint(
-                            &caller.data().taint_registry,
-                            &http_get_audit,
-                            &http_get_task_id,
-                            "net.http_get",
-                            &format!("GET {parsed}"),
-                            &[("url", url.as_str())],
-                            || {
-                                caller
-                                    .data()
-                                    .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            },
-                        ) {
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
-                        }
-                    }
-
                     let body = match crate::no_redirect_agent()
-                        .get(&url)
+                        .get(parsed.as_str())
                         .timeout(http_get_policy.network_timeout())
                         .call()
                     {
@@ -2107,28 +2107,37 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_post denied"));
                         }
                     };
-                    if let Some(host) = parsed.host_str() {
-                        if let Err(e) = crate::dns_check(&http_post_policy, "http_post", host) {
-                            let step = caller
-                                .data()
-                                .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            emit_scrubbed(
-                                &caller,
-                                &http_post_audit,
-                                AuditEvent::denied(
-                                    &http_post_task_id,
-                                    step,
-                                    "net.http_post",
-                                    &url,
-                                    &format!("{e}"),
-                                ),
-                            );
-                            caller.data_mut().captured_error =
-                                Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
-                            return Err(wasmtime::Error::msg("net.http_post denied"));
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_post_policy.host_is_local_only(&parsed_host) {
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_post_audit,
+                            &http_post_task_id,
+                            "net.http_post",
+                            &format!("POST {parsed} ({} bytes)", req_body.len()),
+                            &[
+                                ("url", url.as_str()),
+                                ("url", parsed.as_str()),
+                                ("body", req_body.as_str()),
+                            ],
+                            || {
+                                caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
+
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
                     // operator deny surfaces as DenyxError::ConfirmDenied
@@ -2137,7 +2146,7 @@ impl WasmRunner {
                         let decision = http_post_confirm.confirm(&ConfirmRequest {
                             task_id: http_post_task_id.clone(),
                             capability: "net.http_post".to_string(),
-                            summary: format!("net.http_post: {url}"),
+                            summary: format!("net.http_post: {parsed}"),
                         });
                         if matches!(decision, ConfirmDecision::Deny) {
                             let step = caller
@@ -2162,35 +2171,30 @@ impl WasmRunner {
                         }
                     }
 
-                    // Outbound taint refusal only fires when the destination is NOT
-                    // itself local-only — a local-only host receiving a local-only
-                    // value isn't a boundary crossing.
-                    let parsed_host = url::Url::parse(&url)
-                        .ok()
-                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
-                        .unwrap_or_default();
-                    if !http_post_policy.host_is_local_only(&parsed_host) {
-                        if let Some(msg) = crate::check_outbound_taint(
-                            &caller.data().taint_registry,
-                            &http_post_audit,
-                            &http_post_task_id,
-                            "net.http_post",
-                            &format!("POST {parsed} ({} bytes)", req_body.len()),
-                            &[("url", url.as_str()), ("body", req_body.as_str())],
-                            || {
-                                caller
-                                    .data()
-                                    .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            },
-                        ) {
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_post_policy, "http_post", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &http_post_audit,
+                                AuditEvent::denied(
+                                    &http_post_task_id,
+                                    step,
+                                    "net.http_post",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_post({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_post denied"));
                         }
                     }
-
                     let body = match crate::no_redirect_agent()
-                        .post(&url)
+                        .post(parsed.as_str())
                         .timeout(http_post_policy.network_timeout())
                         .send_string(&req_body)
                     {
@@ -2330,28 +2334,37 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_put denied"));
                         }
                     };
-                    if let Some(host) = parsed.host_str() {
-                        if let Err(e) = crate::dns_check(&http_put_policy, "http_put", host) {
-                            let step = caller
-                                .data()
-                                .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            emit_scrubbed(
-                                &caller,
-                                &http_put_audit,
-                                AuditEvent::denied(
-                                    &http_put_task_id,
-                                    step,
-                                    "net.http_put",
-                                    &url,
-                                    &format!("{e}"),
-                                ),
-                            );
-                            caller.data_mut().captured_error =
-                                Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
-                            return Err(wasmtime::Error::msg("net.http_put denied"));
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_put_policy.host_is_local_only(&parsed_host) {
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_put_audit,
+                            &http_put_task_id,
+                            "net.http_put",
+                            &format!("PUT {parsed} ({} bytes)", req_body.len()),
+                            &[
+                                ("url", url.as_str()),
+                                ("url", parsed.as_str()),
+                                ("body", req_body.as_str()),
+                            ],
+                            || {
+                                caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
+
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
                     // operator deny surfaces as DenyxError::ConfirmDenied
@@ -2360,7 +2373,7 @@ impl WasmRunner {
                         let decision = http_put_confirm.confirm(&ConfirmRequest {
                             task_id: http_put_task_id.clone(),
                             capability: "net.http_put".to_string(),
-                            summary: format!("net.http_put: {url}"),
+                            summary: format!("net.http_put: {parsed}"),
                         });
                         if matches!(decision, ConfirmDecision::Deny) {
                             let step = caller
@@ -2385,35 +2398,30 @@ impl WasmRunner {
                         }
                     }
 
-                    // Outbound taint refusal only fires when the destination is NOT
-                    // itself local-only — a local-only host receiving a local-only
-                    // value isn't a boundary crossing.
-                    let parsed_host = url::Url::parse(&url)
-                        .ok()
-                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
-                        .unwrap_or_default();
-                    if !http_put_policy.host_is_local_only(&parsed_host) {
-                        if let Some(msg) = crate::check_outbound_taint(
-                            &caller.data().taint_registry,
-                            &http_put_audit,
-                            &http_put_task_id,
-                            "net.http_put",
-                            &format!("PUT {parsed} ({} bytes)", req_body.len()),
-                            &[("url", url.as_str()), ("body", req_body.as_str())],
-                            || {
-                                caller
-                                    .data()
-                                    .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            },
-                        ) {
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_put_policy, "http_put", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &http_put_audit,
+                                AuditEvent::denied(
+                                    &http_put_task_id,
+                                    step,
+                                    "net.http_put",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_put({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_put denied"));
                         }
                     }
-
                     let body = match crate::no_redirect_agent()
-                        .put(&url)
+                        .put(parsed.as_str())
                         .timeout(http_put_policy.network_timeout())
                         .send_string(&req_body)
                     {
@@ -2546,28 +2554,37 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_patch denied"));
                         }
                     };
-                    if let Some(host) = parsed.host_str() {
-                        if let Err(e) = crate::dns_check(&http_patch_policy, "http_patch", host) {
-                            let step = caller
-                                .data()
-                                .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            emit_scrubbed(
-                                &caller,
-                                &http_patch_audit,
-                                AuditEvent::denied(
-                                    &http_patch_task_id,
-                                    step,
-                                    "net.http_patch",
-                                    &url,
-                                    &format!("{e}"),
-                                ),
-                            );
-                            caller.data_mut().captured_error =
-                                Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
-                            return Err(wasmtime::Error::msg("net.http_patch denied"));
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_patch_policy.host_is_local_only(&parsed_host) {
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_patch_audit,
+                            &http_patch_task_id,
+                            "net.http_patch",
+                            &format!("PATCH {parsed} ({} bytes)", req_body.len()),
+                            &[
+                                ("url", url.as_str()),
+                                ("url", parsed.as_str()),
+                                ("body", req_body.as_str()),
+                            ],
+                            || {
+                                caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
+
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
                     // operator deny surfaces as DenyxError::ConfirmDenied
@@ -2576,7 +2593,7 @@ impl WasmRunner {
                         let decision = http_patch_confirm.confirm(&ConfirmRequest {
                             task_id: http_patch_task_id.clone(),
                             capability: "net.http_patch".to_string(),
-                            summary: format!("net.http_patch: {url}"),
+                            summary: format!("net.http_patch: {parsed}"),
                         });
                         if matches!(decision, ConfirmDecision::Deny) {
                             let step = caller
@@ -2601,35 +2618,30 @@ impl WasmRunner {
                         }
                     }
 
-                    // Outbound taint refusal only fires when the destination is NOT
-                    // itself local-only — a local-only host receiving a local-only
-                    // value isn't a boundary crossing.
-                    let parsed_host = url::Url::parse(&url)
-                        .ok()
-                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
-                        .unwrap_or_default();
-                    if !http_patch_policy.host_is_local_only(&parsed_host) {
-                        if let Some(msg) = crate::check_outbound_taint(
-                            &caller.data().taint_registry,
-                            &http_patch_audit,
-                            &http_patch_task_id,
-                            "net.http_patch",
-                            &format!("PATCH {parsed} ({} bytes)", req_body.len()),
-                            &[("url", url.as_str()), ("body", req_body.as_str())],
-                            || {
-                                caller
-                                    .data()
-                                    .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            },
-                        ) {
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_patch_policy, "http_patch", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &http_patch_audit,
+                                AuditEvent::denied(
+                                    &http_patch_task_id,
+                                    step,
+                                    "net.http_patch",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_patch({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_patch denied"));
                         }
                     }
-
                     let body = match crate::no_redirect_agent()
-                        .request("PATCH", &url)
+                        .request("PATCH", parsed.as_str())
                         .timeout(http_patch_policy.network_timeout())
                         .send_string(&req_body)
                     {
@@ -2767,28 +2779,33 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("net.http_delete denied"));
                         }
                     };
-                    if let Some(host) = parsed.host_str() {
-                        if let Err(e) = crate::dns_check(&http_delete_policy, "http_delete", host) {
-                            let step = caller
-                                .data()
-                                .step_counter
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            emit_scrubbed(
-                                &caller,
-                                &http_delete_audit,
-                                AuditEvent::denied(
-                                    &http_delete_task_id,
-                                    step,
-                                    "net.http_delete",
-                                    &url,
-                                    &format!("{e}"),
-                                ),
-                            );
-                            caller.data_mut().captured_error =
-                                Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
-                            return Err(wasmtime::Error::msg("net.http_delete denied"));
+                    // Outbound taint refusal only fires when the destination is NOT
+                    // itself local-only — a local-only host receiving a local-only
+                    // value isn't a boundary crossing.
+                    let parsed_host = url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
+                        .unwrap_or_default();
+                    if !http_delete_policy.host_is_local_only(&parsed_host) {
+                        if let Some(msg) = crate::check_outbound_taint(
+                            &caller.data().taint_registry,
+                            &http_delete_audit,
+                            &http_delete_task_id,
+                            "net.http_delete",
+                            &format!("DELETE {parsed}"),
+                            &[("url", url.as_str()), ("url", parsed.as_str())],
+                            || {
+                                caller
+                                    .data()
+                                    .step_counter
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            },
+                        ) {
+                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
+                            return Err(wasmtime::Error::msg("outbound taint refused"));
                         }
                     }
+
                     // Capability-level confirm gate. Fires when
                     // policy.requires_approval() lists this capability. An
                     // operator deny surfaces as DenyxError::ConfirmDenied
@@ -2797,7 +2814,7 @@ impl WasmRunner {
                         let decision = http_delete_confirm.confirm(&ConfirmRequest {
                             task_id: http_delete_task_id.clone(),
                             capability: "net.http_delete".to_string(),
-                            summary: format!("net.http_delete: {url}"),
+                            summary: format!("net.http_delete: {parsed}"),
                         });
                         if matches!(decision, ConfirmDecision::Deny) {
                             let step = caller
@@ -2822,35 +2839,30 @@ impl WasmRunner {
                         }
                     }
 
-                    // Outbound taint refusal only fires when the destination is NOT
-                    // itself local-only — a local-only host receiving a local-only
-                    // value isn't a boundary crossing.
-                    let parsed_host = url::Url::parse(&url)
-                        .ok()
-                        .and_then(|u| u.host_str().map(|s| s.to_owned()))
-                        .unwrap_or_default();
-                    if !http_delete_policy.host_is_local_only(&parsed_host) {
-                        if let Some(msg) = crate::check_outbound_taint(
-                            &caller.data().taint_registry,
-                            &http_delete_audit,
-                            &http_delete_task_id,
-                            "net.http_delete",
-                            &format!("DELETE {parsed}"),
-                            &[("url", url.as_str())],
-                            || {
-                                caller
-                                    .data()
-                                    .step_counter
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            },
-                        ) {
-                            caller.data_mut().captured_error = Some(DenyxError::Policy(msg));
-                            return Err(wasmtime::Error::msg("outbound taint refused"));
+                    if let Some(host) = parsed.host_str() {
+                        if let Err(e) = crate::dns_check(&http_delete_policy, "http_delete", host) {
+                            let step = caller
+                                .data()
+                                .step_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            emit_scrubbed(
+                                &caller,
+                                &http_delete_audit,
+                                AuditEvent::denied(
+                                    &http_delete_task_id,
+                                    step,
+                                    "net.http_delete",
+                                    &url,
+                                    &format!("{e}"),
+                                ),
+                            );
+                            caller.data_mut().captured_error =
+                                Some(DenyxError::Policy(format!("net.http_delete({url:?}): {e}")));
+                            return Err(wasmtime::Error::msg("net.http_delete denied"));
                         }
                     }
-
                     let body = match crate::no_redirect_agent()
-                        .delete(&url)
+                        .delete(parsed.as_str())
                         .timeout(http_delete_policy.network_timeout())
                         .call()
                     {

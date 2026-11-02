@@ -1202,6 +1202,16 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         ctx.check_no_output_after_local_only_read("net.http_get")?;
         match ctx.policy.check_http_get(url) {
             Ok(parsed) => {
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_get",
+                        step,
+                        &format!("GET {}", parsed),
+                        &[("url", url), ("url", parsed.as_str())],
+                    )?;
+                }
+                ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 if let Some(host) = parsed.host_str() {
                     if let Err(e) = dns_check(&ctx.policy, "http_get", host) {
                         let msg = e.to_string();
@@ -1216,16 +1226,6 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
-                if !ctx.policy.host_is_local_only(&host_label) {
-                    ctx.enforce_outbound_taint(
-                        "net.http_get",
-                        step,
-                        &format!("GET {}", parsed),
-                        &[("url", url)],
-                    )?;
-                }
-                ctx.require_confirm("net.http_get", format!("GET {}", parsed))?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .get(parsed.as_str())
@@ -1273,6 +1273,19 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         ctx.check_no_output_after_local_only_read("net.http_post")?;
         match ctx.policy.check_http_post(url) {
             Ok(parsed) => {
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_post",
+                        step,
+                        &format!("POST {} ({} bytes)", parsed, body.len()),
+                        &[("url", url), ("url", parsed.as_str()), ("body", body)],
+                    )?;
+                }
+                ctx.require_confirm(
+                    "net.http_post",
+                    format!("POST {} ({} bytes)", parsed, body.len()),
+                )?;
                 if let Some(host) = parsed.host_str() {
                     if let Err(e) = dns_check(&ctx.policy, "http_post", host) {
                         let msg = e.to_string();
@@ -1287,19 +1300,6 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
-                if !ctx.policy.host_is_local_only(&host_label) {
-                    ctx.enforce_outbound_taint(
-                        "net.http_post",
-                        step,
-                        &format!("POST {} ({} bytes)", parsed, body.len()),
-                        &[("url", url), ("body", body)],
-                    )?;
-                }
-                ctx.require_confirm(
-                    "net.http_post",
-                    format!("POST {} ({} bytes)", parsed, body.len()),
-                )?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .post(parsed.as_str())
@@ -1347,6 +1347,19 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         ctx.check_no_output_after_local_only_read("net.http_put")?;
         match ctx.policy.check_http_put(url) {
             Ok(parsed) => {
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_put",
+                        step,
+                        &format!("PUT {} ({} bytes)", parsed, body.len()),
+                        &[("url", url), ("url", parsed.as_str()), ("body", body)],
+                    )?;
+                }
+                ctx.require_confirm(
+                    "net.http_put",
+                    format!("PUT {} ({} bytes)", parsed, body.len()),
+                )?;
                 if let Some(host) = parsed.host_str() {
                     if let Err(e) = dns_check(&ctx.policy, "http_put", host) {
                         let msg = e.to_string();
@@ -1361,19 +1374,6 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
-                if !ctx.policy.host_is_local_only(&host_label) {
-                    ctx.enforce_outbound_taint(
-                        "net.http_put",
-                        step,
-                        &format!("PUT {} ({} bytes)", parsed, body.len()),
-                        &[("url", url), ("body", body)],
-                    )?;
-                }
-                ctx.require_confirm(
-                    "net.http_put",
-                    format!("PUT {} ({} bytes)", parsed, body.len()),
-                )?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .put(parsed.as_str())
@@ -1421,6 +1421,19 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         ctx.check_no_output_after_local_only_read("net.http_patch")?;
         match ctx.policy.check_http_patch(url) {
             Ok(parsed) => {
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_patch",
+                        step,
+                        &format!("PATCH {} ({} bytes)", parsed, body.len()),
+                        &[("url", url), ("url", parsed.as_str()), ("body", body)],
+                    )?;
+                }
+                ctx.require_confirm(
+                    "net.http_patch",
+                    format!("PATCH {} ({} bytes)", parsed, body.len()),
+                )?;
                 if let Some(host) = parsed.host_str() {
                     if let Err(e) = dns_check(&ctx.policy, "http_patch", host) {
                         let msg = e.to_string();
@@ -1435,19 +1448,6 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
-                if !ctx.policy.host_is_local_only(&host_label) {
-                    ctx.enforce_outbound_taint(
-                        "net.http_patch",
-                        step,
-                        &format!("PATCH {} ({} bytes)", parsed, body.len()),
-                        &[("url", url), ("body", body)],
-                    )?;
-                }
-                ctx.require_confirm(
-                    "net.http_patch",
-                    format!("PATCH {} ({} bytes)", parsed, body.len()),
-                )?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .request("PATCH", parsed.as_str())
@@ -1494,6 +1494,16 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         ctx.check_no_output_after_local_only_read("net.http_delete")?;
         match ctx.policy.check_http_delete(url) {
             Ok(parsed) => {
+                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
+                if !ctx.policy.host_is_local_only(&host_label) {
+                    ctx.enforce_outbound_taint(
+                        "net.http_delete",
+                        step,
+                        &format!("DELETE {}", parsed),
+                        &[("url", url), ("url", parsed.as_str())],
+                    )?;
+                }
+                ctx.require_confirm("net.http_delete", format!("DELETE {}", parsed))?;
                 if let Some(host) = parsed.host_str() {
                     if let Err(e) = dns_check(&ctx.policy, "http_delete", host) {
                         let msg = e.to_string();
@@ -1508,16 +1518,6 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         return Err(e.into());
                     }
                 }
-                let host_label = parsed.host_str().map(|s| s.to_string()).unwrap_or_default();
-                if !ctx.policy.host_is_local_only(&host_label) {
-                    ctx.enforce_outbound_taint(
-                        "net.http_delete",
-                        step,
-                        &format!("DELETE {}", parsed),
-                        &[("url", url)],
-                    )?;
-                }
-                ctx.require_confirm("net.http_delete", format!("DELETE {}", parsed))?;
                 let result: Result<String, anyhow::Error> = (|| {
                     let resp = no_redirect_agent()
                         .delete(parsed.as_str())
