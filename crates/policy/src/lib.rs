@@ -2372,14 +2372,36 @@ fn resolve_path(root: &Path, p: &Path) -> PathBuf {
 ///   bypass — at worst it preserves the pre-canonicalization
 ///   behavior for that one call.
 fn canonicalize_with_unresolved_tail(path: &Path) -> PathBuf {
+    resolve_unresolved_tail(path, 0)
+}
+
+/// Kernel limit on symlinks followed while resolving one path.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+fn resolve_unresolved_tail(path: &Path, hops: usize) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(path) {
         return c;
     }
     // Walk back component by component until we find an ancestor
-    // that does exist; canonicalize that and re-append the tail.
+    // that does exist; canonicalize that and re-append the tail. A
+    // component that exists only as a dangling symlink is not a new
+    // name: the kernel creates through it, so it is replaced by its
+    // target and resolution restarts from there.
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut current = path.to_path_buf();
-    while let Some(name) = current.file_name() {
+    loop {
+        if hops < MAX_SYMLINK_HOPS {
+            if let Some(target) = dangling_link_target(&current, hops) {
+                let mut next = target;
+                for t in tail.iter().rev() {
+                    next.push(t);
+                }
+                return resolve_unresolved_tail(&next, hops + 1);
+            }
+        }
+        let Some(name) = current.file_name() else {
+            break;
+        };
         tail.push(name.to_os_string());
         if !current.pop() {
             break;
@@ -2393,6 +2415,33 @@ fn canonicalize_with_unresolved_tail(path: &Path) -> PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+/// If `link` is a symlink, the absolute, lexically normalised path it
+/// points to, with its parent resolved first so a relative target's
+/// `..` steps are taken from a symlink-free directory.
+fn dangling_link_target(link: &Path, hops: usize) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(link).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let target = std::fs::read_link(link).ok()?;
+    let joined = if target.is_absolute() {
+        target
+    } else {
+        resolve_unresolved_tail(link.parent()?, hops + 1).join(target)
+    };
+    let mut normal = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            other => normal.push(other.as_os_str()),
+        }
+    }
+    Some(normal)
 }
 
 #[cfg(test)]
