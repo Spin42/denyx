@@ -1575,24 +1575,103 @@ impl Policy {
     /// `read_paths` includes `local_only_read` and `write_paths`
     /// includes `delete_allow` — the same grouping `bwrap_argv`
     /// already uses for `--ro-bind-try` vs `--bind-try`.
+    ///
+    /// A prefix that contains a `[filesystem].deny` match is replaced by
+    /// its children, recursively, so no grant covers a denied entry:
+    /// both backends can only add access, never subtract it. A writable
+    /// directory split this way no longer accepts new files directly
+    /// inside it.
     pub fn sandbox_fs_paths(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
-        let read_paths: Vec<PathBuf> =
-            collect_concrete_prefixes(&self.root, &self.file.filesystem.read_allow)
+        let fs = &self.file.filesystem;
+        let read_paths = self.split_around_denied(
+            collect_concrete_prefixes(&self.root, &fs.read_allow)
                 .into_iter()
-                .chain(collect_concrete_prefixes(
-                    &self.root,
-                    &self.file.filesystem.local_only_read,
-                ))
-                .collect();
-        let write_paths: Vec<PathBuf> =
-            collect_concrete_prefixes(&self.root, &self.file.filesystem.write_allow)
+                .chain(collect_concrete_prefixes(&self.root, &fs.local_only_read)),
+        );
+        let write_paths = self.split_around_denied(
+            collect_concrete_prefixes(&self.root, &fs.write_allow)
                 .into_iter()
-                .chain(collect_concrete_prefixes(
-                    &self.root,
-                    &self.file.filesystem.delete_allow,
-                ))
-                .collect();
+                .chain(collect_concrete_prefixes(&self.root, &fs.delete_allow)),
+        );
         (read_paths, write_paths)
+    }
+
+    fn split_around_denied(&self, prefixes: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut budget = SANDBOX_SPLIT_BUDGET;
+        for p in prefixes {
+            let p = std::fs::canonicalize(&p).unwrap_or(p);
+            self.split_one(&p, &mut out, &mut budget);
+        }
+        if budget == 0 {
+            eprintln!(
+                "denyx: warning: more than {SANDBOX_SPLIT_BUDGET} filesystem entries under the \
+                 sandbox grants; entries past that limit are not granted to the subprocess"
+            );
+        }
+        out
+    }
+
+    fn split_one(&self, p: &Path, out: &mut Vec<PathBuf>, budget: &mut usize) {
+        if *budget == 0 || self.fs_deny.is_match(p) {
+            return;
+        }
+        *budget -= 1;
+        let Ok(meta) = std::fs::symlink_metadata(p) else {
+            // Not created yet: nothing inside it can be denied.
+            out.push(p.to_path_buf());
+            return;
+        };
+        if meta.file_type().is_symlink() {
+            // A rule on a symlink grants its target. Access through it
+            // is checked against the target's own grants instead.
+            return;
+        }
+        if !meta.is_dir() || !self.subtree_has_denied(p, budget) {
+            out.push(p.to_path_buf());
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(p) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            self.split_one(&entry.path(), out, budget);
+        }
+    }
+
+    /// Whether any entry below `dir` matches `[filesystem].deny`. An
+    /// exhausted budget counts as a match, so the caller keeps splitting
+    /// (and then stops granting) rather than granting unexamined trees.
+    fn subtree_has_denied(&self, dir: &Path, budget: &mut usize) -> bool {
+        // A deny pattern can only match below `dir` if its concrete
+        // prefix lies inside `dir` or `dir` lies inside it.
+        let overlaps = collect_concrete_prefixes(&self.root, &self.file.filesystem.deny)
+            .into_iter()
+            .map(|c| std::fs::canonicalize(&c).unwrap_or(c))
+            .any(|c| c.starts_with(dir) || dir.starts_with(&c));
+        if !overlaps {
+            return false;
+        }
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if *budget == 0 {
+                    return true;
+                }
+                *budget -= 1;
+                let path = entry.path();
+                if self.fs_deny.is_match(&path) {
+                    return true;
+                }
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    stack.push(path);
+                }
+            }
+        }
+        false
     }
 
     /// Build the `bwrap` argv that wraps `user_argv` with the
@@ -1654,11 +1733,10 @@ impl Policy {
         a.push("--dev".into());
         a.push("/dev".into());
 
-        // Read-side bind mounts derived from policy patterns.
-        let read_paths = collect_concrete_prefixes(&self.root, &self.file.filesystem.read_allow);
-        for p in read_paths.iter().chain(
-            collect_concrete_prefixes(&self.root, &self.file.filesystem.local_only_read).iter(),
-        ) {
+        // Bind mounts derived from policy patterns, split around
+        // [filesystem].deny entries (see `sandbox_fs_paths`).
+        let (read_paths, write_paths) = self.sandbox_fs_paths();
+        for p in &read_paths {
             if let Some(s) = p.to_str() {
                 a.push("--ro-bind-try".into());
                 a.push(s.into());
@@ -1667,11 +1745,7 @@ impl Policy {
         }
 
         // Write-side: write_allow + delete_allow.
-        let write_paths = collect_concrete_prefixes(&self.root, &self.file.filesystem.write_allow);
-        for p in write_paths
-            .iter()
-            .chain(collect_concrete_prefixes(&self.root, &self.file.filesystem.delete_allow).iter())
-        {
+        for p in &write_paths {
             if let Some(s) = p.to_str() {
                 a.push("--bind-try".into());
                 a.push(s.into());
@@ -2105,6 +2179,10 @@ impl HostMatcher {
 /// qualified form with the root label) names the same host as
 /// `example.com`. Patterns and hosts are both reduced to this form so a
 /// spelling difference cannot slip past a deny or local-only entry.
+/// Upper bound on filesystem entries examined when splitting sandbox
+/// grants around denied entries, per subprocess spawn.
+const SANDBOX_SPLIT_BUDGET: usize = 100_000;
+
 /// For a single short-flag pattern (`-c`), whether any argument is a
 /// combined short-option cluster carrying that flag (`-Ic`, `-lc`).
 /// Shells and interpreters accept such clusters, so a substring match
