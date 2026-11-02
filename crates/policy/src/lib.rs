@@ -813,6 +813,9 @@ fn merge_policy_files(base: PolicyFile, over: PolicyFile) -> PolicyFile {
 pub struct Policy {
     file: PolicyFile,
     root: PathBuf,
+    /// Canonical path of the file this policy was loaded from, when it
+    /// came from a file. No subprocess may name it as an argument.
+    source_path: Option<PathBuf>,
     fs_read: PathMatcher,
     fs_local_only_read: PathMatcher,
     fs_write: PathMatcher,
@@ -877,9 +880,10 @@ impl Policy {
             std::fs::read_to_string(path).with_context(|| format!("read policy file {path:?}"))?;
         let file = PolicyFile::from_toml_str(&raw)?.resolve_inheritance()?;
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        let policy = Self::from_file(file, root)?;
+        let mut policy = Self::from_file(file, root)?;
         let policy_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         policy.guard_self_writable(&policy_path)?;
+        policy.source_path = Some(policy_path);
         // Sandbox preflight: refuse to start if the operator asked
         // for bwrap but the binary isn't available — silent
         // fall-through to non-sandboxed execution would be worse
@@ -1104,6 +1108,7 @@ impl Policy {
             subprocess_deny,
             subprocess_local_only,
             subprocess_deny_args,
+            source_path: None,
             subprocess_requires_approval_args,
             fn_derived,
             tools,
@@ -2024,6 +2029,16 @@ impl Policy {
             };
             let resolved = resolve_path(&self.root, Path::new(arg));
             let what = if i == 0 { "command" } else { "argv element" };
+            if self.source_path.as_deref() == Some(resolved.as_path()) {
+                return Err(PolicyError::PathDenied {
+                    action: "subprocess.exec",
+                    path: resolved,
+                    reason: format!(
+                        "{what} {arg:?} is the loaded policy file; a subprocess \
+                         cannot be handed the rules that confine it"
+                    ),
+                });
+            }
             if self.fs_deny.is_match(&resolved) {
                 return Err(PolicyError::PathDenied {
                     action: "subprocess.exec",
