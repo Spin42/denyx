@@ -44,3 +44,34 @@ write_allow = ["**"]
     }
     assert!(p.check_fs_write(Path::new("/work/src/main.rs")).is_ok());
 }
+
+/// Claude Code places git worktrees under `<repo>/.claude/worktrees/`,
+/// and scratch directories can live under `~/.claude/`. The host
+/// configuration deny must not swallow a project rooted there.
+#[test]
+fn project_rooted_under_a_claude_directory_stays_usable() {
+    for root in [
+        PathBuf::from("/repo/.claude/worktrees/feature"),
+        home().join(".claude/jobs/1/tmp/proj"),
+    ] {
+        let file = PolicyFile::from_toml_str(
+            r#"
+inherits = "secure-defaults"
+[filesystem]
+read_allow = ["**"]
+write_allow = ["**"]
+"#,
+        )
+        .unwrap()
+        .resolve_inheritance()
+        .unwrap();
+        let p = Policy::from_file(file, root.clone()).unwrap();
+        assert!(
+            p.check_fs_write(&root.join("src/main.rs")).is_ok(),
+            "project under {root:?} was denied wholesale"
+        );
+        assert!(p
+            .check_fs_write(&root.join(".claude/settings.local.json"))
+            .is_err());
+    }
+}

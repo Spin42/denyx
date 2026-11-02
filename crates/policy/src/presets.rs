@@ -46,8 +46,14 @@ deny = [
     # Agent-host and git configuration the next session trusts or runs:
     # writing any of these widens the next session's tools, permissions
     # or hooks without touching the policy file.
+    # `**/.claude/**` is anchored at the policy root, so a project that
+    # itself lives under a `.claude/` directory (Claude Code worktrees,
+    # scratch dirs) is not swallowed. The home entries name files, for
+    # the same reason.
     "**/.claude/**",
-    "~/.claude/**",
+    "~/.claude/settings*.json",
+    "~/.claude/CLAUDE.md",
+    "~/.claude.json",
     ".mcp.json",
     "opencode.json",
     "~/.config/opencode/**",
