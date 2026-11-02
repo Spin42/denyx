@@ -113,7 +113,7 @@ fn denied_syscalls() -> Vec<i64> {
 /// Returns `Ok(())` on success. The caller decides whether an error
 /// is fatal to the spawn (explicit `sandbox = "landlock"`) or
 /// best-effort (a future confine-by-default mode).
-pub(crate) fn apply() -> anyhow::Result<()> {
+pub(crate) fn apply(deny_network: bool) -> anyhow::Result<()> {
     // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes scalar args and has
     // no memory-safety requirements; called from a single-threaded
     // forked child.
@@ -134,15 +134,24 @@ pub(crate) fn apply() -> anyhow::Result<()> {
     // commands outside the sandbox, and Landlock cannot mediate
     // connect() to a pathname socket. socketpair() stays allowed: it
     // only connects the process to itself.
-    rules.insert(
-        libc::SYS_socket,
-        vec![SeccompRule::new(vec![SeccompCondition::new(
-            0,
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Eq,
-            libc::AF_UNIX as u64,
-        )?])?],
-    );
+    // With no network grant, Landlock already refuses TCP connect and
+    // bind but does not see UDP, so IP sockets are refused outright.
+    let mut socket_families = vec![libc::AF_UNIX];
+    if deny_network {
+        socket_families.extend([libc::AF_INET, libc::AF_INET6]);
+    }
+    let socket_rules = socket_families
+        .into_iter()
+        .map(|family| {
+            Ok(SeccompRule::new(vec![SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                family as u64,
+            )?])?)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    rules.insert(libc::SYS_socket, socket_rules);
     let filter = SeccompFilter::new(
         rules,
         // Default for any syscall NOT listed above: allow.
@@ -210,10 +219,17 @@ mod tests {
     where
         F: Fn() -> bool + Send + Sync + 'static,
     {
+        run_after_apply_with(false, probe)
+    }
+
+    fn run_after_apply_with<F>(deny_network: bool, probe: F) -> Option<bool>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
         let mut cmd = std::process::Command::new("true");
         unsafe {
             cmd.pre_exec(move || {
-                if apply().is_err() {
+                if apply(deny_network).is_err() {
                     std::process::exit(2);
                 }
                 std::process::exit(if probe() { 1 } else { 0 });
@@ -299,6 +315,42 @@ mod tests {
         match r {
             Some(true) => {}
             Some(false) => panic!("socketpair or AF_INET socket was blocked"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
+    }
+
+    fn inet_sockets_open() -> bool {
+        [libc::AF_INET, libc::AF_INET6].into_iter().all(|af| {
+            [libc::SOCK_STREAM, libc::SOCK_DGRAM]
+                .into_iter()
+                .all(|ty| unsafe { libc::socket(af, ty, 0) } >= 0)
+        })
+    }
+
+    fn inet_sockets_denied() -> bool {
+        [libc::AF_INET, libc::AF_INET6].into_iter().all(|af| {
+            [libc::SOCK_STREAM, libc::SOCK_DGRAM]
+                .into_iter()
+                .all(|ty| denied(unsafe { libc::socket(af, ty, 0) } as i64))
+        })
+    }
+
+    /// AEG-PEN-R5-013: Landlock mediates TCP connect/bind only, so a
+    /// child with no network grant could still send UDP datagrams.
+    #[test]
+    fn denies_inet_sockets_when_network_is_denied() {
+        match run_after_apply_with(true, inet_sockets_denied) {
+            Some(true) => {}
+            Some(false) => panic!("an AF_INET/AF_INET6 socket was created with network denied"),
+            None => eprintln!("skipping: seccomp could not be installed in this environment"),
+        }
+    }
+
+    #[test]
+    fn allows_inet_sockets_when_network_is_granted() {
+        match run_after_apply_with(false, inet_sockets_open) {
+            Some(true) => {}
+            Some(false) => panic!("AF_INET/AF_INET6 sockets blocked with network granted"),
             None => eprintln!("skipping: seccomp could not be installed in this environment"),
         }
     }

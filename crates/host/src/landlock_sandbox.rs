@@ -136,7 +136,8 @@ pub(crate) fn wire_pre_exec(
             // confine, a child that could not be confined must not run.
             apply(&read_paths, &write_paths, deny_network)
                 .map_err(|e| std::io::Error::other(format!("landlock: {e}")))?;
-            crate::seccomp::apply().map_err(|e| std::io::Error::other(format!("seccomp: {e}")))
+            crate::seccomp::apply(deny_network)
+                .map_err(|e| std::io::Error::other(format!("seccomp: {e}")))
         });
     }
 }
