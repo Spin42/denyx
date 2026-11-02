@@ -13,6 +13,102 @@ breaking API changes between minor versions until they hit `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-02
+
+Round 3, 4 and 5 pentest remediation, an OS sandbox for subprocesses on
+by default, and stricter policy loading. Round 5 findings and the
+evidence for each fix are in
+[docs/security-pentest-r5-wasm-rawpath-and-sandbox-parity.md](docs/security-pentest-r5-wasm-rawpath-and-sandbox-parity.md);
+what remains open is listed there and in the threat model.
+
+### Breaking changes
+
+- **Unknown policy keys are rejected.** A misspelled key or section now
+  fails policy load instead of being ignored. A leftover `[functions]`
+  block fails with a message naming its replacement: capabilities derive
+  from the resource sections. `denyx policy validate` reports the
+  offending key.
+- **Subprocesses are confined by default.** With no `[subprocess].sandbox`
+  key the mode is `auto`: Landlock plus a seccomp denylist where the
+  kernel offers Landlock. If confinement cannot be enforced the spawn
+  fails; on a host without Landlock the child runs unconfined with a
+  warning per spawn. Set `sandbox = "none"` to opt out.
+- **Confined children cannot use same-user daemons.** `AF_UNIX` sockets
+  are refused (session D-Bus, `ssh-agent`, `gpg-agent`, container
+  engines, X11), and with no `[network]` grant so are all IP sockets.
+- **`denyx-local-mcp` refuses `requires_approval` capabilities by
+  default.** Its `denyx-mcp` child starts with `--confirm-mode auto-deny`;
+  pass `--confirm-mode auto-allow` to restore the previous behaviour.
+- **`secure-defaults` denies more.** Agent-host and git configuration
+  (`.claude/`, `.mcp.json`, `opencode.json`, `.git/hooks/`, the home
+  `~/.claude/settings*.json`, `~/.claude/CLAUDE.md`, `~/.claude.json`,
+  `~/.config/opencode/`), `/proc`, `/sys`, `/dev`, and the network
+  ranges `0.0.0.0/8`, `100.64.0.0/10`, `64:ff9b::/96`.
+- **Subprocesses run in the policy root**, not the host process's cwd.
+
+### Added
+
+- `[subprocess].sandbox = "landlock"` and the `auto` mode, with a seccomp
+  syscall denylist (ptrace, process memory access, io_uring, namespace
+  creation through `unshare`, `clone` and `clone3`, mount APIs, keyring,
+  module loading) and the Landlock ABI V6 signal and abstract-socket
+  scopes where supported.
+- `denyx hook` for native tool-call authorization, and `denyx
+  hook-daemon` to serve it from a warm policy.
+- `[runtime]` per-capability and total call-count caps, and
+  `no_output_after_local_only_read`.
+- AST-based static taint-propagation pass in the pre-execution verifier.
+- `denyx audit verify --min-seq` to detect tail truncation.
+- Doctor checks: unconfined code runners (now including `git`, and
+  without requiring a writable tree), secret-shaped resources missing
+  from `local_only_*`, `denyx-local-mcp` wired alongside another MCP
+  server.
+- `denyx-local-mcp --confirm-mode`.
+
+### Security
+
+- The default wasm runner performed `fs.*` IO on the raw script path
+  instead of the checked one; `<symlink>/../x` read, wrote and deleted
+  outside the allow-list and bypassed local-only taint (R5-001).
+- A Landlock-confined child could run commands outside the sandbox
+  through the session D-Bus / `systemd --user` (R5-002).
+- `deny_args` short flags now match inside option clusters (`bash -lc`,
+  `python3 -Ic`) (R5-003).
+- Landlock or seccomp setup failures, and a ruleset the kernel reports
+  as not enforced, abort the spawn instead of running the child
+  unconfined (R5-004).
+- The wasm runner no longer leaks local-only values through error text,
+  local-only command stderr, or the confirm prompt (R5-005, -006,
+  -007). Confirm prompts escape control characters.
+- `0.0.0.0` and `::` are always denied; host matching ignores ASCII case
+  and a trailing root dot (R5-008, -009).
+- `[filesystem].deny` is honoured inside the subprocess sandbox
+  (R5-010); writes through dangling symlinks are checked at their
+  target (R5-012).
+- HTTP calls check taint on the URL as sent, then ask for approval, then
+  resolve DNS, so a refused or unapproved host name never reaches the
+  resolver (R5-014, -015).
+- Subprocess arguments: paths attached to options are checked (R5-018)
+  and the loaded policy file is refused (R5-019).
+- Round 3 and 4: argv[0] path gating, deny/allow basename symmetry,
+  chunked-transform redaction, `/proc` denies, and four wasm/native
+  parity regressions (hostname `deny_ips`, `bwrap` mode, HTTP timeout,
+  guest-length allocation), plus the wasm audit-log taint scrub.
+
+### Operator-facing notes
+
+- Run `denyx policy validate` on existing policies before upgrading;
+  misspelled keys that were silently ignored now stop the load.
+- A writable directory that contains a `[filesystem].deny` match is
+  granted to the subprocess sandbox entry by entry, so new files cannot
+  be created directly inside it.
+- When the sandbox cannot be applied the error is currently only
+  `Invalid argument (os error 22)`.
+- Still open: a child of a policy with any network grant has unfiltered
+  network; subprocesses are not time-bounded; a check-then-open race on
+  `--no-wasm`; glob semantics differ from gitignore. See the Round 5
+  report.
+
 ## [0.4.0] — 2026-05-15
 
 - **Wasm-path pentest evidence.** Wasm path pentested across 5
@@ -677,7 +773,8 @@ the `aegis-*` crate names were partially taken on crates.io.
   own crypto (AES, custom permutations) or pure side channels
   (length, comparison oracles, substring guesses).
 
-[Unreleased]: https://github.com/Spin42/denyx/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Spin42/denyx/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Spin42/denyx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Spin42/denyx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Spin42/denyx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Spin42/denyx/releases/tag/v0.2.0
