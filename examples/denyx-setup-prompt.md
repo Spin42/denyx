@@ -162,11 +162,20 @@ read_allow  = [..., "./CLAUDE.md", "./AGENTS.md", "./.claude/CLAUDE.md"]
 write_allow = [..., "./CLAUDE.md", "./AGENTS.md", "./.claude/CLAUDE.md"]
 ```
 
+Tell the user one consequence: the next session reads these
+memory files as instructions, so whatever the agent writes there
+(including text it picked up from a prompt-injected page) can
+steer a later session. Leave them out of `write_allow` if that
+matters more than letting the agent keep notes.
+
 Do NOT add `./.claude/settings.json`, `./opencode.json`,
 `./.mcp.json`, or `./denyx.toml` itself to `write_allow` — those
 files control whether the lockdown is in effect, and an agent
-that can rewrite them can disable Denyx. They remain
-write-blocked by the runtime's self-writable guard.
+that can rewrite them can disable Denyx. The self-writable guard
+refuses a policy that makes `./denyx.toml` writable, and
+`secure-defaults` denies the others (along with `.claude/`
+commands, agents, skills and hooks) even if an allow entry
+matches them.
 
 For Claude Code's auto-memory at `~/.claude/projects/<encoded>/memory/`
 (outside the project tree): if you want to allow it, add the
@@ -564,14 +573,16 @@ Tell the user:
   - **Sandbox layering.** With `--sandbox auto` you opted into
     Claude Code v2's own OS-level sandbox stanza (Seatbelt on
     macOS, bubblewrap on Linux/WSL2). That's Claude Code's
-    feature wrapping its own built-in tools. Denyx's primary
-    isolation is the wasm-sandboxed Starlark runner that ships
-    in `denyx-host` (default in v0.4.0+) — it contains the
-    Starlark interpreter, not the child processes a permitted
-    `subprocess.exec` spawns. The legacy
-    `[subprocess].sandbox = "bwrap"` field is deprecated in
-    v0.4.0; if you need kernel-level isolation of permitted
-    subprocesses, run inside a VM or container.
+    feature wrapping its own built-in tools. Denyx adds two layers
+    of its own: the wasm-sandboxed Starlark runner, which contains
+    the script interpreter, and on Linux an OS sandbox (Landlock
+    plus seccomp) around every command the policy lets the agent
+    run, on by default (`[subprocess].sandbox = "auto"`). If that
+    sandbox cannot be enforced, the command does not run. On macOS,
+    Windows and kernels without Landlock, commands run unconfined
+    with a warning; a confined command's network is unfiltered once
+    the policy grants any network. If you need more, run inside a
+    VM or container.
   - Audit logs default to `./.denyx/audit.jsonl` (set by
     host-config) and stay out of the policy's `write_allow`,
     so the agent can't tamper with the record. To rotate to
