@@ -1969,10 +1969,12 @@ impl Policy {
     /// `[environment]`, after resolution).
     ///
     /// Rules per argv element:
-    /// 1. Skip elements that don't look like paths (flags starting
-    ///    with `-`, `-` itself meaning stdin/stdout, bare names that
-    ///    don't exist as files at the policy root, anything not
-    ///    containing `/` and not starting with a path-like prefix).
+    /// 1. Skip elements that don't look like paths (`-` meaning
+    ///    stdin/stdout, bare names that don't exist as files at the
+    ///    policy root, anything not containing `/` and not starting
+    ///    with a path-like prefix). For an option, the attached value
+    ///    (`--out=/x`, `-o/x`) is checked instead, when it is written
+    ///    with explicit path syntax (`/`, `./`, `../`, `~`).
     /// 2. Resolve the argument against the policy root (handles
     ///    `~/`, `./`, absolute paths, and `..` normalization).
     /// 3. Reject if the resolved path matches `[filesystem].deny`.
@@ -2013,10 +2015,13 @@ impl Policy {
         if argv.is_empty() {
             return Ok(());
         }
-        for (i, arg) in argv.iter().enumerate() {
-            if !looks_like_path_arg(arg, &self.root) {
-                continue;
-            }
+        for (i, raw) in argv.iter().enumerate() {
+            let arg = match flag_attached_value(raw) {
+                Some(value) if has_explicit_path_syntax(value) => value,
+                Some(_) => continue,
+                None if looks_like_path_arg(raw, &self.root) => raw.as_str(),
+                None => continue,
+            };
             let resolved = resolve_path(&self.root, Path::new(arg));
             let what = if i == 0 { "command" } else { "argv element" };
             if self.fs_deny.is_match(&resolved) {
@@ -2054,6 +2059,32 @@ impl Policy {
     pub fn file_snapshot(&self) -> &PolicyFile {
         &self.file
     }
+}
+
+/// The value carried inside an option argument: after `=` in
+/// `--opt=value` / `-o=value`, or the remainder of a short option
+/// written together with its value (`-o/path`). `None` for anything
+/// that is not an option.
+fn flag_attached_value(arg: &str) -> Option<&str> {
+    let rest = arg.strip_prefix('-')?;
+    if let Some((_, value)) = arg.split_once('=') {
+        return Some(value);
+    }
+    if rest.starts_with('-') || rest.len() < 2 {
+        return Some("");
+    }
+    Some(&rest[1..])
+}
+
+/// A flag value is gated only when it is written as a path: option
+/// values such as `--format=%H/%s` contain `/` without naming a file.
+fn has_explicit_path_syntax(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+        || value == "~"
+        || value == ".."
 }
 
 /// Heuristic: does this argv element look like a path Denyx should
