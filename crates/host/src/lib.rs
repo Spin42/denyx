@@ -1031,6 +1031,51 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
         // says the child should see.
         let env_pairs = ctx.policy.subprocess_env(&argv[0]);
         let output = match ctx.policy.sandbox_mode() {
+            denyx_policy::SandboxMode::Auto => {
+                // Confine-by-default: strongest confinement the host
+                // supports, best-effort. On Linux with Landlock, the
+                // same as the Landlock arm (+ seccomp) but a child the
+                // kernel can't confine still runs; elsewhere, plain.
+                #[cfg(target_os = "linux")]
+                {
+                    if denyx_policy::landlock_available() {
+                        let (read_paths, write_paths) = ctx.policy.sandbox_fs_paths();
+                        let deny_network = !ctx.policy.any_network_capability_granted();
+                        let mut cmd = std::process::Command::new(&argv[0]);
+                        cmd.args(&argv[1..]);
+                        cmd.env_clear();
+                        for (name, value) in &env_pairs {
+                            cmd.env(name, value);
+                        }
+                        crate::landlock_sandbox::wire_pre_exec(
+                            &mut cmd,
+                            read_paths,
+                            write_paths,
+                            deny_network,
+                            true,
+                        );
+                        cmd.output()
+                    } else {
+                        let mut cmd = std::process::Command::new(&argv[0]);
+                        cmd.args(&argv[1..]);
+                        cmd.env_clear();
+                        for (name, value) in &env_pairs {
+                            cmd.env(name, value);
+                        }
+                        cmd.output()
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let mut cmd = std::process::Command::new(&argv[0]);
+                    cmd.args(&argv[1..]);
+                    cmd.env_clear();
+                    for (name, value) in &env_pairs {
+                        cmd.env(name, value);
+                    }
+                    cmd.output()
+                }
+            }
             denyx_policy::SandboxMode::None => {
                 // Default mode: spawn directly with filtered env.
                 let mut cmd = std::process::Command::new(&argv[0]);
@@ -1080,6 +1125,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         read_paths,
                         write_paths,
                         deny_network,
+                        false,
                     );
                     cmd.output()
                 }

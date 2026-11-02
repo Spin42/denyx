@@ -447,9 +447,19 @@ pub struct SubprocessPolicy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
+    /// Apply the strongest confinement this host supports: on Linux
+    /// with Landlock available, the same filesystem + TCP restriction
+    /// as `Landlock` plus the `seccomp` syscall denylist, installed
+    /// best-effort (a child the kernel can't confine still runs). On a
+    /// host without Landlock it is equivalent to `None`. The default,
+    /// so subprocesses are confined out of the box. Set `none` to opt
+    /// a trusted policy out (e.g. a dev policy whose build children
+    /// legitimately need broad toolchain access); set `landlock` or
+    /// `bwrap` to REQUIRE that backend and fail load if it is absent.
+    #[default]
+    Auto,
     /// Run the child as a regular process. Denyx's argv path-gate
     /// + deny lists are the defense. Cross-platform.
-    #[default]
     None,
     /// Wrap each call with bubblewrap. Linux-only. The child
     /// receives a constructed filesystem view; paths outside the
@@ -474,6 +484,7 @@ pub enum SandboxMode {
 impl SandboxMode {
     pub fn as_str(self) -> &'static str {
         match self {
+            SandboxMode::Auto => "auto",
             SandboxMode::None => "none",
             SandboxMode::Bwrap => "bwrap",
             SandboxMode::Landlock => "landlock",
@@ -866,6 +877,9 @@ impl Policy {
     /// the wrong direction. Refuse to load instead.
     pub fn guard_sandbox_available(&self) -> Result<()> {
         match self.sandbox_mode() {
+            // Auto never blocks policy load: it confines at runtime if
+            // the kernel can, else runs the child unconfined.
+            SandboxMode::Auto => Ok(()),
             SandboxMode::None => Ok(()),
             SandboxMode::Bwrap => {
                 if which_on_path("bwrap").is_none() {

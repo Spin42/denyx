@@ -127,16 +127,27 @@ pub(crate) fn wire_pre_exec(
     read_paths: Vec<PathBuf>,
     write_paths: Vec<PathBuf>,
     deny_network: bool,
+    best_effort: bool,
 ) {
     unsafe {
         cmd.pre_exec(move || {
-            apply(&read_paths, &write_paths, deny_network)
-                .map_err(|e| std::io::Error::other(format!("landlock: {e}")))?;
-            // Second kernel layer: a seccomp syscall denylist. Fatal to
-            // the spawn here (explicit sandbox mode); a confine-by-
-            // default path can make this best-effort instead.
-            crate::seccomp::apply().map_err(|e| std::io::Error::other(format!("seccomp: {e}")))?;
-            Ok(())
+            // Landlock first (it also sets no_new_privs), then the
+            // seccomp syscall denylist as a second layer.
+            let outcome = apply(&read_paths, &write_paths, deny_network)
+                .map_err(|e| std::io::Error::other(format!("landlock: {e}")))
+                .and_then(|()| {
+                    crate::seccomp::apply()
+                        .map_err(|e| std::io::Error::other(format!("seccomp: {e}")))
+                });
+            match outcome {
+                Ok(()) => Ok(()),
+                // best_effort is the confine-by-default (Auto) path: a
+                // child the kernel can't confine still runs, unconfined.
+                // Explicit sandbox = "landlock" passes false and fails
+                // the spawn instead.
+                Err(_) if best_effort => Ok(()),
+                Err(e) => Err(e),
+            }
         });
     }
 }

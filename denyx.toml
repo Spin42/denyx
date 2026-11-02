@@ -135,6 +135,14 @@ allow_vars = [
 # ── Subprocess ───────────────────────────────────────────────────
 
 [subprocess]
+# Opt out of confine-by-default (the `auto` sandbox). This dev policy
+# runs the Rust/Python/Bash toolchain as subprocesses whose children
+# (rustc, the cargo registry, git) legitimately read far outside the
+# project tree (~/.cargo, ~/.rustup, system config). Landlock+seccomp
+# confinement would break those builds, so this trusted policy accepts
+# an unconfined subprocess boundary. Non-dev policies should not set
+# this.
+sandbox = "none"
 allow_commands = [
     # Rust toolchain
     "cargo",

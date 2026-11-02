@@ -1600,6 +1600,49 @@ impl WasmRunner {
                     //    isolation was silently absent on the wasm path.
                     let env_pairs = subprocess_policy.subprocess_env(&argv[0]);
                     let output = match subprocess_policy.sandbox_mode() {
+                        denyx_policy::SandboxMode::Auto => {
+                            #[cfg(target_os = "linux")]
+                            {
+                                if denyx_policy::landlock_available() {
+                                    let (read_paths, write_paths) =
+                                        subprocess_policy.sandbox_fs_paths();
+                                    let deny_network =
+                                        !subprocess_policy.any_network_capability_granted();
+                                    let mut cmd = std::process::Command::new(&argv[0]);
+                                    cmd.args(&argv[1..]);
+                                    cmd.env_clear();
+                                    for (name, value) in &env_pairs {
+                                        cmd.env(name, value);
+                                    }
+                                    crate::landlock_sandbox::wire_pre_exec(
+                                        &mut cmd,
+                                        read_paths,
+                                        write_paths,
+                                        deny_network,
+                                        true,
+                                    );
+                                    cmd.output()
+                                } else {
+                                    let mut cmd = std::process::Command::new(&argv[0]);
+                                    cmd.args(&argv[1..]);
+                                    cmd.env_clear();
+                                    for (name, value) in &env_pairs {
+                                        cmd.env(name, value);
+                                    }
+                                    cmd.output()
+                                }
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                let mut cmd = std::process::Command::new(&argv[0]);
+                                cmd.args(&argv[1..]);
+                                cmd.env_clear();
+                                for (name, value) in &env_pairs {
+                                    cmd.env(name, value);
+                                }
+                                cmd.output()
+                            }
+                        }
                         denyx_policy::SandboxMode::None => {
                             let mut cmd = std::process::Command::new(&argv[0]);
                             cmd.args(&argv[1..]);
@@ -1634,6 +1677,7 @@ impl WasmRunner {
                                     read_paths,
                                     write_paths,
                                     deny_network,
+                                    false,
                                 );
                                 cmd.output()
                             }
