@@ -166,6 +166,23 @@ fn emit_scrubbed(
     crate::emit_with_taint_scrub(audit, &caller.data().taint_registry, event);
 }
 
+/// Error text is an output boundary like `print`: host denial messages
+/// embed raw call arguments, so a tainted argument would otherwise
+/// leave the runtime verbatim. Mirrors the native runner's scrub of
+/// every error it returns.
+fn scrub_error(err: DenyxError, taints: &[String]) -> DenyxError {
+    let r = |m: String| crate::taint::redact(&m, taints);
+    match err {
+        DenyxError::Starlark(m) => DenyxError::Starlark(r(m)),
+        DenyxError::Policy(m) => DenyxError::Policy(r(m)),
+        DenyxError::Verifier(m) => DenyxError::Verifier(r(m)),
+        DenyxError::ConfirmDenied(m) => DenyxError::ConfirmDenied(r(m)),
+        DenyxError::RuntimeLimit(m) => DenyxError::RuntimeLimit(r(m)),
+        DenyxError::Other(m) => DenyxError::Other(r(m)),
+        io @ DenyxError::Io(_) => io,
+    }
+}
+
 /// Wasm-path mirror of `HostCtx::check_call_limits` (native runner,
 /// `crates/host/src/lib.rs`). Called at the top of EVERY effecting
 /// import (read and write alike — a runaway loop calling an
@@ -1728,6 +1745,14 @@ impl WasmRunner {
                             return Err(wasmtime::Error::msg("subprocess.exec: spawn / io error"));
                         }
                     };
+                    // Both streams of a local-only command are local-only,
+                    // and must be tainted before either can reach the
+                    // non-zero-exit error or its audit event.
+                    if subprocess_policy.subprocess_is_local_only(&argv[0]) {
+                        let registry = &caller.data().taint_registry;
+                        registry.add(String::from_utf8_lossy(&output.stdout).as_ref());
+                        registry.add(String::from_utf8_lossy(&output.stderr).as_ref());
+                    }
                     if !output.status.success() {
                         let code = output
                             .status
@@ -1773,11 +1798,6 @@ impl WasmRunner {
                             None,
                         ),
                     );
-
-                    if subprocess_policy.subprocess_is_local_only(&argv[0]) {
-                        let stdout_str = String::from_utf8_lossy(&output.stdout);
-                        caller.data().taint_registry.add(stdout_str.as_ref());
-                    }
 
                     let stdout_bytes = output.stdout;
                     if stdout_bytes.is_empty() {
@@ -2923,7 +2943,8 @@ impl WasmRunner {
             // returning a wasmtime::Error. If so, surface the typed
             // DenyxError variant first.
             if let Some(captured) = store.data_mut().captured_error.take() {
-                return Err(captured);
+                let taints = store.data().taint_registry.redaction_snapshot();
+                return Err(scrub_error(captured, &taints));
             }
             // Fuel exhaustion is the gap-closing case from the
             // migration plan: a runaway Starlark loop traps cleanly
@@ -2937,7 +2958,11 @@ impl WasmRunner {
                     "wasm fuel exhausted after {DEFAULT_WASM_FUEL} units"
                 )));
             }
-            return Err(DenyxError::Other(format!("wasm trap: {wasm_err}")));
+            let taints = store.data().taint_registry.redaction_snapshot();
+            return Err(DenyxError::Other(crate::taint::redact(
+                &format!("wasm trap: {wasm_err}"),
+                &taints,
+            )));
         }
 
         // Collect the interpreter's response from the stdout pipe and
@@ -2947,9 +2972,10 @@ impl WasmRunner {
             .map_err(|e| DenyxError::Other(format!("wasm stdout not utf8: {e}")))?;
         let response: InterpreterResponse =
             serde_json::from_str(stdout_str.trim()).map_err(|e| {
-                DenyxError::Other(format!(
-                    "parse interpreter response: {e}; raw: {:?}",
-                    stdout_str
+                let taints = store.data().taint_registry.redaction_snapshot();
+                DenyxError::Other(crate::taint::redact(
+                    &format!("parse interpreter response: {e}; raw: {stdout_str:?}"),
+                    &taints,
                 ))
             })?;
 
