@@ -23,8 +23,6 @@ fn assert_capability(r: Result<(), VerifierRejection>, expected: &str) {
 fn empty_policy() -> Policy {
     // Policy that allows nothing: any capability use should be flagged.
     let toml = r#"
-[functions]
-allow = []
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     Policy::from_file(file, PathBuf::from("/tmp")).unwrap()

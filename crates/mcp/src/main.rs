@@ -277,7 +277,7 @@ fn serve_main(cli_in: Cli) -> anyhow::Result<()> {
     let policy = if let Some(url) = cli.policy_url.as_deref() {
         fetch_policy_from_url(url, cli.auth_token.as_deref())?
     } else if let Some(path) = cli.policy.as_deref() {
-        Policy::load(path).map_err(|e| anyhow::anyhow!("load policy {path:?}: {e}"))?
+        Policy::load(path).map_err(|e| anyhow::anyhow!("load policy {path:?}: {e:#}"))?
     } else {
         eprintln!(
             "denyx-mcp: no --policy or --policy-url provided; using built-in \
@@ -630,7 +630,7 @@ fn fetch_policy_from_url(url: &str, auth_token: Option<&str>) -> anyhow::Result<
         );
     }
     let file = PolicyFile::from_toml_str(&body)
-        .map_err(|e| anyhow::anyhow!("policy fetch from {url}: TOML parse failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("policy fetch from {url}: TOML parse failed: {e:#}"))?
         .resolve_inheritance()
         .map_err(|e| {
             anyhow::anyhow!("policy fetch from {url}: inheritance resolution failed: {e}")

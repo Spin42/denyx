@@ -109,6 +109,7 @@ pub enum PolicyError {
 /// retained so the runtime can re-read on every call (defeats in-memory
 /// tampering).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyFile {
     /// Optional schema version. Consumers that pin to a major version
     /// should reject files whose `version` mismatches. Absent = "I'll
@@ -163,6 +164,7 @@ pub struct PolicyFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FilesystemPolicy {
     #[serde(default)]
     pub read_allow: Vec<String>,
@@ -186,6 +188,7 @@ pub struct FilesystemPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub http_get_allow: Vec<String>,
@@ -234,6 +237,7 @@ pub struct NetworkPolicy {
 
 /// Resource caps that apply to the Starlark evaluator itself.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimePolicy {
     /// Wall-time cap, in seconds. Checked at every effecting
     /// capability call (`fs.read`, `net.http_*`, `subprocess.exec`,
@@ -319,6 +323,7 @@ pub struct RuntimePolicy {
 /// description   = "Privacy-respecting open-source meta-search."
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ToolRecord {
     /// Denyx capabilities the tool requires. The tool is permitted iff
     /// every entry here has a populated resource section.
@@ -348,6 +353,7 @@ impl ToolRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct EnvironmentPolicy {
     /// Exact env var names the script may read. Default-deny.
     #[serde(default)]
@@ -381,6 +387,7 @@ pub struct EnvironmentPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SubprocessPolicy {
     /// Commands the script may exec, matched against the basename of
     /// argv[0]. Empty means "no commands at all", even if the
@@ -494,6 +501,17 @@ impl SandboxMode {
 
 impl PolicyFile {
     pub fn from_toml_str(s: &str) -> Result<Self> {
+        if let Ok(table) = s.parse::<toml::Table>() {
+            if table.contains_key("functions") {
+                anyhow::bail!(
+                    "parse policy TOML: the [functions] block is no longer supported and \
+                     restricts nothing; capabilities derive from the resource sections \
+                     ([filesystem], [network], [environment], [subprocess]). Remove \
+                     [functions] and leave empty any resource list whose capability \
+                     should stay denied."
+                );
+            }
+        }
         toml::from_str(s).context("parse policy TOML")
     }
 

@@ -50,8 +50,6 @@ fn asi01_prompt_injection_style_script_is_denied_at_runtime_gate() {
 [filesystem]
 read_allow = ["/tmp/safe/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     // The script is shaped like a prompt-injection payload: heavy
@@ -91,8 +89,6 @@ fn asi02_direct_exfil_via_fs_read_is_denied() {
 [filesystem]
 read_allow = ["/tmp/safe/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"x = fs.read("/etc/passwd")"#;
@@ -112,8 +108,6 @@ allow_commands = ["git"]
 [subprocess.deny_args]
 git = ["push --force", "reset --hard", "filter-branch"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"subprocess.exec(["git", "push", "--force"])"#;
@@ -144,8 +138,6 @@ fn asi02_local_only_secret_refused_pre_exec_when_print_present() {
 [filesystem]
 local_only_read = ["{path}"]
 
-[functions]
-allow = ["fs.read"]
 "#,
         path = secret_path.to_string_lossy().replace('\\', "/")
     );
@@ -196,8 +188,6 @@ fn asi03_reserved_env_var_unreadable_even_when_explicitly_allowed() {
 [environment]
 allow_vars = ["DENYX_AUTH_TOKEN", "PATH"]
 
-[functions]
-allow = ["env.read"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"x = env.read("DENYX_AUTH_TOKEN")"#;
@@ -217,8 +207,6 @@ fn asi03_denylisted_env_var_unreadable_even_when_listed_in_allow() {
 allow_vars = ["AWS_SECRET_ACCESS_KEY", "PATH"]
 deny_vars  = ["AWS_SECRET_ACCESS_KEY"]
 
-[functions]
-allow = ["env.read"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"x = env.read("AWS_SECRET_ACCESS_KEY")"#;
@@ -257,8 +245,6 @@ fn asi05_unlisted_command_denied() {
 [subprocess]
 allow_commands = ["echo"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"subprocess.exec(["bash", "-c", "id"])"#;
@@ -282,8 +268,6 @@ read_allow = ["/tmp/safe/**"]
 [subprocess]
 allow_commands = ["cat"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"subprocess.exec(["cat", "../../etc/passwd"])"#;
@@ -338,8 +322,6 @@ requires_approval = ["fs.delete"]
 write_allow  = ["/tmp/denyx_owasp_t/**"]
 delete_allow = ["/tmp/denyx_owasp_t/**"]
 
-[functions]
-allow = ["fs.write", "fs.delete"]
 "#;
     std::fs::create_dir_all("/tmp/denyx_owasp_t").unwrap();
     let probe = "/tmp/denyx_owasp_t/probe-asi09.txt";
@@ -397,8 +379,6 @@ write_allow = ["/tmp/safe/**"]
 [subprocess]
 allow_commands = ["echo"]
 
-[functions]
-allow = ["fs.read", "fs.write", "subprocess.exec"]
 "#;
     // Each of these would fire the gate independently. We test the
     // first one here (the script halts on the first denial); the
@@ -428,8 +408,6 @@ fn asi10_rogue_script_audit_records_attempts() {
 [filesystem]
 read_allow = ["/tmp/safe/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let log_path =
         std::env::temp_dir().join(format!("denyx_owasp_audit_{}.jsonl", std::process::id()));

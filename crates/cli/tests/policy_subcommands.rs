@@ -90,10 +90,28 @@ fn validate_fails_on_malformed_toml() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A misspelled key fails load, and the operator is told which key.
+#[test]
+fn misspelled_key_is_named_in_the_error() {
+    let path = write_policy("typo", "[filesystem]\ndenny = [\"secret/**\"]\n");
+    for sub in ["validate", "show"] {
+        let out = Command::new(BIN)
+            .args(["policy", sub])
+            .arg(&path)
+            .output()
+            .expect("spawn denyx");
+        assert!(!out.status.success(), "{sub}: typo accepted");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("denny"), "{sub}: key not named: {stderr}");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn show_lists_effective_capabilities_and_populated_sections() {
     let body = r#"
 inherits = "secure-defaults"
+requires_approval = ["fs.delete"]
 
 [filesystem]
 read_allow  = ["src/**"]
@@ -108,8 +126,6 @@ git = ["push --force"]
 [tools.WebSearch]
 capabilities = ["net.http_get"]
 backend_url  = "https://api.duckduckgo.com/?format=json&q="
-
-requires_approval = ["fs.delete"]
 
 [runtime]
 max_seconds = 30

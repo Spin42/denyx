@@ -41,8 +41,6 @@ local_only_read = ["{path}"]
 [environment]
 allow_vars = ["{path_holder_var}"]
 
-[functions]
-allow = ["fs.read", "env.read"]
 "#,
         path = path_lit
     );
@@ -95,8 +93,6 @@ fn env_local_only_var_redacts_in_printed_output() {
 local_only_vars = ["{var}"]
 allow_vars = ["{name_holder_var}"]
 
-[functions]
-allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
@@ -141,8 +137,6 @@ fn env_local_only_var_redacts_after_string_concat() {
 local_only_vars = ["{var}"]
 allow_vars = ["{name_holder_var}"]
 
-[functions]
-allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());
@@ -237,8 +231,6 @@ fn subprocess_local_only_command_redacts_stdout() {
 [subprocess]
 local_only_commands = ["printf"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#
     .to_string();
     let runner = runner_for(&toml, std::env::temp_dir());
@@ -272,8 +264,6 @@ fn plain_allow_does_not_redact() {
 [environment]
 allow_vars = ["{var}"]
 
-[functions]
-allow = ["env.read"]
 "#
     );
     let runner = runner_for(&toml, std::env::temp_dir());

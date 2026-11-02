@@ -26,10 +26,6 @@ http_get_allow = ["api.github.com", "*.npmjs.org"]
 http_post_allow = []
 deny_hosts = ["evil.example.com"]
 deny_ips = ["169.254.169.254"]
-
-[functions]
-allow = ["fs.read", "net.http_get"]
-deny = []
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     Policy::from_file(file, PathBuf::from("/work")).unwrap()
@@ -88,8 +84,6 @@ http_put_allow    = ["api.example.com"]
 http_patch_allow  = ["api.example.com"]
 http_delete_allow = ["api.example.com"]
 
-[functions]
-allow = ["net.http_get", "net.http_post", "net.http_put", "net.http_patch", "net.http_delete"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
@@ -114,8 +108,6 @@ deny_ips = [
     "::1",            # literal IPv6
 ]
 
-[functions]
-allow = ["net.http_get"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     Policy::from_file(file, PathBuf::from("/work")).unwrap()
@@ -188,8 +180,6 @@ deny_ips = [
     "fc00::/7",
 ]
 
-[functions]
-allow = ["net.http_get"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
@@ -240,8 +230,6 @@ deny_vars = ["AWS_SECRET_ACCESS_KEY"]
 allow_commands = ["git", "/usr/local/bin/npm"]
 deny_commands = ["rm", "dd", "shred"]
 
-[functions]
-allow = ["env.read", "subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     Policy::from_file(file, PathBuf::from("/work")).unwrap()
@@ -325,8 +313,6 @@ git = ["push --force", "push -f", "reset --hard"]
 rails = ["db:drop", "db:reset"]
 bundle = ["add", "publish"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     Policy::from_file(file, PathBuf::from("/work")).unwrap()
@@ -444,8 +430,6 @@ git = ["push", "reset --hard"]
 cargo = ["publish"]
 gh = ["release create"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     Policy::from_file(file, PathBuf::from("/work")).unwrap()
@@ -563,8 +547,6 @@ inherits = "secure-defaults"
 allow_commands = ["git"]
 [subprocess.requires_approval_args]
 git = ["push", "rebase -i"]
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(toml).unwrap();
     let p = Policy::from_file(file, PathBuf::from("/work")).unwrap();
@@ -587,8 +569,6 @@ inherits = "secure-defaults"
 read_allow = ["src/**"]
 write_allow = ["src/**"]
 
-[functions]
-allow = ["fs.read", "fs.write"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -621,8 +601,6 @@ inherits = "secure-defaults"
 [filesystem]
 read_allow = ["/proc/**", "/sys/**", "/dev/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -645,8 +623,6 @@ inherits = "secure-defaults"
 read_allow = ["src/**"]
 deny = ["**/Gemfile.lock"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -666,8 +642,6 @@ inherits = "secure-defaults"
 read_allow = ["~/.aws/**"]
 deny = ["!~/.aws/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -686,8 +660,6 @@ inherits = "secure-defaults"
 allow_commands = ["kubectl"]
 deny_commands = ["!kubectl"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -707,8 +679,6 @@ inherits = "secure-defaults"
 http_get_allow = ["localhost"]
 deny_ips = ["!127.0.0.0/8"]
 
-[functions]
-allow = ["net.http_get"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -734,8 +704,6 @@ inherits = "secure-defaults"
 read_allow = ["src/**"]
 deny = ["!~/never-was-in-the-preset/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -750,8 +718,6 @@ fn override_can_remove_preset_confirm() {
 inherits = "secure-defaults"
 requires_approval = ["!subprocess.exec"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let file = PolicyFile::from_toml_str(user)
         .unwrap()
@@ -1133,8 +1099,6 @@ fn rejects_policy_that_allows_writing_to_itself_via_broad_glob() {
 read_allow = ["**"]
 write_allow = ["**"]
 
-[functions]
-allow = ["fs.read", "fs.write"]
 "#;
     std::fs::write(&path, body).unwrap();
     let res = Policy::load(&path);
@@ -1157,8 +1121,6 @@ fn rejects_policy_that_allows_writing_to_itself_via_exact_name() {
 read_allow = ["denyx.toml"]
 write_allow = ["denyx.toml"]
 
-[functions]
-allow = ["fs.read", "fs.write"]
 "#;
     std::fs::write(&path, body).unwrap();
     let res = Policy::load(&path);
@@ -1177,8 +1139,6 @@ fn rejects_policy_that_allows_deleting_itself() {
 [filesystem]
 delete_allow = ["**"]
 
-[functions]
-allow = ["fs.delete"]
 "#;
     std::fs::write(&path, body).unwrap();
     let res = Policy::load(&path);
@@ -1207,8 +1167,6 @@ read_allow = ["**"]
 write_allow = ["**"]
 deny = ["{abs}"]
 
-[functions]
-allow = ["fs.read", "fs.write"]
 "#
     );
     std::fs::write(&path, body).unwrap();
@@ -1228,8 +1186,6 @@ fn unrelated_write_allow_passes_the_guard() {
 read_allow = ["**"]
 write_allow = ["src/**", "/tmp/build/**"]
 
-[functions]
-allow = ["fs.read", "fs.write"]
 "#;
     let path = write_temp_policy("denyx.toml", body);
     let res = Policy::load(&path);
@@ -1250,8 +1206,6 @@ fn mixes_relative_and_absolute_patterns_in_one_policy() {
 read_allow  = ["src/**", "/tmp/**", "~/.cache/denyx/**"]
 write_allow = ["src/**", "/tmp/denyx_demo/**"]
 
-[functions]
-allow = ["fs.read", "fs.write"]
 "#;
     std::fs::write(&path, body).unwrap();
     let policy = Policy::load(&path).unwrap();
@@ -1294,8 +1248,6 @@ fn read_allow_matching_policy_file_is_fine() {
 [filesystem]
 read_allow = ["**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let path = write_temp_policy("denyx.toml", body);
     let res = Policy::load(&path);

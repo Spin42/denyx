@@ -24,8 +24,6 @@ fn allowed_read_succeeds() {
 [filesystem]
 read_allow = ["/tmp/**", "/var/tmp/**"]
 
-[functions]
-allow = ["fs.read"]
 "#;
     let runner = runner_for(toml, tmp);
     let path_lit = f.to_string_lossy().replace('\\', "/");
@@ -44,8 +42,6 @@ fn write_outside_allow_is_denied() {
 write_allow = ["/tmp/**"]
 deny = ["~/.aws/**"]
 
-[functions]
-allow = ["fs.write"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/work"));
     let src = r#"fs.write("/etc/passwd", "x")"#;
@@ -59,8 +55,6 @@ allow = ["fs.write"]
 #[test]
 fn function_not_in_allowlist_rejected_pre_execution() {
     let toml = r#"
-[functions]
-allow = ["fs.read"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"subprocess.exec(["echo", "hi"])"#;
@@ -80,8 +74,6 @@ allow_commands = ["git"]
 [subprocess.deny_args]
 git = ["push --force"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"subprocess.exec(["git", "push", "--force", "origin", "main"])"#;
@@ -103,8 +95,6 @@ fn subprocess_command_allowlist_blocks_unknown_command() {
 [subprocess]
 allow_commands = ["git"]
 
-[functions]
-allow = ["subprocess.exec"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"subprocess.exec(["rm", "-rf", "/tmp"])"#;
@@ -125,8 +115,6 @@ fn dns_resolves_hostname_through_deny_cidr() {
 http_get_allow = ["localhost"]
 deny_ips = ["127.0.0.0/8", "::1/128"]
 
-[functions]
-allow = ["net.http_get"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"net.http_get("http://localhost:1/")"#;
@@ -149,8 +137,6 @@ fn env_read_allowlist() {
 allow_vars = ["PATH"]
 deny_vars = ["AWS_SECRET_ACCESS_KEY"]
 
-[functions]
-allow = ["env.read"]
 "#;
     let runner = runner_for(toml, PathBuf::from("/tmp"));
     let src = r#"

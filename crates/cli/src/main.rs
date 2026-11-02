@@ -573,7 +573,7 @@ fn host_config_cmd(args: HostConfigArgs) -> Result<(), CliError> {
     }
 
     let policy = Policy::load(&args.policy)
-        .map_err(|e| CliError::Other(format!("load policy {:?}: {e}", args.policy)))?;
+        .map_err(|e| CliError::Other(format!("load policy {:?}: {e:#}", args.policy)))?;
 
     let opts = Opts {
         platform: args.platform.as_platform(),
@@ -1049,7 +1049,7 @@ fn audit_verify(args: AuditTargetArgs) -> Result<(), CliError> {
 
 fn policy_validate(args: PolicyTargetArgs) -> Result<(), CliError> {
     let policy = Policy::load(&args.policy)
-        .map_err(|e| CliError::Other(format!("validation failed: {e}")))?;
+        .map_err(|e| CliError::Other(format!("validation failed: {e:#}")))?;
     let n = policy.effective_functions().len();
     println!(
         "OK: {} parses, resolves, passes self-writable guard. {n} capability(ies) enabled.",
@@ -1060,7 +1060,7 @@ fn policy_validate(args: PolicyTargetArgs) -> Result<(), CliError> {
 
 fn policy_show(args: PolicyTargetArgs) -> Result<(), CliError> {
     let policy = Policy::load(&args.policy)
-        .map_err(|e| CliError::Other(format!("load policy {:?}: {e}", args.policy)))?;
+        .map_err(|e| CliError::Other(format!("load policy {:?}: {e:#}", args.policy)))?;
     let file = policy.file_snapshot();
 
     println!("# policy: {}", args.policy.display());
@@ -1213,9 +1213,8 @@ fn init_cmd(args: InitArgs) -> Result<(), CliError> {
 
 fn run(args: RunArgs) -> Result<(), CliError> {
     let policy = match args.policy.as_deref() {
-        Some(path) => {
-            Policy::load(path).map_err(|e| CliError::Other(format!("load policy {path:?}: {e}")))?
-        }
+        Some(path) => Policy::load(path)
+            .map_err(|e| CliError::Other(format!("load policy {path:?}: {e:#}")))?,
         None => {
             print_no_policy_banner();
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
