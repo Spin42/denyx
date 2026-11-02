@@ -245,7 +245,7 @@ impl ConsistencyIssue {
     pub fn summary(&self) -> String {
         match self {
             Self::UnsandboxedCodeRunner { commands } => format!(
-                "[subprocess].allow_commands includes {n} code-runner{plural} ({list}) while sandbox = 'none' and a writable tree is granted; each runs a program read from a file the agent can write, as an ungated host process, so [subprocess].deny_args cannot contain what it executes",
+                "[subprocess].allow_commands includes {n} code-runner{plural} ({list}) while subprocesses run without OS confinement; each can run arbitrary code as an ungated host process, so [subprocess].deny_args cannot contain what it executes",
                 n = commands.len(),
                 plural = if commands.len() == 1 { "" } else { "s" },
                 list = commands.join(", "),
@@ -380,7 +380,7 @@ impl ConsistencyIssue {
     pub fn fix(&self) -> String {
         match self {
             Self::UnsandboxedCodeRunner { .. } =>
-                "These commands run a program read from a file, not from gated argv, so blocking -c/-e in [subprocess].deny_args only moves the code into a file; it does not contain it. Options: (1) set [subprocess].sandbox = 'landlock' (Linux 5.13+) so the child is confined to the policy's filesystem (and, on Landlock ABI v4+, TCP) view even when it ignores the argv gate; (2) drop the interpreter/build-driver from [subprocess].allow_commands if the project does not truly need it; (3) accept the trade-off and treat subprocess as trusted, running denyx inside a VM or container. Landlock constructs no filesystem view and (below ABI v4) no network isolation, so a full jail still needs bwrap or a VM.".to_string(),
+                "These commands execute code that never passes the argv gate: inline forms (python3 -m, make --eval, git -c alias.x='!cmd') need no file, and any file the agent can write becomes a program. Blocking -c/-e in [subprocess].deny_args narrows the inline forms but does not contain them. Options: (1) set [subprocess].sandbox = 'landlock' (Linux 5.13+) so the child is confined to the policy's filesystem (and, on Landlock ABI v4+, TCP) view even when it ignores the argv gate; (2) drop the interpreter/build-driver from [subprocess].allow_commands if the project does not truly need it; (3) accept the trade-off and treat subprocess as trusted, running denyx inside a VM or container. Landlock constructs no filesystem view and (below ABI v4) no network isolation, so a full jail still needs bwrap or a VM.".to_string(),
             Self::ToolUrlNotInNetworkAllow { host, method, .. } => format!(
                 "Add the host to [network].http_{}_allow:\n  http_{}_allow = [\"{}\"]\nOr remove the [tools.X] entry if the tool isn't actually used.",
                 method.to_lowercase(),
@@ -520,17 +520,19 @@ const CODE_RUNNER_COMMANDS: &[&str] = &[
     "deno", "bun", "lua", "luajit", "tclsh", "expect", "Rscript",
     // build drivers that shell out to run recipes
     "make", "cmake", "ninja", "gradle", "mvn", "rake", "just",
+    // version control with shell-executing aliases and core.* hooks
+    "git",
 ];
 
 /// Flag a policy that allows a code-runner (see `CODE_RUNNER_COMMANDS`)
-/// while `[subprocess].sandbox = "none"` and a writable tree is
-/// granted. Such a command is an ungated arbitrary-code primitive: it
-/// reads its program from a file the agent can author, then runs as a
-/// normal host process outside every filesystem/network gate, so
-/// `deny_args` blocking `-c`/`-e` buys nothing (the code just moves
-/// into a file). Emitted as one aggregated issue. Heuristic: keys on
-/// `allow_commands` membership, honouring `!` negations, not on whether
-/// the command is also still denied.
+/// while the child runs without OS confinement (`sandbox = "none"`, or
+/// `"auto"` on a host without Landlock). Such a command is an ungated
+/// arbitrary-code primitive outside every filesystem/network gate:
+/// inline forms (`python3 -m`, `make --eval`, `git -c alias.x=!cmd`)
+/// need no file at all, and a writable tree adds program files on top,
+/// so `deny_args` cannot contain it. Emitted as one aggregated issue.
+/// Heuristic: keys on `allow_commands` membership, honouring `!`
+/// negations, not on whether the command is also still denied.
 fn check_unsandboxed_code_runners(file: &denyx_policy::PolicyFile) -> Vec<ConsistencyIssue> {
     // Without an OS sandbox only: landlock/bwrap confine the child to
     // the policy's view even if it ignores the argv gate.
@@ -540,12 +542,6 @@ fn check_unsandboxed_code_runners(file: &denyx_policy::PolicyFile) -> Vec<Consis
         denyx_policy::SandboxMode::Bwrap | denyx_policy::SandboxMode::Landlock => true,
     };
     if confined {
-        return Vec::new();
-    }
-    // Only when the agent can author the program the runner executes.
-    // With no writable tree it can still run scripts already present
-    // but cannot introduce new code: a smaller surface, not warned.
-    if file.filesystem.write_allow.is_empty() {
         return Vec::new();
     }
     let mut allowed: BTreeSet<String> = BTreeSet::new();
@@ -1155,23 +1151,28 @@ deny_commands = ['!python3']
             ConsistencyIssue::UnsandboxedCodeRunner { commands } => {
                 assert!(commands.contains(&"python3".to_string()));
                 assert!(commands.contains(&"make".to_string()));
-                assert!(!commands.contains(&"git".to_string()));
+                // `git -c alias.x='!cmd'` and `core.*` hooks run shell code.
+                assert!(commands.contains(&"git".to_string()));
             }
             _ => panic!("expected UnsandboxedCodeRunner"),
         }
     }
 
     #[test]
-    fn unsandboxed_code_runner_silent_without_writable_tree() {
+    fn unsandboxed_code_runner_flagged_without_writable_tree() {
+        // Inline forms (`python3 -m`, `make --eval`, `git -c alias.x=!`)
+        // run code without any file, so no writable tree is needed.
         let file = coderunner_policy(
             r#"
 inherits = 'secure-defaults'
 name = 't'
 [subprocess]
+sandbox = 'none'
 allow_commands = ['python3']
+deny_commands = ['!python3']
 "#,
         );
-        assert!(check_unsandboxed_code_runners(&file).is_empty());
+        assert_eq!(check_unsandboxed_code_runners(&file).len(), 1);
     }
 
     #[test]
