@@ -1332,6 +1332,16 @@ impl Policy {
                 .unwrap_or(IpAddr::V6(v6)),
             v4 => v4,
         };
+        // Connecting to the unspecified address reaches the local host
+        // on Linux, so it is loopback under another name. No policy
+        // has a legitimate reason to allow it.
+        if ip.is_unspecified() {
+            return Err(PolicyError::HostDenied {
+                action,
+                host: format!("{host_label} ({ip})"),
+                reason: format!("resolved IP {ip} is the unspecified address"),
+            });
+        }
         for net in &self.net_deny_ips {
             if net.contains(&ip) {
                 return Err(PolicyError::HostDenied {
@@ -2051,7 +2061,8 @@ impl HostMatcher {
     fn build(patterns: &[String]) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
         for raw in patterns {
-            let glob = Glob::new(raw).with_context(|| format!("policy host pattern {raw:?}"))?;
+            let glob = Glob::new(&canonical_host(raw))
+                .with_context(|| format!("policy host pattern {raw:?}"))?;
             builder.add(glob);
         }
         Ok(Self {
@@ -2059,8 +2070,16 @@ impl HostMatcher {
         })
     }
     fn is_match(&self, host: &str) -> bool {
-        self.set.is_match(host)
+        self.set.is_match(canonical_host(host))
     }
+}
+
+/// DNS names are case-insensitive and `example.com.` (the fully
+/// qualified form with the root label) names the same host as
+/// `example.com`. Patterns and hosts are both reduced to this form so a
+/// spelling difference cannot slip past a deny or local-only entry.
+fn canonical_host(host: &str) -> String {
+    host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
 }
 
 /// Translate a user-facing path pattern into an absolute globset pattern.
