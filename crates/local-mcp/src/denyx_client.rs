@@ -45,19 +45,13 @@ impl DenyxMcpClient {
     /// `audit_log` is optional — if `None`, the child server runs
     /// without an audit log path (events go to its default location
     /// per its own CLI defaults).
-    pub fn spawn(mcp_bin: &Path, policy: &Path, audit_log: Option<&Path>) -> Result<Self> {
-        let mut cmd = Command::new(mcp_bin);
-        cmd.arg("--policy")
-            .arg(policy)
-            .arg("--confirm-mode")
-            .arg("auto-allow");
-        if let Some(p) = audit_log {
-            cmd.arg("--audit-log").arg(p);
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+    pub fn spawn(
+        mcp_bin: &Path,
+        policy: &Path,
+        audit_log: Option<&Path>,
+        confirm: ConfirmMode,
+    ) -> Result<Self> {
+        let mut child = mcp_command(mcp_bin, policy, audit_log, confirm)
             .spawn()
             .with_context(|| format!("spawn denyx-mcp at {mcp_bin:?}"))?;
 
@@ -175,6 +169,47 @@ impl Inner {
 /// `target/release/denyx-mcp` relative to the workspace root, which
 /// works when built from source. For `cargo install`-d workflows the
 /// operator should pass the absolute path on PATH.
+/// How the child `denyx-mcp` answers the policy's `requires_approval`
+/// gates. No human is in the local-executor loop, so the safe default
+/// refuses them; auto-allow is an explicit operator choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ConfirmMode {
+    #[default]
+    AutoDeny,
+    AutoAllow,
+}
+
+impl ConfirmMode {
+    fn as_flag(self) -> &'static str {
+        match self {
+            ConfirmMode::AutoDeny => "auto-deny",
+            ConfirmMode::AutoAllow => "auto-allow",
+        }
+    }
+}
+
+/// The child's stderr is inherited: without `--audit-log` it is the
+/// audit sink, and it carries denyx-mcp's own warnings.
+fn mcp_command(
+    mcp_bin: &Path,
+    policy: &Path,
+    audit_log: Option<&Path>,
+    confirm: ConfirmMode,
+) -> Command {
+    let mut cmd = Command::new(mcp_bin);
+    cmd.arg("--policy")
+        .arg(policy)
+        .arg("--confirm-mode")
+        .arg(confirm.as_flag());
+    if let Some(p) = audit_log {
+        cmd.arg("--audit-log").arg(p);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    cmd
+}
+
 pub fn default_mcp_bin_guess(repo_root: &Path) -> PathBuf {
     repo_root.join("target").join("release").join("denyx-mcp")
 }
@@ -182,6 +217,45 @@ pub fn default_mcp_bin_guess(repo_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn confirm_mode_of(cmd: &Command) -> String {
+        let a = args(cmd);
+        let i = a.iter().position(|x| x == "--confirm-mode").unwrap();
+        a[i + 1].clone()
+    }
+
+    /// AEG-PEN-R5-024: the policy's requires_approval must not be
+    /// silently auto-approved by the local executor.
+    #[test]
+    fn child_denies_approval_required_calls_by_default() {
+        let cmd = mcp_command(
+            Path::new("denyx-mcp"),
+            Path::new("p.toml"),
+            None,
+            ConfirmMode::default(),
+        );
+        assert_eq!(confirm_mode_of(&cmd), "auto-deny");
+    }
+
+    #[test]
+    fn auto_allow_only_when_requested() {
+        let cmd = mcp_command(
+            Path::new("denyx-mcp"),
+            Path::new("p.toml"),
+            Some(Path::new("audit.jsonl")),
+            ConfirmMode::AutoAllow,
+        );
+        assert_eq!(confirm_mode_of(&cmd), "auto-allow");
+        assert!(args(&cmd)
+            .windows(2)
+            .any(|w| w == ["--audit-log", "audit.jsonl"]));
+    }
 
     #[test]
     fn default_mcp_bin_guess_is_relative_to_workspace() {

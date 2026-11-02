@@ -36,7 +36,7 @@ use std::sync::Mutex;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
-use denyx_local_mcp::denyx_client::DenyxMcpClient;
+use denyx_local_mcp::denyx_client::{ConfirmMode, DenyxMcpClient};
 use denyx_local_mcp::doctor::{self, DoctorArgs};
 use denyx_local_mcp::openai_compat::{OpenAiCompatChat, OpenAiCompatEmbed};
 use denyx_local_mcp::pipeline::StepConfig;
@@ -109,6 +109,12 @@ struct ServeArgs {
     /// without it, the child uses its own default.
     #[arg(long)]
     audit_log: Option<PathBuf>,
+
+    /// How the child denyx-mcp answers the policy's `requires_approval`
+    /// gates. No human answers prompts in this loop, so the default
+    /// refuses them; `auto-allow` approves every such call.
+    #[arg(long, value_enum, default_value_t = ConfirmMode::AutoDeny)]
+    confirm_mode: ConfirmMode,
 
     /// Append per-step trace lines (JSON) to this file for analysis.
     #[arg(long)]
@@ -243,8 +249,13 @@ fn serve(cli: ServeArgs) -> Result<()> {
         }
     }
 
-    let denyx = DenyxMcpClient::spawn(&cli.mcp_bin, &cli.policy, cli.audit_log.as_deref())
-        .context("spawn child denyx-mcp")?;
+    let denyx = DenyxMcpClient::spawn(
+        &cli.mcp_bin,
+        &cli.policy,
+        cli.audit_log.as_deref(),
+        cli.confirm_mode,
+    )
+    .context("spawn child denyx-mcp")?;
 
     // Cross-cutting consistency check: load the same policy file the
     // child denyx-mcp loads, run it through the project diagnosis,
