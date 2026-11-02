@@ -127,27 +127,16 @@ pub(crate) fn wire_pre_exec(
     read_paths: Vec<PathBuf>,
     write_paths: Vec<PathBuf>,
     deny_network: bool,
-    best_effort: bool,
 ) {
     unsafe {
         cmd.pre_exec(move || {
             // Landlock first (it also sets no_new_privs), then the
-            // seccomp syscall denylist as a second layer.
-            let outcome = apply(&read_paths, &write_paths, deny_network)
-                .map_err(|e| std::io::Error::other(format!("landlock: {e}")))
-                .and_then(|()| {
-                    crate::seccomp::apply()
-                        .map_err(|e| std::io::Error::other(format!("seccomp: {e}")))
-                });
-            match outcome {
-                Ok(()) => Ok(()),
-                // best_effort is the confine-by-default (Auto) path: a
-                // child the kernel can't confine still runs, unconfined.
-                // Explicit sandbox = "landlock" passes false and fails
-                // the spawn instead.
-                Err(_) if best_effort => Ok(()),
-                Err(e) => Err(e),
-            }
+            // seccomp syscall denylist as a second layer. Either
+            // failing aborts the spawn: once the caller has decided to
+            // confine, a child that could not be confined must not run.
+            apply(&read_paths, &write_paths, deny_network)
+                .map_err(|e| std::io::Error::other(format!("landlock: {e}")))?;
+            crate::seccomp::apply().map_err(|e| std::io::Error::other(format!("seccomp: {e}")))
         });
     }
 }
@@ -203,7 +192,13 @@ fn apply(
     // `net.*` Starlark gate is still the control for THAT channel;
     // this only ever concerns ambient subprocess network access).
 
-    created.restrict_self()?;
+    // BestEffort compatibility turns a kernel (or container seccomp
+    // profile) that refuses Landlock into a successful no-op. The
+    // status is the only signal that nothing was enforced.
+    let status = created.restrict_self()?;
+    if status.ruleset == landlock::RulesetStatus::NotEnforced {
+        anyhow::bail!("Landlock ruleset was not enforced by the kernel");
+    }
     Ok(())
 }
 
@@ -264,6 +259,55 @@ mod tests {
             .handle_access(AccessNet::from_all(ABI::V4))
             .and_then(|r| r.create())
             .is_ok()
+    }
+
+    /// Make every Landlock syscall fail with EPERM in the calling
+    /// (forked) process, the way a container seccomp profile that
+    /// predates Landlock does.
+    fn block_landlock_syscalls() -> std::io::Result<()> {
+        use seccompiler::{apply_filter, BpfProgram, SeccompAction, SeccompFilter, TargetArch};
+        #[cfg(target_arch = "x86_64")]
+        let arch = TargetArch::x86_64;
+        #[cfg(target_arch = "aarch64")]
+        let arch = TargetArch::aarch64;
+        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let rules = [
+            libc::SYS_landlock_create_ruleset,
+            libc::SYS_landlock_add_rule,
+            libc::SYS_landlock_restrict_self,
+        ]
+        .into_iter()
+        .map(|nr| (nr, vec![]))
+        .collect();
+        let filter = SeccompFilter::new(
+            rules,
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EPERM as u32),
+            arch,
+        )
+        .map_err(std::io::Error::other)?;
+        let prog: BpfProgram = filter.try_into().map_err(std::io::Error::other)?;
+        apply_filter(&prog).map_err(std::io::Error::other)
+    }
+
+    /// AEG-PEN-R5-004: when the kernel advertises Landlock but the
+    /// restriction cannot be installed, the child must not run.
+    #[test]
+    fn spawn_fails_closed_when_landlock_cannot_be_applied() {
+        if skip_if_unavailable() {
+            return;
+        }
+        let mut cmd = std::process::Command::new("true");
+        unsafe {
+            cmd.pre_exec(block_landlock_syscalls);
+        }
+        wire_pre_exec(&mut cmd, vec![], vec![], true);
+        assert!(
+            cmd.status().is_err(),
+            "child ran unconfined although Landlock could not be applied"
+        );
     }
 
     fn skip_if_unavailable() -> bool {

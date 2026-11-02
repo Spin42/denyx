@@ -665,6 +665,17 @@ pub(crate) fn emit_with_taint_scrub(
     audit.emit(event);
 }
 
+/// `sandbox = "auto"` on a host without Landlock runs the child
+/// unconfined. That is the mode's contract, but it must never be
+/// silent: the operator sees, per spawn, that the OS layer is absent.
+pub(crate) fn warn_auto_sandbox_unconfined(argv0: &str) {
+    eprintln!(
+        "denyx: warning: [subprocess].sandbox = \"auto\" but Landlock is unavailable \
+         on this host; running {argv0:?} without OS confinement. Set sandbox = \
+         \"landlock\" or \"bwrap\" to refuse instead."
+    );
+}
+
 /// Refuse an output-producing call if any of `args` carries a value
 /// matching a tainted local-only substring (or a documented sibling
 /// transform), preventing local-only data from leaking across the
@@ -1052,10 +1063,10 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                             read_paths,
                             write_paths,
                             deny_network,
-                            true,
                         );
                         cmd.output()
                     } else {
+                        warn_auto_sandbox_unconfined(&argv[0]);
                         let mut cmd = std::process::Command::new(&argv[0]);
                         cmd.args(&argv[1..]);
                         cmd.env_clear();
@@ -1067,6 +1078,7 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
+                    warn_auto_sandbox_unconfined(&argv[0]);
                     let mut cmd = std::process::Command::new(&argv[0]);
                     cmd.args(&argv[1..]);
                     cmd.env_clear();
@@ -1125,7 +1137,6 @@ fn register_builtins(builder: &mut GlobalsBuilder) {
                         read_paths,
                         write_paths,
                         deny_network,
-                        false,
                     );
                     cmd.output()
                 }

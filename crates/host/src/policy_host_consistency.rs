@@ -534,7 +534,12 @@ const CODE_RUNNER_COMMANDS: &[&str] = &[
 fn check_unsandboxed_code_runners(file: &denyx_policy::PolicyFile) -> Vec<ConsistencyIssue> {
     // Without an OS sandbox only: landlock/bwrap confine the child to
     // the policy's view even if it ignores the argv gate.
-    if file.subprocess.sandbox != denyx_policy::SandboxMode::None {
+    let confined = match file.subprocess.sandbox {
+        denyx_policy::SandboxMode::None => false,
+        denyx_policy::SandboxMode::Auto => denyx_policy::landlock_available(),
+        denyx_policy::SandboxMode::Bwrap | denyx_policy::SandboxMode::Landlock => true,
+    };
+    if confined {
         return Vec::new();
     }
     // Only when the agent can author the program the runner executes.
@@ -1138,6 +1143,7 @@ name = 't'
 [filesystem]
 write_allow = ['src/**']
 [subprocess]
+sandbox = 'none'
 allow_commands = ['python3', 'git', 'make']
 deny_commands = ['!python3']
 "#,

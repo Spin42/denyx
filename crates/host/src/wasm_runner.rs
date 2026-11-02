@@ -1651,10 +1651,10 @@ impl WasmRunner {
                                         read_paths,
                                         write_paths,
                                         deny_network,
-                                        true,
                                     );
                                     cmd.output()
                                 } else {
+                                    crate::warn_auto_sandbox_unconfined(&argv[0]);
                                     let mut cmd = std::process::Command::new(&argv[0]);
                                     cmd.args(&argv[1..]);
                                     cmd.env_clear();
@@ -1666,6 +1666,7 @@ impl WasmRunner {
                             }
                             #[cfg(not(target_os = "linux"))]
                             {
+                                crate::warn_auto_sandbox_unconfined(&argv[0]);
                                 let mut cmd = std::process::Command::new(&argv[0]);
                                 cmd.args(&argv[1..]);
                                 cmd.env_clear();
@@ -1709,7 +1710,6 @@ impl WasmRunner {
                                     read_paths,
                                     write_paths,
                                     deny_network,
-                                    false,
                                 );
                                 cmd.output()
                             }
